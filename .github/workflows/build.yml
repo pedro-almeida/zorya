@@ -1,0 +1,52 @@
+name: Build & Release Binaries
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build Cross-Platform Binaries
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          check-latest: true
+
+      - name: Verify dependencies
+        run: |
+          go mod tidy
+          go vet ./...
+
+      - name: Compile Windows amd64 binary
+        env:
+          CGO_ENABLED: 0
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          mkdir -p dist
+          go build -ldflags="-s -w" -o dist/zorya-windows-amd64.exe ./cmd/zorya
+
+      - name: Compile Linux amd64 binary
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go build -ldflags="-s -w" -o dist/zorya-linux-amd64 ./cmd/zorya
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: zorya-binaries
+          path: |
+            dist/zorya-windows-amd64.exe
+            dist/zorya-linux-amd64

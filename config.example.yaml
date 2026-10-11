@@ -1,0 +1,34 @@
+# Zorya (Зоря) Configuration File
+# Copy this file to config.yaml and customize as needed.
+
+server:
+  host: "0.0.0.0"
+  port: 9876
+  # Authentication token for Bearer authentication. Leave empty to disable auth for local/trusted networks.
+  auth_token: "zorya_secret_token_change_me"
+
+node:
+  # Friendly name of the edge node (leave empty for automatic detection)
+  name: ""
+  # Operational role: STANDALONE, MASTER, or WORKER
+  role: "STANDALONE"
+  # Master coordinator address if operating in WORKER role (e.g. "100.106.120.35:9876")
+  master_addr: ""
+  # Explicit Tailscale IPv4 address (leave empty for auto-discovery in 100.64.0.0/10)
+  tailscale_ip: ""
+
+hardware:
+  # Acceleration backend: auto, cuda, vulkan, cpu
+  backend: "auto"
+  # Maximum thermal throttle limit in Celsius
+  max_temperature_c: 85.0
+  # Cool down recovery threshold in Celsius
+  cooldown_temperature_c: 75.0
+
+processing:
+  # Default output format: webp or jpg
+  default_format: "webp"
+  # Output quality (1-100)
+  quality: 90
+  # Maximum concurrent decode/processing tasks
+  max_concurrency: 4
