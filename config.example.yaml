@@ -1,34 +1,38 @@
-# Zorya (Зоря) Configuration File
-# Copy this file to config.yaml and customize as needed.
+# =============================================================================
+# ZORYA RAW COMPUTE ENGINE - Example Configuration v1.0.0
+# Autonomous RAW Coprocessor & Distributed Tailscale Mesh Node
+# =============================================================================
 
 server:
   host: "0.0.0.0"
   port: 9876
-  # Authentication token for Bearer authentication. Leave empty to disable auth for local/trusted networks.
-  auth_token: "zorya_secret_token_change_me"
+  auth_token: "zorya-master-token-9876"
+  listen_mode: "tailscale_all"  # "localhost" (127.0.0.1) or "tailscale_all" (0.0.0.0 / Tailscale)
 
 node:
-  # Friendly name of the edge node (leave empty for automatic detection)
-  name: ""
-  # Operational role: STANDALONE, MASTER, or WORKER
-  role: "STANDALONE"
-  # Master coordinator address if operating in WORKER role (e.g. "100.106.120.35:9876")
-  master_addr: ""
-  # Explicit Tailscale IPv4 address (leave empty for auto-discovery in 100.64.0.0/10)
-  tailscale_ip: ""
+  name: "PC Desktop - RTX Accelerator"
+  role: "STANDALONE"            # MASTER, WORKER, STANDALONE
+  master_addr: ""               # IP e porta do Master caso opere como WORKER
+  tailscale_ip: ""              # Vazio para auto-detecção na faixa 100.64.0.0/10
 
 hardware:
-  # Acceleration backend: auto, cuda, vulkan, cpu
-  backend: "auto"
-  # Maximum thermal throttle limit in Celsius
-  max_temperature_c: 85.0
-  # Cool down recovery threshold in Celsius
-  cooldown_temperature_c: 75.0
+  cpu_cores: 8                  # Núcleos de CPU alocados para decodificação
+  gpu_enabled: true             # Aceleração por GPU (CUDA / Vulkan)
+  gpu_type: "auto"              # "auto", "cuda", "vulkan", "cpu"
+  vram_limit_gb: 4.0            # Teto de alocação de memória gráfica VRAM
+  ram_limit_gb: 8.0             # Teto de buffers de lote na memória RAM
+  max_temperature_c: 85.0       # Teto térmico de proteção do hardware
+  cooldown_temperature_c: 75.0  # Temperatura de retomada após aquecimento
+
+ai:
+  gemini_api_key: ""            # Chave Google Gemini (Camada gratuita - Zero VRAM Local)
+  groq_api_key: ""              # Chave Groq (Opcional - Zero VRAM Local)
+
+os:
+  autostart_windows: true       # Iniciar silenciosamente com o Windows (--background)
+  background_mode: true
 
 processing:
-  # Default output format: webp or jpg
-  default_format: "webp"
-  # Output quality (1-100)
-  quality: 90
-  # Maximum concurrent decode/processing tasks
-  max_concurrency: 4
+  default_format: "webp"        # Formato de entrega: "webp" ou "jpeg"
+  quality: 90                   # Qualidade percentual de compressão (1-100)
+  max_concurrency: 8            # Concorrência paralela máxima

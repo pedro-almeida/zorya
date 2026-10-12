@@ -35,13 +35,9 @@ jobs:
           go-version: '1.22'
           check-latest: true
 
-      - name: Install Dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libraw-dev gcc
-
-      - name: Build Binary
+      - name: Build Binary (Pure Go / Zero-CGO)
+        env:
+          CGO_ENABLED: 0
         run: |
           go mod tidy
           go build -v -ldflags="-s -w" -o ${{ matrix.binary_name }} ./cmd/zorya

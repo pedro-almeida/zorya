@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Zorya (Зоря) — Coprocessador de Aceleração RAW</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Top Header -->
+    <header class="top-nav">
+      <div class="nav-brand">
+        <div class="brand-symbol">З</div>
+        <div class="brand-text">
+          <h1>Zorya <span class="version-tag">v1.0.0</span></h1>
+          <p class="tagline">Usinagem de Imagens RAW &bull; Nó Coprocessador</p>
+        </div>
+      </div>
+
+      <div class="nav-controls">
+        <div class="status-pill" id="status-pill">
+          <span class="status-dot"></span>
+          <span id="status-label">Carregando...</span>
+        </div>
+        <nav class="nav-tabs">
+          <button class="tab-btn active" data-tab="config">Painel de Controle</button>
+          <button class="tab-btn" data-tab="about">Sobre & Filosofia</button>
+        </nav>
+      </div>
+    </header>
+
+    <!-- Main Container -->
+    <main class="content-container">
+
+      <!-- TAB 1: PAINEL DE CONTROLE -->
+      <section id="tab-config" class="tab-content active">
+
+        <!-- Live Telemetry Banner -->
+        <div class="telemetry-bar">
+          <div class="tele-item">
+            <span class="tele-label">Processador (CPU)</span>
+            <span class="tele-val" id="tele-cpu-model">Detectando...</span>
+            <span class="tele-sub" id="tele-cpu-load">0% em uso</span>
+          </div>
+          <div class="tele-item">
+            <span class="tele-label">Memória RAM</span>
+            <span class="tele-val" id="tele-ram-stat">0 GB / 0 GB</span>
+            <span class="tele-sub" id="tele-ram-sub">Buffers alocados</span>
+          </div>
+          <div class="tele-item">
+            <span class="tele-label">Acelerador Gráfico</span>
+            <span class="tele-val" id="tele-gpu-stat">CUDA / Vulkan</span>
+            <span class="tele-sub" id="tele-gpu-temp">0&deg;C</span>
+          </div>
+          <div class="tele-item">
+            <span class="tele-label">Malha Tailscale</span>
+            <span class="tele-val" id="tele-ts-ip">100.x.x.x</span>
+            <span class="tele-sub" id="tele-ts-status">Conectado</span>
+          </div>
+        </div>
+
+        <form id="zorya-form" onsubmit="return false;">
+
+          <div class="panels-grid">
+
+            <!-- SEÇÃO 1: ALOCAÇÃO DE HARDWARE -->
+            <div class="card-panel">
+              <div class="panel-header">
+                <div class="panel-icon">&#9881;</div>
+                <div>
+                  <h2>Alocação de Recursos de Hardware</h2>
+                  <p>Controle fino de estresse computacional e tetos térmicos</p>
+                </div>
+              </div>
+
+              <!-- Slider CPU -->
+              <div class="form-group">
+                <div class="label-row">
+                  <label for="cpu_cores">Núcleos da CPU Alocados</label>
+                  <span class="range-val" id="cpu_cores_val">4 núcleos</span>
+                </div>
+                <input type="range" id="cpu_cores" name="cpu_cores" min="1" max="16" value="4">
+                <div class="field-hint">Padrão recomendado: 50% dos núcleos lógicos para manter o sistema responsivo.</div>
+              </div>
+
+              <!-- Switch GPU -->
+              <div class="form-group">
+                <div class="switch-row">
+                  <div>
+                    <label class="switch-title" for="gpu_enabled">Aceleração Nativa por GPU</label>
+                    <div class="field-hint">Habilita kernels paralelos NVIDIA CUDA ou Vulkan Compute</div>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="gpu_enabled" name="gpu_enabled" checked>
+                    <span class="slider round"></span>
+                  </label>
+                </div>
+              </div>
+
+              <!-- Slider VRAM -->
+              <div class="form-group" id="vram-group">
+                <div class="label-row">
+                  <label for="vram_limit_gb">Teto Máximo de VRAM da GPU</label>
+                  <span class="range-val" id="vram_limit_val">4.0 GB</span>
+                </div>
+                <input type="range" id="vram_limit_gb" name="vram_limit_gb" min="1.0" max="24.0" step="0.5" value="4.0">
+                <div class="field-hint">Limite de alocação de texturas e buffers na memória gráfica de vídeo.</div>
+              </div>
+
+              <!-- Slider RAM -->
+              <div class="form-group">
+                <div class="label-row">
+                  <label for="ram_limit_gb">Limite de Memória RAM para Lotes</label>
+                  <span class="range-val" id="ram_limit_val">8.0 GB</span>
+                </div>
+                <input type="range" id="ram_limit_gb" name="ram_limit_gb" min="2.0" max="64.0" step="1.0" value="8.0">
+                <div class="field-hint">Reserva máxima para descompactação RAW em lote na memória física.</div>
+              </div>
+            </div>
+
+            <!-- SEÇÃO 2: AUXÍLIO DE IA EM NUVEM -->
+            <div class="card-panel">
+              <div class="panel-header">
+                <div class="panel-icon">&#9729;</div>
+                <div>
+                  <h2>Auxílio de IA em Nuvem <span class="badge-accent">Zero VRAM Local</span></h2>
+                  <p>Inferência externa gratuita para legendagem e indexação sem consumir a GPU</p>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label for="gemini_api_key">Google Gemini API Key (Camada Gratuita)</label>
+                <div class="input-with-action">
+                  <input type="password" id="gemini_api_key" name="gemini_api_key" placeholder="AIzaSy..." autocomplete="off">
+                  <button type="button" class="btn-icon reveal-btn" data-target="gemini_api_key" title="Mostrar/Ocultar">&#128065;</button>
+                </div>
+                <div class="field-hint">Utilizada para transcrição inteligente de metadados e assistência estética.</div>
+              </div>
+
+              <div class="form-group">
+                <label for="groq_api_key">Groq API Key (Opcional - Ultrarrápida)</label>
+                <div class="input-with-action">
+                  <input type="password" id="groq_api_key" name="groq_api_key" placeholder="gsk_..." autocomplete="off">
+                  <button type="button" class="btn-icon reveal-btn" data-target="groq_api_key" title="Mostrar/Ocultar">&#128065;</button>
+                </div>
+                <div class="field-hint">Alternativa de altíssima velocidade para inferências textuais LLaMA / Mixtral.</div>
+              </div>
+            </div>
+
+            <!-- SEÇÃO 3: CONECTIVIDADE & TAILSCALE -->
+            <div class="card-panel">
+              <div class="panel-header">
+                <div class="panel-icon">&#128279;</div>
+                <div>
+                  <h2>Conectividade & Malha Tailscale</h2>
+                  <p>Acesso seguro ponto a ponto criptografado sem exposição pública</p>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label for="listen_mode">Seletor de Interface de Escuta</label>
+                <select id="listen_mode" name="listen_mode">
+                  <option value="tailscale_all">Localhost + Malha Tailscale (Recomendado)</option>
+                  <option value="localhost">Apenas Localhost (127.0.0.1)</option>
+                </select>
+                <div class="field-hint">Em 'Localhost + Tailscale', o Zorya atende requisições de outros dispositivos da sua conta.</div>
+              </div>
+
+              <div class="form-group">
+                <label>Endereço e URL do Nó na Rede</label>
+                <div class="input-with-action">
+                  <input type="text" id="node_url_display" readonly value="http://127.0.0.1:9876">
+                  <button type="button" class="btn-secondary copy-btn" data-copy="node_url_display">Copiar URL</button>
+                </div>
+                <div class="field-hint">Cole esta URL no painel Svitanok ou em outros clientes de processamento.</div>
+              </div>
+
+              <div class="form-group">
+                <label for="auth_token">Token de Autorização (Bearer Token)</label>
+                <div class="input-with-action">
+                  <input type="text" id="auth_token" name="auth_token" value="zorya-master-token-9876">
+                  <button type="button" class="btn-secondary copy-btn" data-copy="auth_token">Copiar Token</button>
+                </div>
+                <div class="field-hint">Chave de autenticação passada no cabeçalho <code>Authorization: Bearer &lt;token&gt;</code>.</div>
+              </div>
+            </div>
+
+            <!-- SEÇÃO 4: SISTEMA OPERACIONAL -->
+            <div class="card-panel">
+              <div class="panel-header">
+                <div class="panel-icon">&#9889;</div>
+                <div>
+                  <h2>Sistema Operacional</h2>
+                  <p>Integração de inicialização e ciclo de vida do serviço</p>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <div class="switch-row">
+                  <div>
+                    <label class="switch-title" for="autostart_windows">Iniciar com o Windows</label>
+                    <div class="field-hint">Executa silenciosamente em segundo plano ao ligar o computador (flag <code>--background</code>)</div>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="autostart_windows" name="autostart_windows" checked>
+                    <span class="slider round"></span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="system-status-box">
+                <div class="status-indicator-dot"></div>
+                <div class="status-indicator-text">
+                  <strong>Serviço Ativo e Saudável</strong>
+                  <span>Porta de escuta padrão: <code>9876</code> &bull; Protocolo HTTP REST v1</span>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- Bottom Action Bar -->
+          <div class="save-bar">
+            <div class="save-meta">
+              <span>Configuração salva em <code>config.yaml</code></span>
+              <span id="save-status" class="save-toast"></span>
+            </div>
+            <button type="button" id="save-btn" class="btn-primary">
+              <span class="btn-text">Salvar e Aplicar Imediatamente</span>
+            </button>
+          </div>
+
+        </form>
+
+      </section>
+
+      <!-- TAB 2: SOBRE & FILOSOFIA -->
+      <section id="tab-about" class="tab-content">
+        <div class="about-grid">
+
+          <div class="card-panel about-main">
+            <div class="panel-header">
+              <div class="panel-icon">&#10024;</div>
+              <div>
+                <h2>A Origem de Zorya (Зоря)</h2>
+                <p>Mitologia Eslava & Ética Kantiana</p>
+              </div>
+            </div>
+
+            <div class="about-text">
+              <p>
+                Na mitologia eslava e ucraniana, <strong>Zorya</strong> (<em>Зоря</em> — "Estrela da Alvorada" ou "Aurora") é a divindade celestial guardiã dos portões do firmamento. Toda manhã, Zorya abre solenemente as portas celestes para libertar a carruagem do sol e permitir a chegada do amanhecer — o <strong>Svitanok</strong> (<em>Світанок</em>).
+              </p>
+              <p>
+                Como guardiã incansável da luz, ela vigia as constelações para que o universo permaneça em equilíbrio harmônico. Quando a escuridão se dissipa, é a força de Zorya que catalisa a aurora.
+              </p>
+              <div class="philosophical-quote">
+                <blockquote>
+                  "Age de tal maneira que a máxima da tua vontade possa sempre valer ao mesmo tempo como princípio de uma legislação universal."
+                </blockquote>
+                <cite>&mdash; Immanuel Kant, Crítica da Razão Prática (1788)</cite>
+              </div>
+              <p>
+                Transposta para a engenharia de software, Zorya materializa o <strong>Imperativo Categórico kantiano</strong> na computação distribuída: um nó de computação soberano, autônomo e stateless, que doa seu poder computacional (processadores multithread e aceleradores gráficos) para a malha criativa sem aprisionamentos tecnológicos ou amarras proprietárias.
+              </p>
+            </div>
+
+            <div class="author-box">
+              <div class="author-details">
+                <h3>Pedro Luís Tenório Rocha de Almeida</h3>
+                <p>Engenheiro e Arquiteto de Sistemas &bull; Espectro Ipê Soluções Tecnológicas</p>
+                <div class="author-links">
+                  <a href="https://espectroipe.com.br" target="_blank" rel="noopener">espectroipe.com.br</a>
+                  &bull;
+                  <a href="https://github.com/pedro-almeida/zorya" target="_blank" rel="noopener">github.com/pedro-almeida/zorya</a>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card-panel">
+            <div class="panel-header">
+              <div class="panel-icon">&#128220;</div>
+              <div>
+                <h2>Licença de Código Aberto</h2>
+                <p>Termos oficiais MIT License</p>
+              </div>
+            </div>
+
+            <div class="license-box">
+<pre>MIT License
+
+Copyright (c) 2026 Pedro Luís Tenório Rocha de Almeida
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.</pre>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="/ui/app.js"></script>
+</body>
+</html>

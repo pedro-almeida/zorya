@@ -1,4 +1,4 @@
-# Zorya (Зоря)
+# Zorya (Зоря) — Coprocessador de Aceleração RAW v1.0.0
 
 High-performance edge daemon for hardware-accelerated RAW image processing (GPU/CUDA/Vulkan) and distributed photography pipelines.
 
@@ -8,132 +8,81 @@ High-performance edge daemon for hardware-accelerated RAW image processing (GPU/
 
 ---
 
-## 🌟 Overview
+## 🌟 Visão Geral (Overview)
 
-**Zorya (Зоря)** is an autonomous, lightweight edge computing daemon written in Go. It turns workstations, dedicated servers, and edge devices equipped with NVIDIA CUDA, Vulkan-capable GPUs, or NPUs into high-throughput RAW photography processing nodes.
+**Zorya (Зоря)** é um daemon leve, autônomo e de alta performance escrito em Go. Ele transforma computadores pessoais, servidores dedicados e nós de borda equipados com GPUs NVIDIA (CUDA / Vulkan) ou CPUs multithread em usinas de processamento RAW fotográfico de alta vazão.
 
-Operating over encrypted peer-to-peer overlay networks (such as **Tailscale**) or local networks, Zorya can run in three operational modes:
-- **`STANDALONE`**: Default self-contained node that serves local HTTP API requests and processes RAW files directly on local accelerators.
-- **`MASTER`**: Central coordinator that accepts photoshoot batches, fragments them into atomic tasks, monitors worker thermals, and orchestrates task dispatching.
-- **`WORKER`**: Dedicated edge compute node that pulls processing tasks from a master, decodes and grades RAW files via hardware acceleration, and reports back telemetry and developed previews.
+Operando como coprocessador local (via `localhost`) ou através de malhas de rede criptografadas ponto a ponto (**Tailscale**), o Zorya integra-se perfeitamente com o ecossistema criativo **Svitanok** e outros sistemas fotográficos.
 
----
-
-## 🚀 Features
-
-- **Multi-Backend Acceleration**: Native hardware capability inspection supporting NVIDIA CUDA, Vulkan, Apple Silicon, and multi-core CPU fallbacks.
-- **Zero-Config Mesh Networking**: Automatic detection of Tailscale CGNAT IPs (`100.64.0.0/10`) for secure peer-to-peer mesh clustering without port forwarding.
-- **Thermal Guardian**: Real-time telemetry monitoring (GPU/CPU temperature and battery health) with automatic throttling and task requeueing to prevent hardware overheating.
-- **Production REST API**: Clean endpoints for health checks, system inspection, RAW image decoding, and cluster orchestration.
-- **Bearer Token Security**: Configurable Bearer authorization token protection.
+Acesse o painel web embarcado no seu navegador: **`http://localhost:9876`**.
 
 ---
 
-## 📡 HTTP Endpoints
+## 🎨 Painel Web Embarcado Svitlo
 
-| Method | Endpoint | Description | Auth Required |
+O Zorya v1.0.0 traz uma interface web completa e responsiva embutida diretamente no executável binário (`//go:embed`), desenhada com a estética calorosa e minimalista da paleta **Svitlo** (`#F7F4EF`, `#2C1F14`, `#8B5E3C`, `#5C3D1E`):
+
+1. **Alocação de Recursos de Hardware**:
+   - Slider de núcleos de CPU alocados (padrão: 50% dos núcleos lógicos do processador).
+   - Chave de ativação de GPU (CUDA / Vulkan) com slider de teto máximo de VRAM (ex: 4 GB).
+   - Limite de memória RAM física para retenção de buffers em lote.
+2. **Auxílio de IA em Nuvem (Zero VRAM Local)**:
+   - Campos seguros com botão de revelação para chave de API do **Google Gemini** (camada gratuita para metadados e legendagem) e **Groq**.
+3. **Conectividade & Malha Tailscale**:
+   - Detecção automática de IP Tailscale na faixa `100.64.0.0/10`.
+   - Seletor de interface de escuta: *Apenas Localhost (127.0.0.1)* ou *Localhost + Malha Tailscale (0.0.0.0)*.
+   - Token de autorização Bearer com botão de cópia com um clique para colar no Svitanok.
+4. **Sistema Operacional**:
+   - Opção para iniciar automaticamente com o Windows em segundo plano (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` com `--background`).
+5. **Sobre & Filosofia**:
+   - Narrativa da deusa eslava Zorya (guardiã da aurora que abre as portas para o *Svitanok*) combinada ao Imperativo Categórico de Immanuel Kant.
+   - Licença MIT na íntegra.
+
+---
+
+## 📡 Endpoints REST da API v1
+
+| Método | Rota | Descrição | Formato |
 |---|---|---|---|
-| `GET` | `/health` | Liveness check, uptime, and active accelerator status | No |
-| `GET` | `/api/v1/system/info` | Detailed hardware telemetry (GPU, CUDA, Vulkan, CPU cores, thermal state) | Optional / Bearer |
-| `POST` | `/api/v1/raw/decode` | Decodes a RAW image (DNG, CR3, ARW, NEF) from URL or Base64 into WebP/JPEG | Optional / Bearer |
-| `GET` | `/api/grid/status` | Cluster topology, active workers, queue status, and throughput (PPM) | No |
-| `POST` | `/api/grid/batch/submit` | Enqueues a batch of RAW photos for cluster distribution | No |
-| `GET` | `/api/grid/task/pull` | Worker endpoint to pull the next pending task | No |
-| `POST` | `/api/grid/task/complete` | Worker endpoint to submit processed results | No |
+| `GET` | `/` | Interface Web Svitlo do nó | HTML5 / CSS / JS embutidos |
+| `GET` | `/health` | Checagem de integridade, versão v1.0.0 e tempo de atividade (uptime) | JSON |
+| `GET` | `/api/v1/system/info` | Telemetria detalhada de CPU real, RAM física, GPU e IP Tailscale | JSON |
+| `POST` | `/api/v1/raw/decode` | Decodificação RAW de alta vazão via GPU/CPU | `multipart/form-data` ou JSON &rarr; Stream binário WebP/JPEG |
+| `POST` | `/api/v1/config/save` | Atualização dinâmica de sliders, chaves e registro no `config.yaml` | JSON |
+| `GET` | `/api/grid/status` | Topologia da malha P2P, nós ativos e taxa de transferência | JSON |
+| `POST` | `/api/grid/batch/submit`| Enfileira lote fotográfico distribuído para a malha | JSON |
 
-### RAW Decode Request Example
+### Exemplo de Decodificação via cURL
 
-`POST /api/v1/raw/decode`
-```json
-{
-  "raw_id": "shot-0042",
-  "filename": "DSC04892.ARW",
-  "raw_url": "https://storage.example.com/photos/DSC04892.ARW",
-  "result_format": "webp",
-  "preset_params": {
-    "exposure": 0.35,
-    "highlights": -20,
-    "shadows": +15,
-    "temperature": 5600
-  }
-}
-```
-
-Response:
-```json
-{
-  "raw_id": "shot-0042",
-  "filename": "DSC04892.ARW",
-  "status": "success",
-  "result_format": "webp",
-  "result_data": "data:image/webp;base64,...",
-  "width": 1920,
-  "height": 1080,
-  "elapsed_ms": 78,
-  "accelerator": "NVIDIA GeForce RTX (CUDA Ativo)"
-}
+```bash
+# Decodificação direta de arquivo RAW via multipart/form-data retornando WebP binário
+curl -X POST http://localhost:9876/api/v1/raw/decode \
+  -H "Authorization: Bearer zorya-master-token-9876" \
+  -F "file=@foto_camera.ARW" \
+  -F "format=webp" \
+  -F "quality=90" \
+  --output preview.webp
 ```
 
 ---
 
-## 🛠️ Quick Start
+## ⚙️ Execução e Linha de Comando
 
-### 1. Installation & Build
-
-Ensure you have **Go 1.21+** installed:
 ```bash
-git clone https://github.com/pedro-almeida/zorya.git
-cd zorya
+# Execução padrão interativa (abre painel em http://localhost:9876)
+zorya.exe
 
-# Build local executable
-go build -o bin/zorya.exe ./cmd/zorya
+# Execução silenciosa em segundo plano (autostart do Windows)
+zorya.exe --background
+
+# Execução com arquivo de configuração customizado
+zorya.exe --config meu_servidor.yaml --port 9876
 ```
-
-### 2. Configuration
-
-Copy the example configuration:
-```bash
-cp config.example.yaml config.yaml
-```
-
-Adjust port, role, and auth token as required:
-```yaml
-server:
-  host: "0.0.0.0"
-  port: 9876
-  auth_token: "your-secure-token"
-
-node:
-  role: "STANDALONE" # STANDALONE, MASTER, or WORKER
-```
-
-### 3. Execution Guides
-
-#### Running on Localhost (Standalone)
-```bash
-./bin/zorya.exe
-```
-Access `http://127.0.0.1:9876/health` or `http://127.0.0.1:9876/api/v1/system/info`.
-
-#### Running in a Tailscale Mesh Network
-
-1. **Start Master Node on your main workstation or server:**
-   ```bash
-   ./bin/zorya.exe -role MASTER -port 9876 -name "Studio-Master-PC"
-   ```
-   Zorya automatically detects its Tailscale IPv4 address (e.g. `100.106.120.35`).
-
-2. **Start Worker Node(s) on edge machines (e.g., secondary GPU rig, laptop):**
-   ```bash
-   ./bin/zorya.exe -role WORKER -master "100.106.120.35:9876" -name "Worker-Rig-RTX4090"
-   ```
-   Workers immediately register with the master, transmit 5-second heartbeats, and pull tasks automatically.
 
 ---
 
-## 📄 License & Authorship
+## 📜 Licença e Autoria
 
-Distributed under the **MIT License**. See [LICENSE](LICENSE) for more information.
-
-**Author**: Pedro Luís Tenório Rocha de Almeida  
-**Repository**: [github.com/pedro-almeida/zorya](https://github.com/pedro-almeida/zorya)
+- **Autor**: Pedro Luís Tenório Rocha de Almeida
+- **Organização**: [Espectro Ipê Soluções Tecnológicas](https://espectroipe.com.br)
+- **Licença**: [MIT License](LICENSE)

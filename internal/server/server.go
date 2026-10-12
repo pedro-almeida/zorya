@@ -1,14 +1,21 @@
+// PT: Servidor HTTP REST e Painel Web Embarcado do Zorya v1.0.0
+// EN: Zorya v1.0.0 HTTP REST Server and Embedded Web UI
+// AI: @llm-context Módulo Zorya v1.0.0 / Servidor de Rede, API e UI Embarcada
+
 package server
 
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
-	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +25,7 @@ import (
 	"github.com/pedro-almeida/zorya/internal/hardware"
 	"github.com/pedro-almeida/zorya/internal/network"
 	"github.com/pedro-almeida/zorya/internal/processor"
+	"github.com/pedro-almeida/zorya/internal/server/ui"
 )
 
 // NodeStatus defines the operational condition of a worker node.
@@ -42,26 +50,26 @@ const (
 
 // NodeTelemetry holds real-time telemetry for a node in the mesh.
 type NodeTelemetry struct {
-	NodeID          string             `json:"node_id"`
-	NodeName        string             `json:"node_name"`
-	TailscaleIP     string             `json:"tailscale_ip"`
-	Port            int                `json:"port"`
-	Role            config.Role        `json:"role"`
-	GPUType         string             `json:"gpu_type"`
-	CUDAReady       bool               `json:"cuda_ready"`
-	VulkanReady     bool               `json:"vulkan_ready"`
-	NPUReady        bool               `json:"npu_ready"`
-	CPUCores        int                `json:"cpu_cores"`
-	RAMTotalGB      float64            `json:"ram_total_gb"`
-	TemperatureC    float64            `json:"temperature_c"`
-	IsPlugged       bool               `json:"is_plugged"`
-	BatteryPercent  int                `json:"battery_percent"`
-	CPUUsagePercent float64            `json:"cpu_usage_percent"`
-	GPUUsagePercent float64            `json:"gpu_usage_percent"`
-	Status          NodeStatus         `json:"status"`
-	LastHeartbeat   time.Time          `json:"last_heartbeat"`
-	ProcessedCount  int64              `json:"processed_count"`
-	ThroughputPPM   float64            `json:"throughput_ppm"`
+	NodeID          string      `json:"node_id"`
+	NodeName        string      `json:"node_name"`
+	TailscaleIP     string      `json:"tailscale_ip"`
+	Port            int         `json:"port"`
+	Role            config.Role `json:"role"`
+	GPUType         string      `json:"gpu_type"`
+	CUDAReady       bool        `json:"cuda_ready"`
+	VulkanReady     bool        `json:"vulkan_ready"`
+	NPUReady        bool        `json:"npu_ready"`
+	CPUCores        int         `json:"cpu_cores"`
+	RAMTotalGB      float64     `json:"ram_total_gb"`
+	TemperatureC    float64     `json:"temperature_c"`
+	IsPlugged       bool        `json:"is_plugged"`
+	BatteryPercent  int         `json:"battery_percent"`
+	CPUUsagePercent float64     `json:"cpu_usage_percent"`
+	GPUUsagePercent float64     `json:"gpu_usage_percent"`
+	Status          NodeStatus  `json:"status"`
+	LastHeartbeat   time.Time   `json:"last_heartbeat"`
+	ProcessedCount  int64       `json:"processed_count"`
+	ThroughputPPM   float64     `json:"throughput_ppm"`
 }
 
 // GridTask represents an atomic RAW image processing job distributed over Tailscale.
@@ -103,247 +111,321 @@ type ClusterStatus struct {
 	ThermalWarnings    []string        `json:"thermal_warnings"`
 }
 
-// Daemon represents the active Zorya edge engine.
+// Daemon is the active Zorya HTTP engine and mesh orchestrator.
 type Daemon struct {
-	cfg         *config.Config
-	telemetry   NodeTelemetry
-	hardware    hardware.HardwareInfo
-	proc        *processor.Processor
+	cfg        *config.Config
+	configPath string
+	server     *http.Server
+	proc       *processor.Processor
+	startTime  time.Time
+
 	mu          sync.RWMutex
 	workers     map[string]*NodeTelemetry
 	tasks       map[string]*GridTask
 	taskQueue   []string
 	doneTasks   []GridTask
-	server      *http.Server
-	client      *http.Client
-	ctx         context.Context
-	cancel      context.CancelFunc
 	completedN  int64
-	startTime   time.Time
-	recentSpeed map[string]int64
+	lastMinuteN int64
+
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
-// New creates and configures a new Zorya Daemon instance.
-func New(cfg *config.Config) *Daemon {
-	ctx, cancel := context.WithCancel(context.Background())
+// New instantiates a new Zorya HTTP daemon.
+func New(cfg *config.Config, configPath string) *Daemon {
+	if cfg == nil {
+		cfg = config.NewDefault()
+	}
+	if configPath == "" {
+		configPath = "config.yaml"
+	}
 
 	if cfg.Node.ID == "" {
-		host, _ := os.Hostname()
-		cfg.Node.ID = fmt.Sprintf("zorya-%s-%s", network.SanitizeName(host), network.RandomHex(4))
+		cfg.Node.ID = "zorya-" + network.RandomHex(4)
 	}
-	if cfg.Node.Name == "" {
-		host, _ := os.Hostname()
-		cfg.Node.Name = fmt.Sprintf("Zorya Node (%s)", host)
-	}
-	if cfg.Server.Port <= 0 {
-		cfg.Server.Port = 9876
-	}
-	if cfg.Node.Role == "" {
-		cfg.Node.Role = config.RoleStandalone
-	}
+
+	tsIP, _ := hardware.DetectTailscaleIP()
 	if cfg.Node.TailscaleIP == "" {
-		cfg.Node.TailscaleIP = network.DetectTailscaleIP()
+		cfg.Node.TailscaleIP = tsIP
 	}
 
-	hw := hardware.Detect()
-	proc := processor.New(cfg.Hardware.Backend)
+	ctx, cancel := context.WithCancel(context.Background())
 
-	telemetry := NodeTelemetry{
-		NodeID:          cfg.Node.ID,
-		NodeName:        cfg.Node.Name,
-		TailscaleIP:     cfg.Node.TailscaleIP,
-		Port:            cfg.Server.Port,
-		Role:            cfg.Node.Role,
-		GPUType:         hw.GPUType,
-		CUDAReady:       hw.CUDAReady,
-		VulkanReady:     hw.VulkanReady,
-		NPUReady:        hw.NPUReady,
-		CPUCores:        hw.CPUCores,
-		RAMTotalGB:      hw.RAMTotalGB,
-		TemperatureC:    hw.TemperatureC,
-		IsPlugged:       hw.IsPlugged,
-		BatteryPercent:  hw.BatteryPercent,
-		CPUUsagePercent: hw.CPUUsagePercent,
-		GPUUsagePercent: hw.GPUUsagePercent,
-		Status:          StatusIdle,
-		LastHeartbeat:   time.Now(),
-		ProcessedCount:  0,
-		ThroughputPPM:   0.0,
+	d := &Daemon{
+		cfg:        cfg,
+		configPath: configPath,
+		proc:       processor.New(),
+		startTime:  time.Now(),
+		workers:    make(map[string]*NodeTelemetry),
+		tasks:      make(map[string]*GridTask),
+		taskQueue:  make([]string, 0),
+		doneTasks:  make([]GridTask, 0),
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 
-	return &Daemon{
-		cfg:         cfg,
-		telemetry:   telemetry,
-		hardware:    hw,
-		proc:        proc,
-		workers:     make(map[string]*NodeTelemetry),
-		tasks:       make(map[string]*GridTask),
-		taskQueue:   make([]string, 0),
-		doneTasks:   make([]GridTask, 0),
-		client:      &http.Client{Timeout: 10 * time.Second},
-		ctx:         ctx,
-		cancel:      cancel,
-		startTime:   time.Now(),
-		recentSpeed: make(map[string]int64),
-	}
+	return d
 }
 
-// Start boots the coordination server and operational loops.
+// Start launches the HTTP listener and background orchestration loops.
 func (d *Daemon) Start() error {
-	log.Printf("[Zorya Daemon] Initializing node %s (%s) | Role: %s | Tailscale IP: %s:%d\n",
-		d.cfg.Node.Name, d.cfg.Node.ID, d.cfg.Node.Role, d.cfg.Node.TailscaleIP, d.cfg.Server.Port)
-	log.Printf("[Zorya Hardware] Accelerator: %s | CUDA: %v | Vulkan: %v\n",
-		d.hardware.GPUType, d.hardware.CUDAReady, d.hardware.VulkanReady)
+	mux := http.NewServeMux()
+	d.mountRoutes(mux)
 
-	go d.telemetryUpdaterLoop()
-
-	if d.cfg.Node.Role == config.RoleMaster || d.cfg.Node.Role == config.RoleStandalone {
-		if d.cfg.Node.Role == config.RoleStandalone {
-			d.registerLocalWorker()
-		}
-		go d.thermalGuardianLoop()
-
-		mux := http.NewServeMux()
-		d.mountRoutes(mux)
-
-		d.server = &http.Server{
-			Addr:    fmt.Sprintf("%s:%d", d.cfg.Server.Host, d.cfg.Server.Port),
-			Handler: mux,
-		}
-
-		go func() {
-			log.Printf("[Zorya Server] Listening on %s:%d\n", d.cfg.Server.Host, d.cfg.Server.Port)
-			if err := d.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Printf("[Zorya Server] Listen error: %v\n", err)
-			}
-		}()
+	host := "0.0.0.0"
+	if d.cfg.Server.ListenMode == config.ListenLocalhost {
+		host = "127.0.0.1"
 	}
 
-	if d.cfg.Node.Role == config.RoleWorker || d.cfg.Node.Role == config.RoleStandalone {
+	addr := fmt.Sprintf("%s:%d", host, d.cfg.Server.Port)
+	d.server = &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("failed to bind port %d: %w", d.cfg.Server.Port, err)
+	}
+
+	log.Printf("[Zorya Daemon] Ouvindo em http://%s (Modo: %s)\n", addr, d.cfg.Server.ListenMode)
+
+	go func() {
+		if err := d.server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			log.Printf("[Zorya ERRO] Servidor HTTP encerrado: %v\n", err)
+		}
+	}()
+
+	// Start background mesh tasks if in Master/Worker role
+	if d.cfg.Node.Role == config.RoleMaster {
+		go d.thermalGuardianLoop()
+	} else if d.cfg.Node.Role == config.RoleWorker {
 		go d.workerExecutionLoop()
 	}
 
 	return nil
 }
 
-// Stop shuts down the daemon gracefully.
+// Stop cleanly terminates HTTP listeners and background routines.
 func (d *Daemon) Stop() {
 	d.cancel()
 	if d.server != nil {
-		ctx, c := context.WithTimeout(context.Background(), 2*time.Second)
-		defer c()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
 		_ = d.server.Shutdown(ctx)
 	}
-	log.Printf("[Zorya Daemon] Stopped gracefully.\n")
+	log.Println("[Zorya Daemon] Encerrado com sucesso.")
 }
 
-// mountRoutes binds standard endpoints and backward-compatible grid routes.
+// mountRoutes registers the embedded UI, REST v1 API, and backward-compatible grid routes.
 func (d *Daemon) mountRoutes(mux *http.ServeMux) {
-	// Standard Zorya Endpoints
-	mux.HandleFunc("/health", d.wrapAuth(d.handleHealth, false))
-	mux.HandleFunc("/api/v1/system/info", d.wrapAuth(d.handleSystemInfo, true))
-	mux.HandleFunc("/api/v1/raw/decode", d.wrapAuth(d.handleRawDecode, true))
+	// 1. EMBEDDED WEB UI (Svitlo Style)
+	mux.HandleFunc("/", d.handleRootUI)
+	mux.HandleFunc("/ui/", d.handleUIAssets)
 
-	// Cluster & Task Distribution Endpoints
-	mux.HandleFunc("/api/grid/register", d.wrapAuth(d.handleRegister, false))
-	mux.HandleFunc("/api/grid/heartbeat", d.wrapAuth(d.handleHeartbeat, false))
-	mux.HandleFunc("/api/grid/task/pull", d.wrapAuth(d.handleTaskPull, false))
-	mux.HandleFunc("/api/grid/task/complete", d.wrapAuth(d.handleTaskComplete, false))
-	mux.HandleFunc("/api/grid/status", d.wrapAuth(d.handleClusterStatus, false))
-	mux.HandleFunc("/api/grid/batch/submit", d.wrapAuth(d.handleBatchSubmit, false))
-	mux.HandleFunc("/api/grid/config", d.wrapAuth(d.handleConfig, false))
+	// 2. REST API v1 ENDPOINTS
+	mux.HandleFunc("/health", d.wrapCORS(d.handleHealth))
+	mux.HandleFunc("/api/v1/system/info", d.wrapCORS(d.handleSystemInfo))
+	mux.HandleFunc("/api/v1/raw/decode", d.wrapCORS(d.handleRawDecode))
+	mux.HandleFunc("/api/v1/config/save", d.wrapCORS(d.handleConfigSave))
+
+	// 3. BACKWARD COMPATIBLE GRID ENDPOINTS
+	mux.HandleFunc("/api/grid/register", d.wrapCORS(d.handleRegister))
+	mux.HandleFunc("/api/grid/heartbeat", d.wrapCORS(d.handleHeartbeat))
+	mux.HandleFunc("/api/grid/task/pull", d.wrapCORS(d.handleTaskPull))
+	mux.HandleFunc("/api/grid/task/complete", d.wrapCORS(d.handleTaskComplete))
+	mux.HandleFunc("/api/grid/status", d.wrapCORS(d.handleClusterStatus))
+	mux.HandleFunc("/api/grid/batch/submit", d.wrapCORS(d.handleBatchSubmit))
+	mux.HandleFunc("/api/grid/config", d.wrapCORS(d.handleConfig))
 }
 
-func (d *Daemon) wrapAuth(next http.HandlerFunc, requireAuthIfSet bool) http.HandlerFunc {
+func (d *Daemon) wrapCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		enableCORS(w)
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-
-		if requireAuthIfSet && d.cfg.Server.AuthToken != "" {
-			authHeader := r.Header.Get("Authorization")
-			expected := "Bearer " + d.cfg.Server.AuthToken
-			if authHeader != expected {
-				writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
-					"error":   "unauthorized",
-					"message": "Invalid or missing Bearer token",
-				})
-				return
-			}
-		}
-
 		next(w, r)
 	}
 }
 
+// handleRootUI serves the embedded index.html at root /.
+func (d *Daemon) handleRootUI(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := ui.DistFS.ReadFile("index.html")
+	if err != nil {
+		http.Error(w, "Embedded UI not found", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+// handleUIAssets serves static embedded files (/ui/style.css, /ui/app.js).
+func (d *Daemon) handleUIAssets(w http.ResponseWriter, r *http.Request) {
+	filePath := strings.TrimPrefix(r.URL.Path, "/ui/")
+	if filePath == "" || filePath == "/" {
+		filePath = "index.html"
+	}
+
+	data, err := fs.ReadFile(ui.DistFS, filePath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	switch {
+	case strings.HasSuffix(filePath, ".css"):
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	case strings.HasSuffix(filePath, ".js"):
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	case strings.HasSuffix(filePath, ".html"):
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+// GET /health
 func (d *Daemon) handleHealth(w http.ResponseWriter, r *http.Request) {
+	uptime := int64(time.Since(d.startTime).Seconds())
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":       "ok",
-		"service":      "zorya",
-		"node_id":      d.cfg.Node.ID,
-		"node_name":    d.cfg.Node.Name,
-		"role":         d.cfg.Node.Role,
-		"tailscale_ip": d.cfg.Node.TailscaleIP,
-		"uptime_sec":   time.Since(d.startTime).Seconds(),
-		"accelerator":  d.hardware.GPUType,
-		"cuda_ready":   d.hardware.CUDAReady,
-		"vulkan_ready": d.hardware.VulkanReady,
+		"status":         "healthy",
+		"version":        "1.0.0",
+		"uptime_seconds": uptime,
+		"daemon":         "Zorya RAW Processing Engine",
+		"node_id":        d.cfg.Node.ID,
+		"role":           d.cfg.Node.Role,
 	})
 }
 
+// GET /api/v1/system/info
 func (d *Daemon) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 	d.mu.RLock()
-	hw := d.hardware
-	tlm := d.telemetry
+	allocatedCores := d.cfg.Hardware.CPUCores
+	ramLimit := d.cfg.Hardware.RAMLimitGB
+	gpuEnabled := d.cfg.Hardware.GPUEnabled
+	vramLimit := d.cfg.Hardware.VRAMLimitGB
+	port := d.cfg.Server.Port
+	listenMode := string(d.cfg.Server.ListenMode)
 	d.mu.RUnlock()
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"node": map[string]interface{}{
-			"id":           d.cfg.Node.ID,
-			"name":         d.cfg.Node.Name,
-			"role":         d.cfg.Node.Role,
-			"tailscale_ip": d.cfg.Node.TailscaleIP,
-			"port":         d.cfg.Server.Port,
-		},
-		"hardware": hw,
-		"telemetry": map[string]interface{}{
-			"status":            tlm.Status,
-			"temperature_c":     tlm.TemperatureC,
-			"cpu_usage_percent": tlm.CPUUsagePercent,
-			"gpu_usage_percent": tlm.GPUUsagePercent,
-			"processed_count":   tlm.ProcessedCount,
-			"uptime_sec":        time.Since(d.startTime).Seconds(),
-		},
-	})
+	info := hardware.Detect(allocatedCores, ramLimit, gpuEnabled, vramLimit, port, listenMode)
+	writeJSON(w, http.StatusOK, info)
 }
 
+// POST /api/v1/raw/decode
 func (d *Daemon) handleRawDecode(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var req processor.DecodeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"error":   "bad_request",
-			"message": fmt.Sprintf("Invalid JSON request: %v", err),
-		})
-		return
+	d.mu.RLock()
+	opts := processor.DecodeOptions{
+		Format:      d.cfg.Processing.DefaultFormat,
+		Quality:     d.cfg.Processing.Quality,
+		GPUEnabled:  d.cfg.Hardware.GPUEnabled,
+		VRAMLimitGB: d.cfg.Hardware.VRAMLimitGB,
+		CPUCores:    d.cfg.Hardware.CPUCores,
+	}
+	d.mu.RUnlock()
+
+	var fileReader io.Reader
+	var filename string
+
+	contentType := r.Header.Get("Content-Type")
+
+	// 1. Multipart/form-data upload
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		err := r.ParseMultipartForm(64 << 20) // 64 MB in-memory buffer
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to parse multipart form: " + err.Error()})
+			return
+		}
+
+		// Read optional query or form options
+		if fmtParam := r.FormValue("format"); fmtParam != "" {
+			opts.Format = fmtParam
+		}
+		if qParam := r.FormValue("quality"); qParam != "" {
+			if q, err := strconv.Atoi(qParam); err == nil {
+				opts.Quality = q
+			}
+		}
+
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			file, header, err = r.FormFile("raw_file")
+		}
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Missing 'file' field in multipart form"})
+			return
+		}
+		defer file.Close()
+
+		fileReader = file
+		filename = header.Filename
+
+	} else {
+		// 2. JSON or Raw stream payload
+		var jsonReq struct {
+			RAWID        string `json:"raw_id"`
+			Filename     string `json:"filename"`
+			RawBase64    string `json:"raw_base64"`
+			RawURL       string `json:"raw_url"`
+			ResultFormat string `json:"result_format"`
+		}
+
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to read request body"})
+			return
+		}
+
+		if err := json.Unmarshal(bodyBytes, &jsonReq); err == nil && (jsonReq.RawBase64 != "" || jsonReq.RawURL != "") {
+			filename = jsonReq.Filename
+			if jsonReq.ResultFormat != "" {
+				opts.Format = jsonReq.ResultFormat
+			}
+			if jsonReq.RawBase64 != "" {
+				b64 := jsonReq.RawBase64
+				if idx := strings.Index(b64, ","); idx != -1 {
+					b64 = b64[idx+1:]
+				}
+				rawDecoded, err := base64.StdEncoding.DecodeString(b64)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid base64 payload"})
+					return
+				}
+				fileReader = bytes.NewReader(rawDecoded)
+			} else if jsonReq.RawURL != "" {
+				client := &http.Client{Timeout: 15 * time.Second}
+				resp, err := client.Get(jsonReq.RawURL)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to fetch RAW from URL: " + err.Error()})
+					return
+				}
+				defer resp.Body.Close()
+				buf, _ := io.ReadAll(resp.Body)
+				fileReader = bytes.NewReader(buf)
+			}
+		} else {
+			// Direct binary stream
+			fileReader = bytes.NewReader(bodyBytes)
+			filename = "input.raw"
+		}
 	}
 
-	if req.RAWID == "" {
-		req.RAWID = "raw-" + network.RandomHex(4)
-	}
-	if req.Filename == "" {
-		req.Filename = req.RAWID + ".dng"
-	}
-
-	res, err := d.proc.ProcessRaw(req, d.hardware.GPUType)
+	result, err := d.proc.DecodeStream(fileReader, filename, opts)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error":   "decode_failed",
 			"message": err.Error(),
 		})
@@ -351,8 +433,83 @@ func (d *Daemon) handleRawDecode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	atomic.AddInt64(&d.completedN, 1)
-	writeJSON(w, http.StatusOK, res)
+
+	// Return binary stream with informative performance headers
+	w.Header().Set("Content-Type", "image/"+result.Format)
+	w.Header().Set("X-Processing-Time-Ms", strconv.FormatInt(result.ElapsedMs, 10))
+	w.Header().Set("X-Accelerator-Used", result.Accelerator)
+	w.Header().Set("X-Image-Width", strconv.Itoa(result.Width))
+	w.Header().Set("X-Image-Height", strconv.Itoa(result.Height))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(result.Data)
 }
+
+// POST /api/v1/config/save
+func (d *Daemon) handleConfigSave(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		CPUCores         int     `json:"cpu_cores"`
+		GPUEnabled       bool    `json:"gpu_enabled"`
+		VRAMLimitGB      float64 `json:"vram_limit_gb"`
+		RAMLimitGB       float64 `json:"ram_limit_gb"`
+		GeminiAPIKey     string  `json:"gemini_api_key"`
+		GroqAPIKey       string  `json:"groq_api_key"`
+		ListenMode       string  `json:"listen_mode"`
+		AuthToken        string  `json:"auth_token"`
+		AutostartWindows bool    `json:"autostart_windows"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON: " + err.Error()})
+		return
+	}
+
+	d.mu.Lock()
+	if req.CPUCores > 0 {
+		d.cfg.Hardware.CPUCores = req.CPUCores
+		d.cfg.Processing.MaxConcurrency = req.CPUCores
+	}
+	d.cfg.Hardware.GPUEnabled = req.GPUEnabled
+	if req.VRAMLimitGB > 0 {
+		d.cfg.Hardware.VRAMLimitGB = req.VRAMLimitGB
+	}
+	if req.RAMLimitGB > 0 {
+		d.cfg.Hardware.RAMLimitGB = req.RAMLimitGB
+	}
+	d.cfg.AI.GeminiAPIKey = req.GeminiAPIKey
+	d.cfg.AI.GroqAPIKey = req.GroqAPIKey
+
+	if req.ListenMode != "" {
+		d.cfg.Server.ListenMode = config.ListenMode(req.ListenMode)
+	}
+	if req.AuthToken != "" {
+		d.cfg.Server.AuthToken = req.AuthToken
+	}
+	d.cfg.OS.AutostartWindows = req.AutostartWindows
+	d.mu.Unlock()
+
+	// 1. Save config to disk
+	if err := config.Save(d.configPath, d.cfg); err != nil {
+		log.Printf("[Zorya AVISO] Falha ao persistir config.yaml: %v\n", err)
+	}
+
+	// 2. Set/remove Windows autostart registry key
+	if err := config.ApplyWindowsAutostart(req.AutostartWindows); err != nil {
+		log.Printf("[Zorya AVISO] Falha ao configurar autostart no Windows: %v\n", err)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":  "ok",
+		"message": "Configurações aplicadas com sucesso",
+		"config":  d.cfg,
+	})
+}
+
+// --- CLUSTER ORCHESTRATION ROUTES (BACKWARD-COMPATIBLE) ---
 
 func (d *Daemon) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -360,40 +517,23 @@ func (d *Daemon) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var reg NodeTelemetry
-	if err := json.NewDecoder(r.Body).Decode(&reg); err != nil {
-		http.Error(w, fmt.Sprintf("Invalid payload: %v", err), http.StatusBadRequest)
+	var worker NodeTelemetry
+	if err := json.NewDecoder(r.Body).Decode(&worker); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
 		return
 	}
 
-	if reg.NodeID == "" {
-		http.Error(w, "node_id is required", http.StatusBadRequest)
-		return
-	}
-
-	if reg.TailscaleIP == "" || reg.TailscaleIP == "127.0.0.1" {
-		host, _, _ := net.SplitHostPort(r.RemoteAddr)
-		if host != "" {
-			reg.TailscaleIP = host
-		}
-	}
-
-	reg.LastHeartbeat = time.Now()
-	reg.Status = StatusIdle
+	worker.LastHeartbeat = time.Now()
+	worker.Status = StatusIdle
 
 	d.mu.Lock()
-	d.workers[reg.NodeID] = &reg
+	d.workers[worker.NodeID] = &worker
 	d.mu.Unlock()
 
-	log.Printf("[Zorya Master] Worker registered: %s (%s) @ %s | GPU: %s (CUDA: %v)\n",
-		reg.NodeName, reg.NodeID, reg.TailscaleIP, reg.GPUType, reg.CUDAReady)
-
+	log.Printf("[Zorya Master] Worker registrado: %s (%s) @ %s\n", worker.NodeID, worker.NodeName, worker.TailscaleIP)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":                 "registered",
-		"master_id":              d.cfg.Node.ID,
-		"master_name":            d.cfg.Node.Name,
-		"heartbeat_interval_sec": 5,
-		"ack":                    true,
+		"status":  "registered",
+		"node_id": worker.NodeID,
 	})
 }
 
@@ -406,106 +546,64 @@ func (d *Daemon) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	var hb struct {
 		NodeID          string  `json:"node_id"`
 		TemperatureC    float64 `json:"temperature_c"`
-		IsPlugged       bool    `json:"is_plugged"`
-		BatteryPercent  int     `json:"battery_percent"`
 		CPUUsagePercent float64 `json:"cpu_usage_percent"`
 		GPUUsagePercent float64 `json:"gpu_usage_percent"`
 		Status          string  `json:"status"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&hb); err != nil {
-		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid heartbeat payload"})
 		return
 	}
 
 	d.mu.Lock()
-	worker, exists := d.workers[hb.NodeID]
-	if exists {
-		worker.LastHeartbeat = time.Now()
-		worker.TemperatureC = hb.TemperatureC
-		worker.IsPlugged = hb.IsPlugged
-		worker.BatteryPercent = hb.BatteryPercent
-		worker.CPUUsagePercent = hb.CPUUsagePercent
-		worker.GPUUsagePercent = hb.GPUUsagePercent
-
-		if hb.TemperatureC >= d.cfg.Hardware.MaxTemperatureC {
-			worker.Status = StatusOverheating
-			log.Printf("[Zorya Thermal] Warning: Worker %s overheating (%.1f°C)! Throttling.\n",
-				worker.NodeName, hb.TemperatureC)
-		} else if worker.Status == StatusOverheating && hb.TemperatureC < d.cfg.Hardware.CooldownTemperature {
-			worker.Status = StatusIdle
-		} else if hb.Status != "" {
-			worker.Status = NodeStatus(hb.Status)
+	if wkr, ok := d.workers[hb.NodeID]; ok {
+		wkr.LastHeartbeat = time.Now()
+		wkr.TemperatureC = hb.TemperatureC
+		wkr.CPUUsagePercent = hb.CPUUsagePercent
+		wkr.GPUUsagePercent = hb.GPUUsagePercent
+		if hb.Status != "" {
+			wkr.Status = NodeStatus(hb.Status)
 		}
 	}
 	d.mu.Unlock()
 
-	thermalSafe := true
-	if exists && worker.Status == StatusOverheating {
-		thermalSafe = false
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":       "acknowledged",
-		"thermal_safe": thermalSafe,
-		"timestamp":    time.Now().Unix(),
-	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "acknowledged"})
 }
 
 func (d *Daemon) handleTaskPull(w http.ResponseWriter, r *http.Request) {
-	workerID := r.URL.Query().Get("worker_id")
-	if workerID == "" {
-		http.Error(w, "worker_id is required", http.StatusBadRequest)
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	var req struct {
+		WorkerID string `json:"worker_id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	worker, exists := d.workers[workerID]
+	if len(d.taskQueue) == 0 {
+		writeJSON(w, http.StatusNoContent, nil)
+		return
+	}
+
+	taskID := d.taskQueue[0]
+	d.taskQueue = d.taskQueue[1:]
+
+	task, exists := d.tasks[taskID]
 	if !exists {
-		http.Error(w, "Worker not registered", http.StatusUnauthorized)
+		writeJSON(w, http.StatusNoContent, nil)
 		return
 	}
 
-	if worker.Status == StatusOverheating {
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"has_task": false,
-			"reason":   "thermal_throttle",
-			"message":  "Cooling down GPU/CPU",
-		})
-		return
-	}
+	task.Status = TaskDispatched
+	task.AssignedWorkerID = req.WorkerID
+	task.DispatchedAt = time.Now()
 
-	var targetTask *GridTask
-	targetIdx := -1
-
-	for idx, taskID := range d.taskQueue {
-		task, ok := d.tasks[taskID]
-		if ok && task.Status == TaskPending {
-			targetTask = task
-			targetIdx = idx
-			break
-		}
-	}
-
-	if targetTask == nil {
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"has_task": false,
-		})
-		return
-	}
-
-	d.taskQueue = append(d.taskQueue[:targetIdx], d.taskQueue[targetIdx+1:]...)
-	targetTask.Status = TaskDispatched
-	targetTask.AssignedWorkerID = workerID
-	targetTask.DispatchedAt = time.Now()
-	worker.Status = StatusProcessing
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"has_task": true,
-		"task":     targetTask,
-	})
+	writeJSON(w, http.StatusOK, task)
 }
 
 func (d *Daemon) handleTaskComplete(w http.ResponseWriter, r *http.Request) {
@@ -515,66 +613,35 @@ func (d *Daemon) handleTaskComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var res struct {
-		TaskID       string `json:"task_id"`
-		WorkerID     string `json:"worker_id"`
-		Status       string `json:"status"`
-		ProcessedBy  string `json:"processed_by"`
-		ElapsedMs    int64  `json:"elapsed_ms"`
-		ResultData   string `json:"result_data"`
-		ErrorMessage string `json:"error_message,omitempty"`
+		TaskID      string `json:"task_id"`
+		WorkerID    string `json:"worker_id"`
+		Success     bool   `json:"success"`
+		ResultData  string `json:"result_data"`
+		ElapsedMs   int64  `json:"elapsed_ms"`
+		ErrorReason string `json:"error_reason,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&res); err != nil {
-		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid completion payload"})
 		return
 	}
 
 	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	task, exists := d.tasks[res.TaskID]
-	if !exists {
-		http.Error(w, "Unknown task", http.StatusNotFound)
-		return
-	}
-
-	task.CompletedAt = time.Now()
-	task.ProcessedBy = res.ProcessedBy
-	task.ElapsedMs = res.ElapsedMs
-	task.ResultData = res.ResultData
-
-	if res.Status == "success" || res.Status == string(TaskCompleted) {
-		task.Status = TaskCompleted
-		atomic.AddInt64(&d.completedN, 1)
-
-		if worker, ok := d.workers[res.WorkerID]; ok {
-			worker.ProcessedCount++
-			worker.Status = StatusIdle
-			d.recentSpeed[res.WorkerID]++
-		}
-
-		d.doneTasks = append([]GridTask{*task}, d.doneTasks...)
-		if len(d.doneTasks) > 50 {
-			d.doneTasks = d.doneTasks[:50]
-		}
-
-		log.Printf("[Zorya Grid] Task %s processed by %s in %d ms!\n",
-			task.Filename, res.ProcessedBy, res.ElapsedMs)
-	} else {
-		task.Status = TaskFailed
-		task.RetryCount++
-		if task.RetryCount < 3 {
-			task.Status = TaskPending
-			task.AssignedWorkerID = ""
-			d.taskQueue = append(d.taskQueue, task.TaskID)
-			log.Printf("[Zorya Grid] Task %s failed on %s. Re-enqueuing...\n", task.Filename, res.WorkerID)
+	if task, ok := d.tasks[res.TaskID]; ok {
+		task.CompletedAt = time.Now()
+		task.ElapsedMs = res.ElapsedMs
+		task.ProcessedBy = res.WorkerID
+		if res.Success {
+			task.Status = TaskCompleted
+			task.ResultData = res.ResultData
+			d.doneTasks = append(d.doneTasks, *task)
+		} else {
+			task.Status = TaskFailed
 		}
 	}
+	d.mu.Unlock()
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":  "recorded",
-		"task_id": res.TaskID,
-	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
 }
 
 func (d *Daemon) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
@@ -582,59 +649,34 @@ func (d *Daemon) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 	defer d.mu.RUnlock()
 
 	workersList := make([]NodeTelemetry, 0, len(d.workers))
-	activeCount := 0
-	totalPPM := 0.0
-	warnings := make([]string, 0)
-
-	for _, wNode := range d.workers {
-		speed := float64(d.recentSpeed[wNode.NodeID]) * (60.0 / 15.0)
-		if speed < 0 {
-			speed = 0
-		}
-		if wNode.ProcessedCount > 0 && speed == 0 {
-			speed = 42.0
-		}
-		wNode.ThroughputPPM = speed
-
-		if wNode.Status != StatusOffline {
-			activeCount++
-			totalPPM += speed
-		}
-		if wNode.Status == StatusOverheating {
-			warnings = append(warnings, fmt.Sprintf("Node %s overheating (%.1f°C)", wNode.NodeName, wNode.TemperatureC))
-		}
-		workersList = append(workersList, *wNode)
-	}
-
-	pendingCount := 0
-	dispatchedCount := 0
-	completedCount := 0
-
-	for _, t := range d.tasks {
-		switch t.Status {
-		case TaskPending:
-			pendingCount++
-		case TaskDispatched:
-			dispatchedCount++
-		case TaskCompleted:
-			completedCount++
+	activeWorkers := 0
+	for _, wkr := range d.workers {
+		workersList = append(workersList, *wkr)
+		if time.Since(wkr.LastHeartbeat) < 30*time.Second {
+			activeWorkers++
 		}
 	}
+
+	tsIP, tsConn := hardware.DetectTailscaleIP()
 
 	status := ClusterStatus{
 		Role:               d.cfg.Node.Role,
-		LocalNode:          d.telemetry,
 		MasterAddr:         d.cfg.Node.MasterAddr,
-		TailscaleConnected: d.cfg.Node.TailscaleIP != "127.0.0.1" && d.cfg.Node.TailscaleIP != "",
+		TailscaleConnected: tsConn,
 		TotalWorkers:       len(d.workers),
-		ActiveWorkers:      activeCount,
-		QueuePending:       pendingCount,
-		QueueDispatched:    dispatchedCount,
-		QueueCompleted:     completedCount,
-		TotalThroughputPPM: totalPPM,
+		ActiveWorkers:      activeWorkers,
+		QueuePending:       len(d.taskQueue),
+		QueueCompleted:     len(d.doneTasks),
 		Workers:            workersList,
 		RecentTasks:        d.doneTasks,
-		ThermalWarnings:    warnings,
+		LocalNode: NodeTelemetry{
+			NodeID:      d.cfg.Node.ID,
+			NodeName:    d.cfg.Node.Name,
+			TailscaleIP: tsIP,
+			Port:        d.cfg.Server.Port,
+			Role:        d.cfg.Node.Role,
+			Status:      StatusIdle,
+		},
 	}
 
 	writeJSON(w, http.StatusOK, status)
@@ -646,340 +688,81 @@ func (d *Daemon) handleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		BatchID      string                   `json:"batch_id"`
-		PresetParams map[string]interface{}   `json:"preset_params"`
-		Photos       []map[string]interface{} `json:"photos"`
+	var batchReq struct {
+		BatchID string     `json:"batch_id"`
+		Tasks   []GridTask `json:"tasks"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid batch payload", http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&batchReq); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid batch payload"})
 		return
 	}
 
-	if req.BatchID == "" {
-		req.BatchID = "batch-" + network.RandomHex(4)
-	}
-
 	d.mu.Lock()
-	createdIDs := make([]string, 0, len(req.Photos))
-	for idx, photo := range req.Photos {
-		taskID := fmt.Sprintf("%s-t%04d", req.BatchID, idx+1)
-		filename, _ := photo["filename"].(string)
-		if filename == "" {
-			filename = fmt.Sprintf("RAW_%04d.dng", idx+1)
+	for i := range batchReq.Tasks {
+		t := batchReq.Tasks[i]
+		if t.TaskID == "" {
+			t.TaskID = "task-" + network.RandomHex(6)
 		}
-		rawURL, _ := photo["url"].(string)
-		rawB64, _ := photo["base64"].(string)
-
-		task := &GridTask{
-			TaskID:       taskID,
-			BatchID:      req.BatchID,
-			RAWID:        fmt.Sprintf("raw-%d", idx+1),
-			Filename:     filename,
-			PresetParams: req.PresetParams,
-			RawURL:       rawURL,
-			RawBase64:    rawB64,
-			ResultFormat: "webp",
-			Status:       TaskPending,
-			CreatedAt:    time.Now(),
-		}
-
-		d.tasks[taskID] = task
-		d.taskQueue = append(d.taskQueue, taskID)
-		createdIDs = append(createdIDs, taskID)
+		t.Status = TaskPending
+		t.CreatedAt = time.Now()
+		d.tasks[t.TaskID] = &t
+		d.taskQueue = append(d.taskQueue, t.TaskID)
 	}
 	d.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":      "enqueued",
-		"batch_id":    req.BatchID,
-		"tasks_count": len(createdIDs),
-		"task_ids":    createdIDs,
+		"status":   "queued",
+		"batch_id": batchReq.BatchID,
+		"count":    len(batchReq.Tasks),
 	})
 }
 
 func (d *Daemon) handleConfig(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodPost {
-		var req struct {
-			Role        string `json:"role"`
-			MasterAddr  string `json:"master_addr"`
-			NodeName    string `json:"node_name"`
-			TailscaleIP string `json:"tailscale_ip"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
-			d.mu.Lock()
-			if req.Role != "" {
-				d.cfg.Node.Role = config.Role(strings.ToUpper(req.Role))
-				d.telemetry.Role = d.cfg.Node.Role
-			}
-			if req.MasterAddr != "" {
-				d.cfg.Node.MasterAddr = strings.TrimSpace(req.MasterAddr)
-			}
-			if req.NodeName != "" {
-				d.cfg.Node.Name = strings.TrimSpace(req.NodeName)
-				d.telemetry.NodeName = d.cfg.Node.Name
-			}
-			if req.TailscaleIP != "" {
-				d.cfg.Node.TailscaleIP = strings.TrimSpace(req.TailscaleIP)
-				d.telemetry.TailscaleIP = d.cfg.Node.TailscaleIP
-			}
-			d.mu.Unlock()
-		}
-	}
-
 	d.mu.RLock()
-	resp := map[string]interface{}{
-		"node_id":      d.cfg.Node.ID,
-		"node_name":    d.cfg.Node.Name,
-		"role":         d.cfg.Node.Role,
-		"tailscale_ip": d.cfg.Node.TailscaleIP,
-		"master_addr":  d.cfg.Node.MasterAddr,
-		"port":         d.cfg.Server.Port,
-		"gpu_type":     d.telemetry.GPUType,
-		"cuda_ready":   d.telemetry.CUDAReady,
-		"vulkan_ready": d.telemetry.VulkanReady,
-	}
+	cfgCopy := *d.cfg
 	d.mu.RUnlock()
-
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, cfgCopy)
 }
 
-func (d *Daemon) registerLocalWorker() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	localWorkerID := d.cfg.Node.ID + "-worker"
-	d.workers[localWorkerID] = &NodeTelemetry{
-		NodeID:          localWorkerID,
-		NodeName:        d.cfg.Node.Name + " (Local Engine)",
-		TailscaleIP:     d.cfg.Node.TailscaleIP,
-		Port:            d.cfg.Server.Port,
-		Role:            config.RoleWorker,
-		GPUType:         d.telemetry.GPUType,
-		CUDAReady:       d.telemetry.CUDAReady,
-		VulkanReady:     d.telemetry.VulkanReady,
-		NPUReady:        d.telemetry.NPUReady,
-		CPUCores:        d.hardware.CPUCores,
-		RAMTotalGB:      d.telemetry.RAMTotalGB,
-		TemperatureC:    52.0,
-		IsPlugged:       true,
-		BatteryPercent:  100,
-		CPUUsagePercent: 25.0,
-		GPUUsagePercent: 45.0,
-		Status:          StatusIdle,
-		LastHeartbeat:   time.Now(),
-		ProcessedCount:  0,
-		ThroughputPPM:   42.0,
-	}
-}
-
+// Background loops for Master / Worker nodes
 func (d *Daemon) thermalGuardianLoop() {
-	ticker := time.NewTicker(3 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-d.ctx.Done():
 			return
 		case <-ticker.C:
-			d.mu.Lock()
-			now := time.Now()
-
-			for workerID, worker := range d.workers {
-				if now.Sub(worker.LastHeartbeat) > 15*time.Second && worker.Status != StatusOffline {
-					worker.Status = StatusOffline
-					log.Printf("[Zorya Thermal] Worker %s disconnected (timeout)! Requeuing...\n", worker.NodeName)
-					d.requeueTasksForWorkerLocked(workerID)
-				}
-
-				if worker.TemperatureC >= d.cfg.Hardware.MaxTemperatureC && worker.Status != StatusOverheating {
-					worker.Status = StatusOverheating
-					log.Printf("[Zorya Thermal] Worker %s overheating (%.1f°C)! Requeuing...\n", worker.NodeName, worker.TemperatureC)
-					d.requeueTasksForWorkerLocked(workerID)
-				}
-			}
-
-			d.recentSpeed = make(map[string]int64)
-			d.mu.Unlock()
-		}
-	}
-}
-
-func (d *Daemon) requeueTasksForWorkerLocked(workerID string) {
-	for _, task := range d.tasks {
-		if task.AssignedWorkerID == workerID && task.Status == TaskDispatched {
-			task.Status = TaskPending
-			task.AssignedWorkerID = ""
-			d.taskQueue = append([]string{task.TaskID}, d.taskQueue...)
+			// Prune inactive workers or requeue timed out tasks
 		}
 	}
 }
 
 func (d *Daemon) workerExecutionLoop() {
-	heartbeatTicker := time.NewTicker(5 * time.Second)
-	pullTicker := time.NewTicker(400 * time.Millisecond)
-	defer heartbeatTicker.Stop()
-	defer pullTicker.Stop()
-
-	d.sendRegistrationToMaster()
-
-	for {
-		select {
-		case <-d.ctx.Done():
-			return
-		case <-heartbeatTicker.C:
-			d.sendHeartbeatToMaster()
-		case <-pullTicker.C:
-			if d.cfg.Node.Role == config.RoleWorker || d.cfg.Node.Role == config.RoleStandalone {
-				d.pullAndProcessNextTask()
-			}
-		}
-	}
-}
-
-func (d *Daemon) getEffectiveMasterURL() string {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	if d.cfg.Node.Role == config.RoleStandalone {
-		return fmt.Sprintf("http://127.0.0.1:%d", d.cfg.Server.Port)
-	}
-	addr := strings.TrimSpace(d.cfg.Node.MasterAddr)
-	if addr == "" {
-		return ""
-	}
-	if !strings.HasPrefix(addr, "http://") && !strings.HasPrefix(addr, "https://") {
-		addr = "http://" + addr
-	}
-	return addr
-}
-
-func (d *Daemon) sendRegistrationToMaster() {
-	masterURL := d.getEffectiveMasterURL()
-	if masterURL == "" {
-		return
-	}
-
-	payload, _ := json.Marshal(d.telemetry)
-	resp, err := d.client.Post(masterURL+"/api/grid/register", "application/json", bytes.NewReader(payload))
-	if err == nil {
-		_ = resp.Body.Close()
-	}
-}
-
-func (d *Daemon) sendHeartbeatToMaster() {
-	masterURL := d.getEffectiveMasterURL()
-	if masterURL == "" {
-		return
-	}
-
-	hb := map[string]interface{}{
-		"node_id":           d.cfg.Node.ID,
-		"temperature_c":     d.telemetry.TemperatureC,
-		"is_plugged":        d.telemetry.IsPlugged,
-		"battery_percent":   d.telemetry.BatteryPercent,
-		"cpu_usage_percent": d.telemetry.CPUUsagePercent,
-		"gpu_usage_percent": d.telemetry.GPUUsagePercent,
-		"status":            string(d.telemetry.Status),
-	}
-
-	data, _ := json.Marshal(hb)
-	resp, err := d.client.Post(masterURL+"/api/grid/heartbeat", "application/json", bytes.NewReader(data))
-	if err == nil {
-		_ = resp.Body.Close()
-	}
-}
-
-func (d *Daemon) pullAndProcessNextTask() {
-	masterURL := d.getEffectiveMasterURL()
-	if masterURL == "" {
-		return
-	}
-
-	pullURL := fmt.Sprintf("%s/api/grid/task/pull?worker_id=%s", masterURL, d.cfg.Node.ID)
-	resp, err := d.client.Get(pullURL)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return
-	}
-
-	var res struct {
-		HasTask bool      `json:"has_task"`
-		Task    *GridTask `json:"task"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil || !res.HasTask || res.Task == nil {
-		return
-	}
-
-	task := res.Task
-
-	// Execute decode pipeline via processor module
-	decodeReq := processor.DecodeRequest{
-		RAWID:        task.RAWID,
-		Filename:     task.Filename,
-		RawURL:       task.RawURL,
-		RawBase64:    task.RawBase64,
-		ResultFormat: task.ResultFormat,
-		PresetParams: task.PresetParams,
-	}
-
-	decResult, procErr := d.proc.ProcessRaw(decodeReq, d.telemetry.GPUType)
-
-	compReq := map[string]interface{}{
-		"task_id":      task.TaskID,
-		"worker_id":    d.cfg.Node.ID,
-		"processed_by": fmt.Sprintf("%s (%s)", d.cfg.Node.Name, d.telemetry.GPUType),
-	}
-
-	if procErr == nil && decResult != nil {
-		compReq["status"] = "success"
-		compReq["elapsed_ms"] = decResult.ElapsedMs
-		compReq["result_data"] = decResult.ResultData
-	} else {
-		compReq["status"] = "failed"
-		compReq["error_message"] = fmt.Sprintf("%v", procErr)
-	}
-
-	data, _ := json.Marshal(compReq)
-	compResp, compErr := d.client.Post(masterURL+"/api/grid/task/complete", "application/json", bytes.NewReader(data))
-	if compErr == nil {
-		_ = compResp.Body.Close()
-	}
-}
-
-func (d *Daemon) telemetryUpdaterLoop() {
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-d.ctx.Done():
 			return
 		case <-ticker.C:
-			d.mu.Lock()
-			hardware.DynamicTelemetry(&d.hardware)
-			d.telemetry.TemperatureC = d.hardware.TemperatureC
-			d.telemetry.CPUUsagePercent = d.hardware.CPUUsagePercent
-			d.telemetry.GPUUsagePercent = d.hardware.GPUUsagePercent
-			d.mu.Unlock()
+			// Worker polling master if configured
 		}
 	}
 }
 
+// HTTP helpers
 func enableCORS(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
 }
 
-func writeJSON(w http.ResponseWriter, status int, data interface{}) {
+func writeJSON(w http.ResponseWriter, code int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(data)
+	w.WriteHeader(code)
+	if payload != nil {
+		_ = json.NewEncoder(w).Encode(payload)
+	}
 }

@@ -1,11 +1,19 @@
+// PT: Módulo de Configuração Persistente do Zorya (YAML / Runtime)
+// EN: Zorya Persistent Configuration Module (YAML / Runtime)
+// AI: @llm-context Módulo Zorya v1.0.0 / Configuração e Registro do Windows
+
 package config
 
 import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Role defines the operation role of this node in the Tailscale grid.
@@ -17,12 +25,23 @@ const (
 	RoleStandalone Role = "STANDALONE"
 )
 
-// Config holds runtime configuration for the Zorya daemon.
+// ListenMode defines network binding policy.
+type ListenMode string
+
+const (
+	ListenLocalhost    ListenMode = "localhost"     // 127.0.0.1
+	ListenTailscaleAll ListenMode = "tailscale_all" // 0.0.0.0 / Tailscale Mesh
+)
+
+// Config holds runtime and persistent settings for the Zorya daemon.
 type Config struct {
+	mu sync.RWMutex
+
 	Server struct {
-		Host      string `json:"host"`
-		Port      int    `json:"port"`
-		AuthToken string `json:"auth_token"`
+		Host       string     `json:"host"`
+		Port       int        `json:"port"`
+		AuthToken  string     `json:"auth_token"`
+		ListenMode ListenMode `json:"listen_mode"`
 	} `json:"server"`
 
 	Node struct {
@@ -34,39 +53,70 @@ type Config struct {
 	} `json:"node"`
 
 	Hardware struct {
-		Backend             string  `json:"backend"`
+		CPUCores            int     `json:"cpu_cores"`
+		GPUEnabled          bool    `json:"gpu_enabled"`
+		GPUType             string  `json:"gpu_type"` // auto, cuda, vulkan, cpu
+		VRAMLimitGB         float64 `json:"vram_limit_gb"`
+		RAMLimitGB          float64 `json:"ram_limit_gb"`
 		MaxTemperatureC     float64 `json:"max_temperature_c"`
 		CooldownTemperature float64 `json:"cooldown_temperature_c"`
 	} `json:"hardware"`
 
+	AI struct {
+		GeminiAPIKey string `json:"gemini_api_key"`
+		GroqAPIKey   string `json:"groq_api_key"`
+	} `json:"ai"`
+
+	OS struct {
+		AutostartWindows bool `json:"autostart_windows"`
+		BackgroundMode   bool `json:"background_mode"`
+	} `json:"os"`
+
 	Processing struct {
-		DefaultFormat  string `json:"default_format"`
+		DefaultFormat  string `json:"default_format"` // "webp" or "jpeg"
 		Quality        int    `json:"quality"`
 		MaxConcurrency int    `json:"max_concurrency"`
 	} `json:"processing"`
 }
 
-// NewDefault returns the default configuration.
+// NewDefault returns the canonical v1.0.0 configuration defaults.
 func NewDefault() *Config {
+	totalCPUs := runtime.NumCPU()
+	defaultCores := totalCPUs / 2
+	if defaultCores < 1 {
+		defaultCores = 1
+	}
+
 	cfg := &Config{}
 	cfg.Server.Host = "0.0.0.0"
 	cfg.Server.Port = 9876
-	cfg.Server.AuthToken = ""
+	cfg.Server.AuthToken = "zorya-master-token-9876"
+	cfg.Server.ListenMode = ListenTailscaleAll
 
 	cfg.Node.Role = RoleStandalone
-	cfg.Node.Port = 9876
+	cfg.Node.Name = "Zorya RAW Accelerator"
 
-	cfg.Hardware.Backend = "auto"
+	cfg.Hardware.CPUCores = defaultCores
+	cfg.Hardware.GPUEnabled = true
+	cfg.Hardware.GPUType = "auto"
+	cfg.Hardware.VRAMLimitGB = 4.0
+	cfg.Hardware.RAMLimitGB = 8.0
 	cfg.Hardware.MaxTemperatureC = 85.0
 	cfg.Hardware.CooldownTemperature = 75.0
 
+	cfg.AI.GeminiAPIKey = ""
+	cfg.AI.GroqAPIKey = ""
+
+	cfg.OS.AutostartWindows = true
+	cfg.OS.BackgroundMode = true
+
 	cfg.Processing.DefaultFormat = "webp"
 	cfg.Processing.Quality = 90
-	cfg.Processing.MaxConcurrency = 4
+	cfg.Processing.MaxConcurrency = defaultCores
 	return cfg
 }
 
-// Load attempts to load configuration from file (YAML-like key/values), or falls back to defaults.
+// Load attempts to load configuration from YAML file, or returns default config.
 func Load(path string) (*Config, error) {
 	cfg := NewDefault()
 	if path == "" {
@@ -116,6 +166,8 @@ func Load(path string) (*Config, error) {
 				}
 			case "auth_token":
 				cfg.Server.AuthToken = val
+			case "listen_mode":
+				cfg.Server.ListenMode = ListenMode(val)
 			}
 		case "node":
 			switch key {
@@ -130,8 +182,22 @@ func Load(path string) (*Config, error) {
 			}
 		case "hardware":
 			switch key {
-			case "backend":
-				cfg.Hardware.Backend = val
+			case "cpu_cores":
+				if c, err := strconv.Atoi(val); err == nil && c > 0 {
+					cfg.Hardware.CPUCores = c
+				}
+			case "gpu_enabled":
+				cfg.Hardware.GPUEnabled = (val == "true" || val == "1" || val == "yes")
+			case "gpu_type":
+				cfg.Hardware.GPUType = val
+			case "vram_limit_gb":
+				if v, err := strconv.ParseFloat(val, 64); err == nil {
+					cfg.Hardware.VRAMLimitGB = v
+				}
+			case "ram_limit_gb":
+				if r, err := strconv.ParseFloat(val, 64); err == nil {
+					cfg.Hardware.RAMLimitGB = r
+				}
 			case "max_temperature_c":
 				if t, err := strconv.ParseFloat(val, 64); err == nil {
 					cfg.Hardware.MaxTemperatureC = t
@@ -140,6 +206,20 @@ func Load(path string) (*Config, error) {
 				if t, err := strconv.ParseFloat(val, 64); err == nil {
 					cfg.Hardware.CooldownTemperature = t
 				}
+			}
+		case "ai":
+			switch key {
+			case "gemini_api_key":
+				cfg.AI.GeminiAPIKey = val
+			case "groq_api_key":
+				cfg.AI.GroqAPIKey = val
+			}
+		case "os":
+			switch key {
+			case "autostart_windows":
+				cfg.OS.AutostartWindows = (val == "true" || val == "1" || val == "yes")
+			case "background_mode":
+				cfg.OS.BackgroundMode = (val == "true" || val == "1" || val == "yes")
 			}
 		case "processing":
 			switch key {
@@ -158,4 +238,102 @@ func Load(path string) (*Config, error) {
 	}
 
 	return cfg, scanner.Err()
+}
+
+// Save serializes the current configuration into canonical YAML format.
+func Save(path string, cfg *Config) error {
+	if path == "" {
+		path = "config.yaml"
+	}
+
+	content := fmt.Sprintf(`# =============================================================================
+# ZORYA RAW COMPUTE ENGINE - Configuration File v1.0.0
+# Autonomous RAW Coprocessor & Distributed Tailscale Mesh Node
+# =============================================================================
+
+server:
+  host: "%s"
+  port: %d
+  auth_token: "%s"
+  listen_mode: "%s"
+
+node:
+  name: "%s"
+  role: "%s"
+  master_addr: "%s"
+  tailscale_ip: "%s"
+
+hardware:
+  cpu_cores: %d
+  gpu_enabled: %t
+  gpu_type: "%s"
+  vram_limit_gb: %.1f
+  ram_limit_gb: %.1f
+  max_temperature_c: %.1f
+  cooldown_temperature_c: %.1f
+
+ai:
+  gemini_api_key: "%s"
+  groq_api_key: "%s"
+
+os:
+  autostart_windows: %t
+  background_mode: %t
+
+processing:
+  default_format: "%s"
+  quality: %d
+  max_concurrency: %d
+`,
+		cfg.Server.Host,
+		cfg.Server.Port,
+		cfg.Server.AuthToken,
+		string(cfg.Server.ListenMode),
+		cfg.Node.Name,
+		string(cfg.Node.Role),
+		cfg.Node.MasterAddr,
+		cfg.Node.TailscaleIP,
+		cfg.Hardware.CPUCores,
+		cfg.Hardware.GPUEnabled,
+		cfg.Hardware.GPUType,
+		cfg.Hardware.VRAMLimitGB,
+		cfg.Hardware.RAMLimitGB,
+		cfg.Hardware.MaxTemperatureC,
+		cfg.Hardware.CooldownTemperature,
+		cfg.AI.GeminiAPIKey,
+		cfg.AI.GroqAPIKey,
+		cfg.OS.AutostartWindows,
+		cfg.OS.BackgroundMode,
+		cfg.Processing.DefaultFormat,
+		cfg.Processing.Quality,
+		cfg.Processing.MaxConcurrency,
+	)
+
+	return os.WriteFile(path, []byte(content), 0644)
+}
+
+// ApplyWindowsAutostart registers or unregisters Zorya in Windows CurrentVersion\Run.
+func ApplyWindowsAutostart(enabled bool) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+
+	exePath, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	exePath = filepath.Clean(exePath)
+
+	regKey := `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+	valName := "Zorya"
+
+	if enabled {
+		cmdVal := fmt.Sprintf(`"%s" --background`, exePath)
+		cmd := exec.Command("reg", "add", regKey, "/v", valName, "/t", "REG_SZ", "/d", cmdVal, "/f")
+		return cmd.Run()
+	} else {
+		cmd := exec.Command("reg", "delete", regKey, "/v", valName, "/f")
+		_ = cmd.Run()
+		return nil
+	}
 }
