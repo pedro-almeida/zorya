@@ -12,9 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
-	"unsafe"
 )
 
 // CPUInfo represents processor capabilities and current load.
@@ -62,19 +60,6 @@ type SystemInfo struct {
 	GPU       GPUInfo       `json:"gpu"`
 	Tailscale TailscaleInfo `json:"tailscale"`
 	NodeURL   string        `json:"node_url"`
-}
-
-// MemoryStatusEx structure for Windows GlobalMemoryStatusEx win32 call.
-type memoryStatusEx struct {
-	cbSize                  uint32
-	dwMemoryLoad            uint32
-	ullTotalPhys            uint64
-	ullAvailPhys            uint64
-	ullTotalPageFile        uint64
-	ullAvailPageFile        uint64
-	ullTotalVirtual         uint64
-	ullAvailVirtual         uint64
-	ullAvailExtendedVirtual uint64
 }
 
 // Detect scans real hardware resources and Tailscale interfaces.
@@ -201,34 +186,7 @@ func detectCPUModel() string {
 
 // detectRAM returns (totalGB, availableGB).
 func detectRAM() (float64, float64) {
-	if runtime.GOOS == "windows" {
-		kernel32 := syscall.NewLazyDLL("kernel32.dll")
-		procGlobalMemoryStatusEx := kernel32.NewProc("GlobalMemoryStatusEx")
-		var mem memoryStatusEx
-		mem.cbSize = uint32(unsafe.Sizeof(mem))
-		r1, _, _ := procGlobalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&mem)))
-		if r1 != 0 {
-			total := float64(mem.ullTotalPhys) / (1024 * 1024 * 1024)
-			avail := float64(mem.ullAvailPhys) / (1024 * 1024 * 1024)
-			return round1(total), round1(avail)
-		}
-	} else if runtime.GOOS == "linux" {
-		if data, err := os.ReadFile("/proc/meminfo"); err == nil {
-			var totalKB, availKB float64
-			lines := strings.Split(string(data), "\n")
-			for _, l := range lines {
-				if strings.HasPrefix(l, "MemTotal:") {
-					totalKB = parseMemKB(l)
-				} else if strings.HasPrefix(l, "MemAvailable:") {
-					availKB = parseMemKB(l)
-				}
-			}
-			if totalKB > 0 {
-				return round1(totalKB / (1024 * 1024)), round1(availKB / (1024 * 1024))
-			}
-		}
-	}
-	return 16.0, 8.0
+	return detectPlatformRAM()
 }
 
 func parseMemKB(line string) float64 {
