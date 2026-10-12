@@ -1,0 +1,166 @@
+name: Release & Code Signing
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build-and-sign:
+    name: Build & Sign (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: zorya.exe
+            archive_name: zorya-windows-x86_64.zip
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: zorya
+            archive_name: zorya-linux-x86_64.tar.gz
+
+    steps:
+      - name: Checkout Código
+        uses: actions/checkout@v4
+
+      - name: Instalar Dependências Nativas (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ make pkg-config
+
+      - name: Configurar Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache de Compilação Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compilar Binário de Produção (Cargo Build Release)
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # ----------------- ASSINATURA AUTHENTICODE (WINDOWS) -----------------
+      - name: Assinar Executável com Authenticode (Pedro Almeida)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binaryPath = "target/${{ matrix.target }}/release/zorya.exe"
+          if (-not (Test-Path $binaryPath)) {
+             $binaryPath = "target/release/zorya.exe"
+          }
+
+          Write-Host "[+] Gerando certificado efêmero em memória para Pedro Almeida..." -ForegroundColor Cyan
+          $subject = "CN=Pedro Almeida, O=Zorya Project"
+          $cert = New-SelfSignedCertificate `
+              -Type CodeSigningCert `
+              -Subject $subject `
+              -KeyLength 2048 `
+              -HashAlgorithm SHA256 `
+              -CertStoreLocation "Cert:\CurrentUser\My" `
+              -FriendlyName "Pedro Almeida - Zorya Project" `
+              -NotAfter (Get-Date).AddYears(3)
+
+          $pfxPassword = [System.Guid]::NewGuid().ToString("N")
+          $securePassword = ConvertTo-SecureString -String $pfxPassword -Force -AsPlainText
+          $pfxPath = "$env:TEMP\pedro_almeida_dev.pfx"
+
+          Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $securePassword | Out-Null
+
+          Write-Host "[+] Assinando $binaryPath com timestamp RFC 3161..." -ForegroundColor Cyan
+          $signtool = (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin" -Filter "signtool.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+
+          if ($signtool) {
+              Write-Host "Utilizando Signtool: $signtool"
+              & $signtool sign /fd SHA256 /tr "http://timestamp.digicert.com" /td SHA256 /f $pfxPath /p $pfxPassword $binaryPath
+          } else {
+              Write-Host "Utilizando Set-AuthenticodeSignature nativo..."
+              Set-AuthenticodeSignature -FilePath $binaryPath -Certificate $cert -TimestampServer "http://timestamp.digicert.com" -HashAlgorithm SHA256
+          }
+
+          Remove-Item -Path $pfxPath -Force -ErrorAction SilentlyContinue
+
+          Write-Host "[OK] Verificando assinatura do binario..." -ForegroundColor Green
+          $sig = Get-AuthenticodeSignature $binaryPath
+          Write-Host "Status: $($sig.Status)"
+          Write-Host "Assinado por: $($sig.SignerCertificate.Subject)"
+
+      # ----------------- EMPACOTAMENTO DOS ARTEFATOS -----------------
+      - name: Empacotar Artefatos (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binPath = "target/${{ matrix.target }}/release/zorya.exe"
+          if (-not (Test-Path $binPath)) { $binPath = "target/release/zorya.exe" }
+
+          mkdir dist -ErrorAction SilentlyContinue
+          Copy-Item $binPath -Destination dist\zorya.exe
+          if (Test-Path README.md) { Copy-Item README.md dist\ }
+          if (Test-Path LICENSE) { Copy-Item LICENSE dist\ }
+
+          Compress-Archive -Path dist\* -DestinationPath ${{ matrix.archive_name }} -Force
+
+      - name: Empacotar Artefatos (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          BIN_PATH="target/${{ matrix.target }}/release/zorya"
+          if [ ! -f "$BIN_PATH" ]; then BIN_PATH="target/release/zorya"; fi
+
+          mkdir -p dist
+          cp "$BIN_PATH" dist/zorya
+          if [ -f README.md ]; then cp README.md dist/; fi
+          if [ -f LICENSE ]; then cp LICENSE dist/; fi
+
+          tar -czvf ${{ matrix.archive_name }} -C dist .
+
+      - name: Upload de Artefato para o Job de Release
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive_name }}
+          path: ${{ matrix.archive_name }}
+
+  release:
+    name: Publicar Release com Proveniência Sigstore
+    needs: build-and-sign
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Código
+        uses: actions/checkout@v4
+
+      - name: Instalar Sigstore Cosign
+        uses: sigstore/cosign-installer@v3.8.1
+
+      - name: Baixar Todos os Artefatos de Build
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Gerar Checksums SHA256 e Assinatura Criptográfica Cosign
+        run: |
+          cd artifacts
+          sha256sum zorya-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+          echo "Assinando criptograficamente via Sigstore / OIDC..."
+          for file in zorya-*; do
+            cosign sign-blob --yes --bundle "${file}.bundle" "$file"
+          done
+          cosign sign-blob --yes --bundle SHA256SUMS.txt.bundle SHA256SUMS.txt
+
+      - name: Criar GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
