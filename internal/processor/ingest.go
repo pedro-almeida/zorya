@@ -10,6 +10,7 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -247,12 +248,15 @@ func (p *Processor) processSingleIngestItem(rawPath, outDir string, targetW, qua
 		srcImg, _, _ = generateFallbackFrame(1920, 1080)
 	}
 
-	origBounds := srcImg.Bounds()
+	// 2. LightCraft fast tone curve & neutral balance development
+	developedImg := applyLightCraftToneCurve(srcImg)
+
+	origBounds := developedImg.Bounds()
 	origW := origBounds.Dx()
 	origH := origBounds.Dy()
 
-	// 2. Algorithmic culling analysis
-	analysis := AnalyzeCulling(srcImg)
+	// 3. Algorithmic culling analysis
+	analysis := AnalyzeCulling(developedImg)
 	res.SharpnessScore = analysis.SharpnessScore
 	res.ExposureScore = analysis.ExposureScore
 	res.OverallScore = analysis.OverallScore
@@ -261,13 +265,13 @@ func (p *Processor) processSingleIngestItem(rawPath, outDir string, targetW, qua
 	res.BlinkDetected = analysis.BlinkDetected
 	res.Recommendation = analysis.Recommendation
 
-	// 3. Fast resize to 2048px preserving aspect ratio
-	scaledImg := resizeImageToWidth(srcImg, targetW)
+	// 4. Fast resize to 2048px preserving aspect ratio
+	scaledImg := resizeImageToWidth(developedImg, targetW)
 	scaledBounds := scaledImg.Bounds()
 	res.Width = scaledBounds.Dx()
 	res.Height = scaledBounds.Dy()
 
-	// 4. Apply proofing watermark
+	// 5. Apply proofing watermark
 	watermarkedImg := ApplyWatermark(scaledImg, wmOpts)
 
 	// 5. Save proof thumbnail (WebP or high-quality JPEG)
@@ -391,4 +395,36 @@ func mathRound(val float64, decimals int) float64 {
 		pow *= 10.0
 	}
 	return float64(int(val*pow+0.5)) / pow
+}
+
+// applyLightCraftToneCurve applies a smooth photographic tone curve inspired by LightCraft develop engine.
+func applyLightCraftToneCurve(src image.Image) image.Image {
+	bounds := src.Bounds()
+	dst := image.NewRGBA(bounds)
+
+	lut := make([]uint8, 256)
+	for i := 0; i < 256; i++ {
+		x := float64(i) / 255.0
+		// Smooth photographic curve: subtle shadow lift, open midtone contrast, highlight roll-off
+		y := x + 0.08*math.Sin(math.Pi*x)
+		if y < 0 {
+			y = 0
+		} else if y > 1.0 {
+			y = 1.0
+		}
+		lut[i] = uint8(math.Round(y * 255.0))
+	}
+
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			r, g, b, a := src.At(x, y).RGBA()
+			dst.SetRGBA(x, y, color.RGBA{
+				R: lut[r>>8],
+				G: lut[g>>8],
+				B: lut[b>>8],
+				A: uint8(a >> 8),
+			})
+		}
+	}
+	return dst
 }

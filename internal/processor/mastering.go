@@ -367,9 +367,10 @@ func applyPhotoCraftLinearMastering(src image.Image, noiseReduction, sharpening 
 		}
 	}
 
-	// 5. Output Unsharp Sharpening on Luma
+	// 5. Output Unsharp Sharpening on Luma (PhotoCraft algorithm with threshold)
 	sharpY := make([]float32, total)
-	sharpFactor := float32(sharpening * 0.40)
+	k := float32(sharpening * 0.85) // boost factor
+	threshold := float32(0.015)     // 1.5% threshold to avoid noise amplification in flat regions
 
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
@@ -377,13 +378,23 @@ func applyPhotoCraftLinearMastering(src image.Image, noiseReduction, sharpening 
 			orig := denoisedY[cIdx]
 
 			if x > 0 && x < w-1 && y > 0 && y < h-1 {
-				lap := denoisedY[(y-1)*w+x] + denoisedY[(y+1)*w+x] + denoisedY[y*w+(x-1)] + denoisedY[y*w+(x+1)] - 4.0*orig
-				// High pass boost
-				boosted := orig - sharpFactor*lap
-				if boosted < 0 {
-					boosted = 0
+				// Local 3x3 gaussian-weighted blur for unsharp mask base
+				blurred := (denoisedY[(y-1)*w+x] + denoisedY[(y+1)*w+x] + denoisedY[y*w+(x-1)] + denoisedY[y*w+(x+1)] +
+					denoisedY[(y-1)*w+(x-1)] + denoisedY[(y-1)*w+(x+1)] + denoisedY[(y+1)*w+(x-1)] + denoisedY[(y+1)*w+(x+1)] +
+					4.0*orig) / 12.0
+
+				d := orig - blurred
+				if d < -threshold || d > threshold {
+					boosted := orig + k*d
+					if boosted < 0 {
+						boosted = 0
+					} else if boosted > 1.0 {
+						boosted = 1.0
+					}
+					sharpY[cIdx] = boosted
+				} else {
+					sharpY[cIdx] = orig
 				}
-				sharpY[cIdx] = boosted
 			} else {
 				sharpY[cIdx] = orig
 			}
