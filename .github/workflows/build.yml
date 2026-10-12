@@ -3,50 +3,73 @@ name: Build & Release Binaries
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: write
+
 jobs:
   build:
-    name: Build Cross-Platform Binaries
-    runs-on: ubuntu-latest
+    name: Build Zorya (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+        include:
+          - os: ubuntu-latest
+            artifact_name: zorya-linux-amd64
+            binary_name: zorya
+          - os: windows-latest
+            artifact_name: zorya-windows-amd64.exe
+            binary_name: zorya.exe
 
     steps:
-      - name: Check out repository
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Set up Go
+      - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.22'
           check-latest: true
 
-      - name: Verify dependencies
+      - name: Install Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libraw-dev gcc
+
+      - name: Build Binary
         run: |
           go mod tidy
-          go vet ./...
+          go build -v -ldflags="-s -w" -o ${{ matrix.binary_name }} ./cmd/zorya
 
-      - name: Compile Windows amd64 binary
-        env:
-          CGO_ENABLED: 0
-          GOOS: windows
-          GOARCH: amd64
-        run: |
-          mkdir -p dist
-          go build -ldflags="-s -w" -o dist/zorya-windows-amd64.exe ./cmd/zorya
-
-      - name: Compile Linux amd64 binary
-        env:
-          CGO_ENABLED: 0
-          GOOS: linux
-          GOARCH: amd64
-        run: |
-          go build -ldflags="-s -w" -o dist/zorya-linux-amd64 ./cmd/zorya
-
-      - name: Upload Build Artifacts
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: zorya-binaries
-          path: |
-            dist/zorya-windows-amd64.exe
-            dist/zorya-linux-amd64
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.binary_name }}
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            zorya-windows-amd64.exe/zorya.exe
+            zorya-linux-amd64/zorya
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

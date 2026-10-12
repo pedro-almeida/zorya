@@ -1,0 +1,10 @@
+{
+  "project_name": "Zorya",
+  "repository": "https://github.com/pedro-almeida/zorya",
+  "license": "MIT",
+  "description": "High-performance edge daemon for hardware-accelerated RAW image processing",
+  "build_pipeline": "GitHub Actions",
+  "artifacts": [
+    "zorya.exe"
+  ]
+}
