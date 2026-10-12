@@ -113,6 +113,18 @@ type ClusterStatus struct {
 	ThermalWarnings    []string        `json:"thermal_warnings"`
 }
 
+// PipelineStats aggregates 2-stage processing engine telemetry.
+type PipelineStats struct {
+	IngestBatchesCount  int64 `json:"ingest_batches_count"`
+	IngestPhotosTotal   int64 `json:"ingest_photos_total"`
+	IngestApprovedTotal int64 `json:"ingest_approved_total"`
+	IngestReviewTotal   int64 `json:"ingest_review_total"`
+	IngestRejectedTotal int64 `json:"ingest_rejected_total"`
+	MasterJobsCount     int64 `json:"master_jobs_count"`
+	MasterPhotosTotal   int64 `json:"master_photos_total"`
+	MasterSuccessTotal  int64 `json:"master_success_total"`
+}
+
 // Daemon is the active Zorya HTTP engine and mesh orchestrator.
 type Daemon struct {
 	cfg        *config.Config
@@ -128,6 +140,11 @@ type Daemon struct {
 	doneTasks   []GridTask
 	completedN  int64
 	lastMinuteN int64
+
+	pipelineMu       sync.RWMutex
+	stats            PipelineStats
+	recentIngests    []processor.IngestBatchResult
+	recentMasterJobs []processor.MasterExportResult
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -154,16 +171,18 @@ func New(cfg *config.Config, configPath string) *Daemon {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	d := &Daemon{
-		cfg:        cfg,
-		configPath: configPath,
-		proc:       processor.New(),
-		startTime:  time.Now(),
-		workers:    make(map[string]*NodeTelemetry),
-		tasks:      make(map[string]*GridTask),
-		taskQueue:  make([]string, 0),
-		doneTasks:  make([]GridTask, 0),
-		ctx:        ctx,
-		cancel:     cancel,
+		cfg:              cfg,
+		configPath:       configPath,
+		proc:             processor.New(),
+		startTime:        time.Now(),
+		workers:          make(map[string]*NodeTelemetry),
+		tasks:            make(map[string]*GridTask),
+		taskQueue:        make([]string, 0),
+		doneTasks:        make([]GridTask, 0),
+		recentIngests:    make([]processor.IngestBatchResult, 0),
+		recentMasterJobs: make([]processor.MasterExportResult, 0),
+		ctx:              ctx,
+		cancel:           cancel,
 	}
 
 	return d
@@ -229,6 +248,9 @@ func (d *Daemon) mountRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/health", d.wrapCORS(d.handleHealth))
 	mux.HandleFunc("/api/v1/system/info", d.wrapCORS(d.handleSystemInfo))
 	mux.HandleFunc("/api/v1/raw/decode", d.wrapCORS(d.handleRawDecode))
+	mux.HandleFunc("/api/v1/raw/ingest-batch", d.wrapCORS(d.handleRawIngestBatch))
+	mux.HandleFunc("/api/v1/raw/master-export", d.wrapCORS(d.handleRawMasterExport))
+	mux.HandleFunc("/api/v1/pipeline/status", d.wrapCORS(d.handlePipelineStatus))
 	mux.HandleFunc("/api/v1/config/save", d.wrapCORS(d.handleConfigSave))
 
 	// 3. BACKWARD COMPATIBLE GRID ENDPOINTS
@@ -326,7 +348,32 @@ func (d *Daemon) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 	d.mu.RUnlock()
 
 	info := hardware.Detect(allocatedCores, ramLimit, gpuEnabled, vramLimit, port, listenMode)
-	writeJSON(w, http.StatusOK, info)
+
+	d.pipelineMu.RLock()
+	statsCopy := d.stats
+	recentIngestsCopy := make([]processor.IngestBatchResult, len(d.recentIngests))
+	copy(recentIngestsCopy, d.recentIngests)
+	recentMasterJobsCopy := make([]processor.MasterExportResult, len(d.recentMasterJobs))
+	copy(recentMasterJobsCopy, d.recentMasterJobs)
+	d.pipelineMu.RUnlock()
+
+	response := map[string]interface{}{
+		"version":   info.Version,
+		"os":        info.OS,
+		"arch":      info.Arch,
+		"cpu":       info.CPU,
+		"ram":       info.RAM,
+		"gpu":       info.GPU,
+		"tailscale": info.Tailscale,
+		"node_url":  info.NodeURL,
+		"pipeline": map[string]interface{}{
+			"stats":              statsCopy,
+			"recent_ingests":     recentIngestsCopy,
+			"recent_master_jobs": recentMasterJobsCopy,
+		},
+	}
+
+	writeJSON(w, http.StatusOK, response)
 }
 
 // POST /api/v1/raw/decode
@@ -541,6 +588,110 @@ func (d *Daemon) handleRawDecode(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Image-Height", strconv.Itoa(result.Height))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(result.Data)
+}
+
+// POST /api/v1/raw/ingest-batch
+func (d *Daemon) handleRawIngestBatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req processor.IngestBatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON: " + err.Error()})
+		return
+	}
+
+	d.mu.RLock()
+	cpuCores := d.cfg.Hardware.CPUCores
+	d.mu.RUnlock()
+
+	result, err := d.proc.ProcessIngestBatch(req, cpuCores)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	d.pipelineMu.Lock()
+	d.stats.IngestBatchesCount++
+	d.stats.IngestPhotosTotal += int64(result.Total)
+	d.stats.IngestApprovedTotal += int64(result.ApprovedCount)
+	d.stats.IngestReviewTotal += int64(result.ReviewCount)
+	d.stats.IngestRejectedTotal += int64(result.RejectedCount)
+
+	d.recentIngests = append([]processor.IngestBatchResult{*result}, d.recentIngests...)
+	if len(d.recentIngests) > 10 {
+		d.recentIngests = d.recentIngests[:10]
+	}
+	d.pipelineMu.Unlock()
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// POST /api/v1/raw/master-export
+func (d *Daemon) handleRawMasterExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req processor.MasterExportRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON: " + err.Error()})
+		return
+	}
+
+	d.mu.RLock()
+	gpuEnabled := d.cfg.Hardware.GPUEnabled
+	cpuCores := d.cfg.Hardware.CPUCores
+	d.mu.RUnlock()
+
+	result, err := d.proc.ProcessMasterExport(req, "export/final", gpuEnabled, cpuCores)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	d.pipelineMu.Lock()
+	d.stats.MasterJobsCount++
+	d.stats.MasterPhotosTotal += int64(result.Total)
+	d.stats.MasterSuccessTotal += int64(result.SuccessCount)
+
+	d.recentMasterJobs = append([]processor.MasterExportResult{*result}, d.recentMasterJobs...)
+	if len(d.recentMasterJobs) > 10 {
+		d.recentMasterJobs = d.recentMasterJobs[:10]
+	}
+	d.pipelineMu.Unlock()
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// GET /api/v1/pipeline/status
+func (d *Daemon) handlePipelineStatus(w http.ResponseWriter, r *http.Request) {
+	d.pipelineMu.RLock()
+	statsCopy := d.stats
+	recentIngestsCopy := make([]processor.IngestBatchResult, len(d.recentIngests))
+	copy(recentIngestsCopy, d.recentIngests)
+	recentMasterJobsCopy := make([]processor.MasterExportResult, len(d.recentMasterJobs))
+	copy(recentMasterJobsCopy, d.recentMasterJobs)
+	d.pipelineMu.RUnlock()
+
+	d.mu.RLock()
+	gpu := d.cfg.Hardware.GPUEnabled
+	cores := d.cfg.Hardware.CPUCores
+	d.mu.RUnlock()
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":             "ready",
+		"engine":             "zorya",
+		"version":            "1.0.0",
+		"gpu_enabled":        gpu,
+		"cpu_cores":          cores,
+		"stats":              statsCopy,
+		"recent_ingests":     recentIngestsCopy,
+		"recent_master_jobs": recentMasterJobsCopy,
+	})
 }
 
 // POST /api/v1/config/save

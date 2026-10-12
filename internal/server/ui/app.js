@@ -149,6 +149,22 @@ document.addEventListener('DOMContentLoaded', () => {
         urlDisplay.value = data.node_url;
       }
 
+      // Update 2-Stage Queues Telemetry
+      if (data.pipeline && data.pipeline.stats) {
+        const stats = data.pipeline.stats;
+        const q1Total = document.getElementById('q1-total');
+        const q1App = document.getElementById('q1-approved');
+        const q1Rev = document.getElementById('q1-review');
+        const q2Jobs = document.getElementById('q2-jobs');
+        const q2Mast = document.getElementById('q2-mastered');
+
+        if (q1Total) q1Total.textContent = stats.ingest_photos_total || 0;
+        if (q1App) q1App.textContent = stats.ingest_approved_total || 0;
+        if (q1Rev) q1Rev.textContent = ((stats.ingest_review_total || 0) + (stats.ingest_rejected_total || 0)) || 0;
+        if (q2Jobs) q2Jobs.textContent = stats.master_jobs_count || 0;
+        if (q2Mast) q2Mast.textContent = stats.master_success_total || 0;
+      }
+
     } catch (err) {
       const statusLabel = document.getElementById('status-label');
       if (statusLabel) statusLabel.textContent = 'Reconectando...';

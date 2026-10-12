@@ -63,6 +63,65 @@
           </div>
         </div>
 
+        <!-- SEÇÃO DAS DUAS FILAS DO MOTOR DE PROCESSAMENTO (LightCraft & PhotoCraft) -->
+        <div class="card-panel" style="margin-bottom: 24px;">
+          <div class="panel-header">
+            <div class="panel-icon">&#9889;</div>
+            <div>
+              <h2>Filas do Motor de Processamento em 2 Estágios</h2>
+              <p>Tecnologia integrada LightCraft (Ingestão & Culling) e PhotoCraft (Masterização & Denoise)</p>
+            </div>
+          </div>
+
+          <div class="queues-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; margin-top: 14px;">
+            <!-- Fila 1 -->
+            <div class="queue-box" style="background: var(--bg-card-subtle); border: 1px solid var(--border-light); border-radius: var(--radius-sm); padding: 18px;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <h3 style="font-size: 0.95rem; font-weight: 700; margin: 0; color: var(--primary);">⚡ Estágio 1: Ingestão & Culling Rápido</h3>
+                <span class="badge-accent" id="queue1-status" style="font-size: 11px;">LightCraft</span>
+              </div>
+              <p style="font-size: 0.8rem; color: var(--text-muted); margin: 0 0 14px 0;">Culling de nitidez (Laplaciano), balanço de branco neutro, miniatura 2048px e marca d'água de prova.</p>
+              <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center;">
+                <div style="background: var(--bg-canvas); padding: 8px; border-radius: var(--radius-sm); border: 1px solid var(--border-light);">
+                  <span style="display: block; font-size: 0.7rem; color: var(--text-muted);">Total Triado</span>
+                  <strong style="font-size: 1.15rem; color: var(--text-main);" id="q1-total">0</strong>
+                </div>
+                <div style="background: var(--bg-canvas); padding: 8px; border-radius: var(--radius-sm); border: 1px solid var(--border-light);">
+                  <span style="display: block; font-size: 0.7rem; color: #2E7D32;">Aprovadas</span>
+                  <strong style="font-size: 1.15rem; color: #2E7D32;" id="q1-approved">0</strong>
+                </div>
+                <div style="background: var(--bg-canvas); padding: 8px; border-radius: var(--radius-sm); border: 1px solid var(--border-light);">
+                  <span style="display: block; font-size: 0.7rem; color: #E65100;">Revisão/Rej.</span>
+                  <strong style="font-size: 1.15rem; color: #E65100;" id="q1-review">0</strong>
+                </div>
+              </div>
+            </div>
+
+            <!-- Fila 2 -->
+            <div class="queue-box" style="background: var(--bg-card-subtle); border: 1px solid var(--border-light); border-radius: var(--radius-sm); padding: 18px;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <h3 style="font-size: 0.95rem; font-weight: 700; margin: 0; color: #8B5E3C;">💎 Estágio 2: Masterização & Denoise</h3>
+                <span class="badge-accent" id="queue2-status" style="font-size: 11px;">PhotoCraft Float32</span>
+              </div>
+              <p style="font-size: 0.8rem; color: var(--text-muted); margin: 0 0 14px 0;">Pipeline linear 32-bit, denoise bilateral luma/chroma preservando pele, correção de lente e resolução nativa.</p>
+              <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center;">
+                <div style="background: var(--bg-canvas); padding: 8px; border-radius: var(--radius-sm); border: 1px solid var(--border-light);">
+                  <span style="display: block; font-size: 0.7rem; color: var(--text-muted);">Lotes Pagos</span>
+                  <strong style="font-size: 1.15rem; color: var(--text-main);" id="q2-jobs">0</strong>
+                </div>
+                <div style="background: var(--bg-canvas); padding: 8px; border-radius: var(--radius-sm); border: 1px solid var(--border-light);">
+                  <span style="display: block; font-size: 0.7rem; color: #1565C0;">Masterizadas</span>
+                  <strong style="font-size: 1.15rem; color: #1565C0;" id="q2-mastered">0</strong>
+                </div>
+                <div style="background: var(--bg-canvas); padding: 8px; border-radius: var(--radius-sm); border: 1px solid var(--border-light);">
+                  <span style="display: block; font-size: 0.7rem; color: var(--text-muted);">Pasta Entrega</span>
+                  <strong style="font-size: 0.8rem; color: var(--text-main); word-break: break-all;" id="q2-dest">/export/final</strong>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <form id="zorya-form" onsubmit="return false;">
 
           <div class="panels-grid">
