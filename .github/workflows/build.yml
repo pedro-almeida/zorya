@@ -12,9 +12,10 @@ permissions:
 
 jobs:
   build:
-    name: Build Zorya (${{ matrix.os }})
+    name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ ubuntu-latest, windows-latest ]
         include:
@@ -26,7 +27,7 @@ jobs:
             binary_name: zorya.exe
 
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Go
@@ -35,9 +36,13 @@ jobs:
           go-version: '1.22'
           check-latest: true
 
-      - name: Build Binary (Pure Go / Zero-CGO)
-        env:
-          CGO_ENABLED: 0
+      - name: Install Build Essentials (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ make
+
+      - name: Compile
         run: |
           go mod tidy
           go build -v -ldflags="-s -w" -o ${{ matrix.binary_name }} ./cmd/zorya
@@ -49,17 +54,15 @@ jobs:
           path: ${{ matrix.binary_name }}
 
   release:
-    name: Publish GitHub Release
+    name: GitHub Release
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
-
       - name: Download Artifacts
         uses: actions/download-artifact@v4
-
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:

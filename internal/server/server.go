@@ -15,6 +15,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -180,7 +182,7 @@ func (d *Daemon) Start() error {
 	addr := fmt.Sprintf("%s:%d", host, d.cfg.Server.Port)
 	d.server = &http.Server{
 		Addr:    addr,
-		Handler: mux,
+		Handler: d.corsMiddleware(mux),
 	}
 
 	listener, err := net.Listen("tcp", addr)
@@ -239,6 +241,17 @@ func (d *Daemon) mountRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/grid/config", d.wrapCORS(d.handleConfig))
 }
 
+func (d *Daemon) corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		enableCORS(w)
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (d *Daemon) wrapCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		enableCORS(w)
@@ -294,14 +307,10 @@ func (d *Daemon) handleUIAssets(w http.ResponseWriter, r *http.Request) {
 
 // GET /health
 func (d *Daemon) handleHealth(w http.ResponseWriter, r *http.Request) {
-	uptime := int64(time.Since(d.startTime).Seconds())
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":         "healthy",
-		"version":        "1.0.0",
-		"uptime_seconds": uptime,
-		"daemon":         "Zorya RAW Processing Engine",
-		"node_id":        d.cfg.Node.ID,
-		"role":           d.cfg.Node.Role,
+		"status":  "ready",
+		"engine":  "zorya",
+		"version": "1.0.0",
 	})
 }
 
@@ -337,12 +346,30 @@ func (d *Daemon) handleRawDecode(w http.ResponseWriter, r *http.Request) {
 	}
 	d.mu.RUnlock()
 
+	// Default target format is webp for high compression & fidelity
+	if opts.Format == "" {
+		opts.Format = "webp"
+	}
+
 	var fileReader io.Reader
 	var filename string
+	var localFileToClose *os.File
+
+	defer func() {
+		if localFileToClose != nil {
+			_ = localFileToClose.Close()
+		}
+	}()
 
 	contentType := r.Header.Get("Content-Type")
 
-	// 1. Multipart/form-data upload
+	// Check for local file path via query parameter
+	localPath := r.URL.Query().Get("path")
+	if localPath == "" {
+		localPath = r.URL.Query().Get("file_path")
+	}
+
+	// 1. Multipart/form-data upload or form with local path
 	if strings.HasPrefix(contentType, "multipart/form-data") {
 		err := r.ParseMultipartForm(64 << 20) // 64 MB in-memory buffer
 		if err != nil {
@@ -350,7 +377,6 @@ func (d *Daemon) handleRawDecode(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Read optional query or form options
 		if fmtParam := r.FormValue("format"); fmtParam != "" {
 			opts.Format = fmtParam
 		}
@@ -360,27 +386,55 @@ func (d *Daemon) handleRawDecode(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		file, header, err := r.FormFile("file")
-		if err != nil {
-			file, header, err = r.FormFile("raw_file")
+		if localPath == "" {
+			localPath = r.FormValue("path")
+			if localPath == "" {
+				localPath = r.FormValue("file_path")
+			}
+			if localPath == "" {
+				localPath = r.FormValue("local_path")
+			}
 		}
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Missing 'file' field in multipart form"})
-			return
-		}
-		defer file.Close()
 
-		fileReader = file
-		filename = header.Filename
+		if localPath != "" {
+			f, err := os.Open(localPath)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to open local path: " + err.Error()})
+				return
+			}
+			localFileToClose = f
+			fileReader = f
+			filename = filepath.Base(localPath)
+		} else {
+			file, header, err := r.FormFile("file")
+			if err != nil {
+				file, header, err = r.FormFile("raw_file")
+			}
+			if err != nil {
+				file, header, err = r.FormFile("image")
+			}
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Missing 'file' or 'path' in multipart form"})
+				return
+			}
+			defer file.Close()
+			fileReader = file
+			filename = header.Filename
+		}
 
 	} else {
 		// 2. JSON or Raw stream payload
 		var jsonReq struct {
 			RAWID        string `json:"raw_id"`
 			Filename     string `json:"filename"`
+			Path         string `json:"path"`
+			FilePath     string `json:"file_path"`
+			LocalPath    string `json:"local_path"`
 			RawBase64    string `json:"raw_base64"`
 			RawURL       string `json:"raw_url"`
 			ResultFormat string `json:"result_format"`
+			Format       string `json:"format"`
+			Quality      int    `json:"quality"`
 		}
 
 		bodyBytes, err := io.ReadAll(r.Body)
@@ -389,12 +443,37 @@ func (d *Daemon) handleRawDecode(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := json.Unmarshal(bodyBytes, &jsonReq); err == nil && (jsonReq.RawBase64 != "" || jsonReq.RawURL != "") {
-			filename = jsonReq.Filename
+		if err := json.Unmarshal(bodyBytes, &jsonReq); err == nil {
+			if jsonReq.Quality > 0 {
+				opts.Quality = jsonReq.Quality
+			}
 			if jsonReq.ResultFormat != "" {
 				opts.Format = jsonReq.ResultFormat
+			} else if jsonReq.Format != "" {
+				opts.Format = jsonReq.Format
 			}
-			if jsonReq.RawBase64 != "" {
+
+			if localPath == "" {
+				if jsonReq.Path != "" {
+					localPath = jsonReq.Path
+				} else if jsonReq.FilePath != "" {
+					localPath = jsonReq.FilePath
+				} else if jsonReq.LocalPath != "" {
+					localPath = jsonReq.LocalPath
+				}
+			}
+
+			if localPath != "" {
+				f, err := os.Open(localPath)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to open local path: " + err.Error()})
+					return
+				}
+				localFileToClose = f
+				fileReader = f
+				filename = filepath.Base(localPath)
+			} else if jsonReq.RawBase64 != "" {
+				filename = jsonReq.Filename
 				b64 := jsonReq.RawBase64
 				if idx := strings.Index(b64, ","); idx != -1 {
 					b64 = b64[idx+1:]
@@ -406,6 +485,7 @@ func (d *Daemon) handleRawDecode(w http.ResponseWriter, r *http.Request) {
 				}
 				fileReader = bytes.NewReader(rawDecoded)
 			} else if jsonReq.RawURL != "" {
+				filename = jsonReq.Filename
 				client := &http.Client{Timeout: 15 * time.Second}
 				resp, err := client.Get(jsonReq.RawURL)
 				if err != nil {
@@ -416,10 +496,25 @@ func (d *Daemon) handleRawDecode(w http.ResponseWriter, r *http.Request) {
 				buf, _ := io.ReadAll(resp.Body)
 				fileReader = bytes.NewReader(buf)
 			}
-		} else {
-			// Direct binary stream
-			fileReader = bytes.NewReader(bodyBytes)
-			filename = "input.raw"
+		}
+
+		if fileReader == nil {
+			if localPath != "" {
+				f, err := os.Open(localPath)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to open local path: " + err.Error()})
+					return
+				}
+				localFileToClose = f
+				fileReader = f
+				filename = filepath.Base(localPath)
+			} else if len(bodyBytes) > 0 {
+				fileReader = bytes.NewReader(bodyBytes)
+				filename = "input.raw"
+			} else {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Empty payload or missing file/path"})
+				return
+			}
 		}
 	}
 
@@ -434,8 +529,12 @@ func (d *Daemon) handleRawDecode(w http.ResponseWriter, r *http.Request) {
 
 	atomic.AddInt64(&d.completedN, 1)
 
-	// Return binary stream with informative performance headers
-	w.Header().Set("Content-Type", "image/"+result.Format)
+	// Return binary stream with Content-Type: image/webp (or appropriate image format)
+	contentTypeHeader := "image/" + result.Format
+	if result.Format == "webp" {
+		contentTypeHeader = "image/webp"
+	}
+	w.Header().Set("Content-Type", contentTypeHeader)
 	w.Header().Set("X-Processing-Time-Ms", strconv.FormatInt(result.ElapsedMs, 10))
 	w.Header().Set("X-Accelerator-Used", result.Accelerator)
 	w.Header().Set("X-Image-Width", strconv.Itoa(result.Width))
@@ -757,6 +856,7 @@ func enableCORS(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Type, X-Processing-Time-Ms, X-Accelerator-Used, X-Image-Width, X-Image-Height")
 }
 
 func writeJSON(w http.ResponseWriter, code int, payload interface{}) {

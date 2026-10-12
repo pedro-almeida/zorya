@@ -80,6 +80,26 @@ func (p *Processor) DecodeStream(r io.Reader, filename string, opts DecodeOption
 	// 1. Try extracting embedded camera JPEG preview (standard in CR2, CR3, NEF, ARW, DNG, RAF, etc.)
 	extractedJPEG := extractEmbeddedPreviewJPEG(data)
 
+	if len(extractedJPEG) > 0 && opts.Format == "webp" {
+		webpData, err := transcodeJPEGBytesToWebP(extractedJPEG, opts.Quality)
+		if err == nil && len(webpData) > 0 {
+			cfg, _, errCfg := image.DecodeConfig(bytes.NewReader(extractedJPEG))
+			w, h := 1920, 1080
+			if errCfg == nil {
+				w, h = cfg.Width, cfg.Height
+			}
+			elapsed := time.Since(start).Milliseconds()
+			return &ProcessResult{
+				Data:        webpData,
+				Format:      "webp",
+				Width:       w,
+				Height:      h,
+				ElapsedMs:   elapsed,
+				Accelerator: accelerator,
+			}, nil
+		}
+	}
+
 	var srcImage image.Image
 	var width, height int
 
@@ -243,6 +263,21 @@ func encodeToWebP(img image.Image, quality int) ([]byte, error) {
 	}
 
 	return nil, fmt.Errorf("ffmpeg webp encoder unavailable")
+}
+
+// transcodeJPEGBytesToWebP directly converts a JPEG byte stream to WebP via ffmpeg for maximum throughput.
+func transcodeJPEGBytesToWebP(jpegBytes []byte, quality int) ([]byte, error) {
+	cmd := exec.Command("ffmpeg", "-y", "-f", "image2pipe", "-vcodec", "mjpeg", "-i", "-",
+		"-c:v", "libwebp", "-quality", fmt.Sprintf("%d", quality), "-f", "webp", "-")
+	cmd.Stdin = bytes.NewReader(jpegBytes)
+	var outBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+
+	if err := cmd.Run(); err == nil && outBuf.Len() > 0 {
+		return outBuf.Bytes(), nil
+	}
+
+	return nil, fmt.Errorf("ffmpeg webp transcode failed")
 }
 
 // generateFallbackFrame creates an artistic Svitlo RAW frame.
