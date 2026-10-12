@@ -5,6 +5,8 @@
 *.dylib
 bin/
 dist/
+target/
+cache/
 *.log
 .env
 config.yaml

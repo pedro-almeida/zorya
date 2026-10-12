@@ -1,0 +1,33 @@
+[package]
+name = "zorya"
+version = "2.0.0"
+edition = "2021"
+authors = ["Pedro Luís Fotografia <pedro@tenorio.fot.br>"]
+description = "Unified high-performance audio-visual daemon and MCP server integrating LightCraft, PhotoCraft, FilmCraft, EffectCraft and SoundCraft"
+
+[features]
+default = ["photo", "video", "audio"]
+photo = []
+video = []
+audio = []
+
+[dependencies]
+tokio = { version = "1.40", default-features = false, features = ["rt-multi-thread", "macros", "net", "sync", "fs", "io-util", "time"] }
+axum = { version = "0.7", features = ["macros"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "tiff"] }
+rayon = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+walkdir = "2.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
+anyhow = "1.0"
+crossbeam-channel = "0.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
