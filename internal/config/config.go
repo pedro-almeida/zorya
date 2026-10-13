@@ -16,7 +16,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/pedro-almeida/zorya/internal/sysproc"
+	"syscall"
 )
 
 // Role defines the operation role of this node in the Tailscale grid.
@@ -368,11 +368,17 @@ func ApplyWindowsAutostart(enabled bool) error {
 	if enabled {
 		cmdVal := fmt.Sprintf(`"%s" --background`, exePath)
 		cmd := exec.Command("reg", "add", regKey, "/v", valName, "/t", "REG_SZ", "/d", cmdVal, "/f")
-		sysproc.PrepareCmd(cmd)
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			HideWindow:    true,
+			CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+		}
 		return cmd.Run()
 	} else {
 		cmd := exec.Command("reg", "delete", regKey, "/v", valName, "/f")
-		sysproc.PrepareCmd(cmd)
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			HideWindow:    true,
+			CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+		}
 		_ = cmd.Run()
 		return nil
 	}

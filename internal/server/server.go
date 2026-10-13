@@ -31,7 +31,7 @@ import (
 	"github.com/pedro-almeida/zorya/internal/network"
 	"github.com/pedro-almeida/zorya/internal/processor"
 	"github.com/pedro-almeida/zorya/internal/server/ui"
-	"github.com/pedro-almeida/zorya/internal/sysproc"
+	"syscall"
 )
 
 // NodeStatus defines the operational condition of a worker node.
@@ -1156,7 +1156,10 @@ func (d *Daemon) handleBrowseFolder(w http.ResponseWriter, r *http.Request) {
 	if runtime.GOOS == "windows" {
 		psScript := `Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Selecione a pasta com os arquivos RAW do Ensaio'; if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.SelectedPath }`
 		cmd := exec.Command("powershell", "-NoProfile", "-Command", psScript)
-		sysproc.PrepareCmd(cmd)
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			HideWindow:    true,
+			CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+		}
 		out, err := cmd.Output()
 		if err != nil {
 			writeJSON(w, http.StatusOK, browseResult{Selected: false, Error: err.Error()})
