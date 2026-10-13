@@ -73,6 +73,30 @@ func main() {
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	// Inicialização da Bandeja do Sistema (System Tray com estados dinâmicos)
+	tray := server.NewTray()
+	daemon.SetTray(tray)
+
+	onReload := func() {
+		log.Println("[Zorya Tray] Recarregando configurações e reiniciando componentes...")
+		if newCfg, err := config.Load(*configFlag); err == nil {
+			log.Printf("[Zorya Tray] Configuração recarregada com sucesso (Porta=%d, Modo=%s)", newCfg.Server.Port, newCfg.Server.ListenMode)
+		}
+	}
+
+	onExit := func() {
+		select {
+		case sigChan <- os.Interrupt:
+		default:
+		}
+	}
+
+	if err := tray.Init(cfg.Server.Port, onReload, onExit); err != nil {
+		log.Printf("[Zorya AVISO] Não foi possível inicializar bandeja do sistema: %v", err)
+	}
+	defer tray.Close()
+
 	<-sigChan
 
 	if !*backgroundFlag {

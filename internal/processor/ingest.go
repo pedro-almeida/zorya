@@ -31,6 +31,7 @@ type IngestBatchRequest struct {
 	WatermarkOpacity  float64          `json:"watermark_opacity"`
 	WatermarkPosition string           `json:"watermark_position"`
 	Concurrency       int              `json:"concurrency"`
+	ServerPort        int              `json:"server_port,omitempty"`
 }
 
 // IngestItemResult holds metrics and outputs for a single photo in the batch.
@@ -39,6 +40,7 @@ type IngestItemResult struct {
 	Filename          string  `json:"filename"`
 	ThumbnailPath     string  `json:"thumbnail_path"`
 	ThumbnailFilename string  `json:"thumbnail_filename"`
+	ThumbnailURL      string  `json:"thumbnail_url,omitempty"`
 	Width             int     `json:"width"`
 	Height            int     `json:"height"`
 	SharpnessScore    float64 `json:"sharpness_score"`
@@ -142,12 +144,17 @@ func (p *Processor) ProcessIngestBatch(req IngestBatchRequest, cpuCores int) (*I
 	jobsChan := make(chan job, len(files))
 	var wg sync.WaitGroup
 
+	serverPort := req.ServerPort
+	if serverPort <= 0 {
+		serverPort = 9876
+	}
+
 	for w := 0; w < concurrency; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for j := range jobsChan {
-				itemRes := p.processSingleIngestItem(j.path, outDir, targetW, quality, wmOpts)
+				itemRes := p.processSingleIngestItem(j.path, outDir, targetW, quality, wmOpts, serverPort)
 				results[j.index] = itemRes
 			}
 		}()
@@ -202,7 +209,7 @@ func (p *Processor) ProcessIngestBatch(req IngestBatchRequest, cpuCores int) (*I
 }
 
 // processSingleIngestItem ingests, culls, scales, watermarks and saves a single photo.
-func (p *Processor) processSingleIngestItem(rawPath, outDir string, targetW, quality int, wmOpts WatermarkOptions) IngestItemResult {
+func (p *Processor) processSingleIngestItem(rawPath, outDir string, targetW, quality int, wmOpts WatermarkOptions, serverPort int) IngestItemResult {
 	start := time.Now()
 	filename := filepath.Base(rawPath)
 	ext := filepath.Ext(filename)
@@ -292,6 +299,7 @@ func (p *Processor) processSingleIngestItem(rawPath, outDir string, targetW, qua
 
 	res.ThumbnailPath = thumbPath
 	res.ThumbnailFilename = thumbFilename
+	res.ThumbnailURL = fmt.Sprintf("http://127.0.0.1:%d/thumbnails/%s", serverPort, thumbFilename)
 	res.ElapsedMs = time.Since(start).Milliseconds()
 	res.Status = "SUCCESS"
 

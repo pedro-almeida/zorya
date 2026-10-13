@@ -16,7 +16,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -146,6 +148,7 @@ type Daemon struct {
 	recentIngests    []processor.IngestBatchResult
 	recentMasterJobs []processor.MasterExportResult
 
+	tray   TrayManager
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -227,6 +230,18 @@ func (d *Daemon) Start() error {
 	return nil
 }
 
+// SetTray associates the system tray manager with the daemon.
+func (d *Daemon) SetTray(t TrayManager) {
+	d.tray = t
+}
+
+// SetTrayActive toggles the tray icon between Standby (grayscale) and Active (colorful).
+func (d *Daemon) SetTrayActive(active bool) {
+	if d.tray != nil {
+		d.tray.SetActive(active)
+	}
+}
+
 // Stop cleanly terminates HTTP listeners and background routines.
 func (d *Daemon) Stop() {
 	d.cancel()
@@ -252,6 +267,19 @@ func (d *Daemon) mountRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/raw/master-export", d.wrapCORS(d.handleRawMasterExport))
 	mux.HandleFunc("/api/v1/pipeline/status", d.wrapCORS(d.handlePipelineStatus))
 	mux.HandleFunc("/api/v1/config/save", d.wrapCORS(d.handleConfigSave))
+	mux.HandleFunc("/api/v1/system/browse-folder", d.wrapCORS(d.handleBrowseFolder))
+
+	// Servidor de Thumbnails com cabeçalhos de CORS liberados
+	mux.HandleFunc("/thumbnails/", d.wrapCORS(func(w http.ResponseWriter, r *http.Request) {
+		filePath := strings.TrimPrefix(r.URL.Path, "/thumbnails/")
+		fullPath := filepath.Join("thumbnails", filepath.Clean(filePath))
+		if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		http.ServeFile(w, r, fullPath)
+	}))
 
 	// 3. BACKWARD COMPATIBLE GRID ENDPOINTS
 	mux.HandleFunc("/api/grid/register", d.wrapCORS(d.handleRegister))
@@ -597,10 +625,17 @@ func (d *Daemon) handleRawIngestBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	d.SetTrayActive(true)
+	defer d.SetTrayActive(false)
+
 	var req processor.IngestBatchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON: " + err.Error()})
 		return
+	}
+
+	if req.ServerPort <= 0 {
+		req.ServerPort = d.cfg.Server.Port
 	}
 
 	d.mu.RLock()
@@ -635,6 +670,9 @@ func (d *Daemon) handleRawMasterExport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	d.SetTrayActive(true)
+	defer d.SetTrayActive(false)
 
 	var req processor.MasterExportRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -970,9 +1008,8 @@ func (d *Daemon) handleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 
 func (d *Daemon) handleConfig(w http.ResponseWriter, r *http.Request) {
 	d.mu.RLock()
-	cfgCopy := *d.cfg
-	d.mu.RUnlock()
-	writeJSON(w, http.StatusOK, cfgCopy)
+	defer d.mu.RUnlock()
+	writeJSON(w, http.StatusOK, d.cfg)
 }
 
 // Background loops for Master / Worker nodes
@@ -1016,4 +1053,32 @@ func writeJSON(w http.ResponseWriter, code int, payload interface{}) {
 	if payload != nil {
 		_ = json.NewEncoder(w).Encode(payload)
 	}
+}
+
+// GET /api/v1/system/browse-folder
+func (d *Daemon) handleBrowseFolder(w http.ResponseWriter, r *http.Request) {
+	type browseResult struct {
+		Selected bool   `json:"selected"`
+		Path     string `json:"path,omitempty"`
+		Error    string `json:"error,omitempty"`
+	}
+
+	if runtime.GOOS == "windows" {
+		psScript := `Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Selecione a pasta com os arquivos RAW do Ensaio'; if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.SelectedPath }`
+		cmd := exec.Command("powershell", "-NoProfile", "-Command", psScript)
+		out, err := cmd.Output()
+		if err != nil {
+			writeJSON(w, http.StatusOK, browseResult{Selected: false, Error: err.Error()})
+			return
+		}
+		selectedPath := strings.TrimSpace(string(out))
+		if selectedPath != "" {
+			writeJSON(w, http.StatusOK, browseResult{Selected: true, Path: selectedPath})
+			return
+		}
+		writeJSON(w, http.StatusOK, browseResult{Selected: false})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, browseResult{Selected: false, Error: "Seletor nativo disponível apenas no Windows"})
 }
