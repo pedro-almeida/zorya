@@ -257,6 +257,14 @@ func (d *Daemon) Stop() {
 	log.Println("[Zorya Daemon] Encerrado com sucesso.")
 }
 
+// Restart cleanly re-initializes and starts the daemon.
+func (d *Daemon) Restart() error {
+	log.Println("[Zorya Daemon] Reiniciando serviço...")
+	d.Stop()
+	d.ctx, d.cancel = context.WithCancel(context.Background())
+	return d.Start()
+}
+
 // mountRoutes registers the embedded UI, REST v1 API, and backward-compatible grid routes.
 func (d *Daemon) mountRoutes(mux *http.ServeMux) {
 	// 1. EMBEDDED WEB UI (Svitlo Style)
@@ -277,10 +285,15 @@ func (d *Daemon) mountRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/raw/master-export", d.wrapCORS(d.handleRawMasterExport))
 	mux.HandleFunc("/api/v1/pipeline/status", d.wrapCORS(d.handlePipelineStatus))
 	mux.HandleFunc("/api/v1/config/save", d.wrapCORS(d.handleConfigSave))
-	mux.HandleFunc("/api/v1/system/browse-folder", d.wrapCORS(d.handleBrowseFolder))
 
-	// Servidor de Thumbnails com cabeçalhos de CORS liberados
-	mux.HandleFunc("/thumbnails/", d.wrapCORS(func(w http.ResponseWriter, r *http.Request) {
+	// Registrar a pasta local 'thumbnails' para servir os WebPs:
+	_ = os.MkdirAll("thumbnails", 0755)
+	mux.HandleFunc("/thumbnails/", func(w http.ResponseWriter, r *http.Request) {
+		applyPNAHeaders(w)
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		filePath := strings.TrimPrefix(r.URL.Path, "/thumbnails/")
 		fullPath := filepath.Join("thumbnails", filepath.Clean(filePath))
 		if _, err := os.Stat(fullPath); os.IsNotExist(err) {
@@ -289,6 +302,20 @@ func (d *Daemon) mountRoutes(mux *http.ServeMux) {
 		}
 		w.Header().Set("Cache-Control", "public, max-age=86400")
 		http.ServeFile(w, r, fullPath)
+	})
+
+	// Endpoint nativo de seleção de pastas sem abrir janela preta:
+	mux.HandleFunc("/api/v1/system/browse-folder", d.wrapCORS(func(w http.ResponseWriter, r *http.Request) {
+		cmd := exec.Command("powershell", "-NoProfile", "-Command", "Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Selecione a pasta do Ensaio'; if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.SelectedPath }")
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+		out, err := cmd.Output()
+		caminho := strings.TrimSpace(string(out))
+		w.Header().Set("Content-Type", "application/json")
+		if err == nil && caminho != "" {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"selected": true, "path": caminho})
+		} else {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"selected": false})
+		}
 	}))
 
 	// 3. BACKWARD COMPATIBLE GRID ENDPOINTS
@@ -301,9 +328,16 @@ func (d *Daemon) mountRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/grid/config", d.wrapCORS(d.handleConfig))
 }
 
+func applyPNAHeaders(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "https://www.tenorio.fot.br")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Authorization, X-Requested-With")
+	w.Header().Set("Access-Control-Allow-Private-Network", "true")
+}
+
 func (d *Daemon) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		enableCORS(w)
+		applyPNAHeaders(w)
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
 			return
@@ -314,7 +348,7 @@ func (d *Daemon) corsMiddleware(next http.Handler) http.Handler {
 
 func (d *Daemon) wrapCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		enableCORS(w)
+		applyPNAHeaders(w)
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
 			return

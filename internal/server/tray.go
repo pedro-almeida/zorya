@@ -1,12 +1,11 @@
-// PT: Interface e Gerenciador da Bandeja do Sistema (System Tray)
-// EN: Interface and Manager for System Tray
-// AI: @llm-context Módulo Zorya v1.0.0 / System Tray e Ciclo de Vida Visual
-
 package server
 
 import (
 	_ "embed"
+	"os/exec"
+	"syscall"
 
+	"github.com/getlantern/systray"
 	"github.com/pedro-almeida/zorya/assets"
 )
 
@@ -27,7 +26,36 @@ type TrayManager interface {
 	Close()
 }
 
-// NewTray instantiates the platform-specific tray manager.
-func NewTray() TrayManager {
-	return newPlatformTray()
+func RunTray(onOpenWeb func(), onRestart func(), onExit func()) {
+	systray.Run(func() {
+		systray.SetIcon(defaultIconBytes)
+		systray.SetTitle("Zorya RAW Engine")
+		systray.SetTooltip("Zorya RAW Engine — Standby (Ocioso)")
+
+		mOpen := systray.AddMenuItem("⚡ Abrir Painel Web", "Abre o Svitlo no navegador")
+		mRestart := systray.AddMenuItem("🔄 Reiniciar Zorya", "Reinicia os serviços locais")
+		systray.AddSeparator()
+		mQuit := systray.AddMenuItem("❌ Sair do Zorya", "Encerra a usina")
+
+		go func() {
+			for {
+				select {
+				case <-mOpen.ClickedCh:
+					cmd := exec.Command("cmd", "/c", "start", "http://localhost:9876")
+					cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+					_ = cmd.Start()
+				case <-mRestart.ClickedCh:
+					if onRestart != nil {
+						onRestart()
+					}
+				case <-mQuit.ClickedCh:
+					systray.Quit()
+					if onExit != nil {
+						onExit()
+					}
+					return
+				}
+			}
+		}()
+	}, func() {})
 }
