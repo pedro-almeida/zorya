@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/pedro-almeida/zorya/internal/sysproc"
 )
 
 // DecodeOptions defines parameters for RAW processing.
@@ -228,6 +230,7 @@ func decodeWithFFmpeg(rawBytes []byte, filename string) (image.Image, int, int, 
 
 	// Run ffmpeg to extract JPEG frame to stdout
 	cmd := exec.Command("ffmpeg", "-y", "-i", tmpPath, "-vframes", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "-")
+	sysproc.PrepareCmd(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -254,6 +257,7 @@ func encodeToWebP(img image.Image, quality int) ([]byte, error) {
 	// Pipe JPEG into ffmpeg for hardware/SIMD WebP encoding
 	cmd := exec.Command("ffmpeg", "-y", "-f", "image2pipe", "-vcodec", "mjpeg", "-i", "-",
 		"-c:v", "libwebp", "-quality", fmt.Sprintf("%d", quality), "-f", "webp", "-")
+	sysproc.PrepareCmd(cmd)
 	cmd.Stdin = &jpegBuf
 	var outBuf bytes.Buffer
 	cmd.Stdout = &outBuf
@@ -269,6 +273,7 @@ func encodeToWebP(img image.Image, quality int) ([]byte, error) {
 func transcodeJPEGBytesToWebP(jpegBytes []byte, quality int) ([]byte, error) {
 	cmd := exec.Command("ffmpeg", "-y", "-f", "image2pipe", "-vcodec", "mjpeg", "-i", "-",
 		"-c:v", "libwebp", "-quality", fmt.Sprintf("%d", quality), "-f", "webp", "-")
+	sysproc.PrepareCmd(cmd)
 	cmd.Stdin = bytes.NewReader(jpegBytes)
 	var outBuf bytes.Buffer
 	cmd.Stdout = &outBuf

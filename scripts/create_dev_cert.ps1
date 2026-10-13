@@ -56,9 +56,6 @@ try {
     $Store.Close()
     Write-Host "[OK] Registrado com sucesso em TrustedPublisher!" -ForegroundColor Green
 } catch {
-    Write-Warning "Nao foi possivel adicionar em TrustedPublisher: $($_.Exception.Message)"
-}
-
 Write-Host ""
 Write-Host "Para assinar manualmente qualquer binario local, execute:" -ForegroundColor Cyan
 Write-Host "Set-AuthenticodeSignature -FilePath .\target\release\zorya.exe -Certificate (Get-Item 'Cert:\CurrentUser\My\$($Cert.Thumbprint)') -TimestampServer 'http://timestamp.digicert.com'" -ForegroundColor White

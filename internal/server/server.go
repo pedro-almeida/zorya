@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
 	"io"
 	"io/fs"
 	"log"
@@ -30,6 +31,7 @@ import (
 	"github.com/pedro-almeida/zorya/internal/network"
 	"github.com/pedro-almeida/zorya/internal/processor"
 	"github.com/pedro-almeida/zorya/internal/server/ui"
+	"github.com/pedro-almeida/zorya/internal/sysproc"
 )
 
 // NodeStatus defines the operational condition of a worker node.
@@ -149,6 +151,7 @@ type Daemon struct {
 	recentMasterJobs []processor.MasterExportResult
 
 	tray   TrayManager
+	cuda   *hardware.CUDAOrchestrator
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -177,6 +180,7 @@ func New(cfg *config.Config, configPath string) *Daemon {
 		cfg:              cfg,
 		configPath:       configPath,
 		proc:             processor.New(),
+		cuda:             hardware.NewCUDAOrchestrator(cfg.Hardware.GPUEnabled, cfg.Hardware.VRAMLimitGB, cfg.Hardware.CPUCores),
 		startTime:        time.Now(),
 		workers:          make(map[string]*NodeTelemetry),
 		tasks:            make(map[string]*GridTask),
@@ -262,6 +266,12 @@ func (d *Daemon) mountRoutes(mux *http.ServeMux) {
 	// 2. REST API v1 ENDPOINTS
 	mux.HandleFunc("/health", d.wrapCORS(d.handleHealth))
 	mux.HandleFunc("/api/v1/system/info", d.wrapCORS(d.handleSystemInfo))
+	mux.HandleFunc("/api/v1/hardware/cuda-status", d.wrapCORS(d.handleCUDAStatus))
+	mux.HandleFunc("/api/v1/photo/ai-curate", d.wrapCORS(d.handlePhotoAICurate))
+	mux.HandleFunc("/api/v1/audio/enhance", d.wrapCORS(d.handleAudioEnhance))
+	mux.HandleFunc("/api/v1/audio/detect-silence", d.wrapCORS(d.handleAudioDetectSilence))
+	mux.HandleFunc("/api/v1/video/smart-crop", d.wrapCORS(d.handleVideoSmartCrop))
+	mux.HandleFunc("/api/v1/video/apply-lut", d.wrapCORS(d.handleVideoApplyLUT))
 	mux.HandleFunc("/api/v1/raw/decode", d.wrapCORS(d.handleRawDecode))
 	mux.HandleFunc("/api/v1/raw/ingest-batch", d.wrapCORS(d.handleRawIngestBatch))
 	mux.HandleFunc("/api/v1/raw/master-export", d.wrapCORS(d.handleRawMasterExport))
@@ -1066,6 +1076,7 @@ func (d *Daemon) handleBrowseFolder(w http.ResponseWriter, r *http.Request) {
 	if runtime.GOOS == "windows" {
 		psScript := `Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Selecione a pasta com os arquivos RAW do Ensaio'; if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.SelectedPath }`
 		cmd := exec.Command("powershell", "-NoProfile", "-Command", psScript)
+		sysproc.PrepareCmd(cmd)
 		out, err := cmd.Output()
 		if err != nil {
 			writeJSON(w, http.StatusOK, browseResult{Selected: false, Error: err.Error()})
@@ -1081,4 +1092,137 @@ func (d *Daemon) handleBrowseFolder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, browseResult{Selected: false, Error: "Seletor nativo disponível apenas no Windows"})
+}
+
+// GET /api/v1/hardware/cuda-status
+func (d *Daemon) handleCUDAStatus(w http.ResponseWriter, r *http.Request) {
+	if d.cuda == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"cuda_ready": false, "mode": "CPU_FALLBACK"})
+		return
+	}
+	writeJSON(w, http.StatusOK, d.cuda.GetStatus())
+}
+
+// POST /api/v1/photo/ai-curate
+func (d *Daemon) handlePhotoAICurate(w http.ResponseWriter, r *http.Request) {
+	d.SetTrayActive(true)
+	defer d.SetTrayActive(false)
+
+	var req processor.AICurationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "JSON inválido: " + err.Error()})
+		return
+	}
+
+	geminiKey := req.GeminiKey
+	if geminiKey == "" {
+		geminiKey = d.cfg.AI.GeminiAPIKey
+	}
+	groqKey := req.GroqKey
+	if groqKey == "" {
+		groqKey = d.cfg.AI.GroqAPIKey
+	}
+
+	imgData, err := os.ReadFile(req.ImagePath)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Falha ao abrir imagem: " + err.Error()})
+		return
+	}
+
+	culling := processor.CullingAnalysis{OverallScore: 78.0, MeanLuminance: 128.0, SharpnessScore: 82.0}
+	if img, _, err := image.Decode(bytes.NewReader(imgData)); err == nil {
+		culling = processor.AnalyzeCulling(img)
+	}
+
+	curation, err := processor.CurateImage(imgData, req.ImagePath, culling, geminiKey, groqKey, d.cfg.Server.Port)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, curation)
+}
+
+// POST /api/v1/audio/enhance
+func (d *Daemon) handleAudioEnhance(w http.ResponseWriter, r *http.Request) {
+	d.SetTrayActive(true)
+	defer d.SetTrayActive(false)
+
+	var req processor.AudioEnhanceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "JSON inválido: " + err.Error()})
+		return
+	}
+
+	res, err := processor.EnhanceAudio(req)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, res)
+}
+
+// POST /api/v1/audio/detect-silence
+func (d *Daemon) handleAudioDetectSilence(w http.ResponseWriter, r *http.Request) {
+	d.SetTrayActive(true)
+	defer d.SetTrayActive(false)
+
+	var req struct {
+		InputPath          string  `json:"input_path"`
+		NoiseThresholdDB   float64 `json:"noise_threshold_db"`
+		MinDurationSeconds float64 `json:"min_duration_seconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "JSON inválido: " + err.Error()})
+		return
+	}
+
+	res, err := processor.DetectSilence(req.InputPath, req.NoiseThresholdDB, req.MinDurationSeconds)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, res)
+}
+
+// POST /api/v1/video/smart-crop
+func (d *Daemon) handleVideoSmartCrop(w http.ResponseWriter, r *http.Request) {
+	d.SetTrayActive(true)
+	defer d.SetTrayActive(false)
+
+	var req processor.VideoSmartCropRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "JSON inválido: " + err.Error()})
+		return
+	}
+
+	res, err := processor.SmartCropVideo(req)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, res)
+}
+
+// POST /api/v1/video/apply-lut
+func (d *Daemon) handleVideoApplyLUT(w http.ResponseWriter, r *http.Request) {
+	d.SetTrayActive(true)
+	defer d.SetTrayActive(false)
+
+	var req processor.VideoApplyLUTRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "JSON inválido: " + err.Error()})
+		return
+	}
+
+	res, err := processor.ApplyLUT(req)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, res)
 }

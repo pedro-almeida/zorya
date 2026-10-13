@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/pedro-almeida/zorya/internal/sysproc"
 )
 
 // CPUInfo represents processor capabilities and current load.
@@ -149,7 +151,9 @@ func DetectTailscaleIP() (string, bool) {
 	}
 
 	// Fallback: query tailscale CLI directly if in PATH
-	if out, err := exec.Command("tailscale", "ip", "-4").Output(); err == nil {
+	cmd := exec.Command("tailscale", "ip", "-4")
+	sysproc.PrepareCmd(cmd)
+	if out, err := cmd.Output(); err == nil {
 		ipStr := strings.TrimSpace(string(out))
 		if ip := net.ParseIP(ipStr); ip != nil {
 			return ipStr, true
@@ -163,6 +167,7 @@ func DetectTailscaleIP() (string, bool) {
 func detectCPUModel() string {
 	if runtime.GOOS == "windows" {
 		cmd := exec.Command("powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_Processor | Select-Object -First 1).Name")
+		sysproc.PrepareCmd(cmd)
 		var out bytes.Buffer
 		cmd.Stdout = &out
 		if err := cmd.Run(); err == nil && strings.TrimSpace(out.String()) != "" {
@@ -212,7 +217,9 @@ func detectGPU(enabled bool, vramLimit float64) GPUInfo {
 	}
 
 	// 1. Check nvidia-smi for dedicated NVIDIA hardware
-	if out, err := exec.Command("nvidia-smi", "--query-gpu=name,driver_version,temperature.gpu,utilization.gpu", "--format=csv,noheader,nounits").Output(); err == nil {
+	cmd := exec.Command("nvidia-smi", "--query-gpu=name,driver_version,temperature.gpu,utilization.gpu", "--format=csv,noheader,nounits")
+	sysproc.PrepareCmd(cmd)
+	if out, err := cmd.Output(); err == nil {
 		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 		if len(lines) > 0 && lines[0] != "" {
 			parts := strings.Split(lines[0], ",")
@@ -241,6 +248,7 @@ func detectGPU(enabled bool, vramLimit float64) GPUInfo {
 	// 2. Windows video controller fallback (AMD / Intel / Vulkan)
 	if runtime.GOOS == "windows" {
 		cmd := exec.Command("powershell", "-NoProfile", "-Command", "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name")
+		sysproc.PrepareCmd(cmd)
 		var out bytes.Buffer
 		cmd.Stdout = &out
 		if err := cmd.Run(); err == nil {

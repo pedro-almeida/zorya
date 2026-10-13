@@ -16,10 +16,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"syscall"
 	"unsafe"
+
+	"github.com/pedro-almeida/zorya/assets"
 )
 
 var (
@@ -149,24 +150,13 @@ func (t *windowsTray) Init(port int, onReload func(), onExit func()) error {
 	globalTray = t
 	t.mu.Unlock()
 
-	// 1. Gera ícones colorido e P&B em memória
+	// 1. Gera ícones colorido e P&B em memória a partir dos bytes embutidos
 	activeHIcon, standbyHIcon, err := loadTrayIcons()
 	if err != nil {
-		log.Printf("[Zorya Tray AVISO] Nao foi possivel carregar icon.png (%v). Utilizando fallback padrao.", err)
+		log.Printf("[Zorya Tray AVISO] Falha ao carregar ícone (%v). Utilizando fallback padrão.", err)
 	}
 	t.hIconActive = activeHIcon
 	t.hIconStandby = standbyHIcon
-
-	// 2. Inicia loop de mensagens Win32 em goroutine dedicada
-	initReady := make(chan error, 1)
-	go t.runWin32MessageLoop(initReady)
-
-	return <-initReady
-}
-
-func (t *windowsTray) runWin32MessageLoop(ready chan<- error) {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
 
 	hInst, _, _ := procGetModuleHandleW.Call(0)
 	className := syscall.StringToUTF16Ptr("ZoryaTrayWindowClass")
@@ -179,8 +169,7 @@ func (t *windowsTray) runWin32MessageLoop(ready chan<- error) {
 
 	r, _, err := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 	if r == 0 {
-		ready <- fmt.Errorf("RegisterClassExW falhou: %v", err)
-		return
+		return fmt.Errorf("RegisterClassExW falhou: %v", err)
 	}
 
 	hwnd, _, err := procCreateWindowExW.Call(
@@ -192,8 +181,7 @@ func (t *windowsTray) runWin32MessageLoop(ready chan<- error) {
 		0, 0, hInst, 0,
 	)
 	if hwnd == 0 {
-		ready <- fmt.Errorf("CreateWindowExW falhou: %v", err)
-		return
+		return fmt.Errorf("CreateWindowExW falhou: %v", err)
 	}
 
 	t.hwnd = hwnd
@@ -212,20 +200,25 @@ func (t *windowsTray) runWin32MessageLoop(ready chan<- error) {
 	t.nid.hIcon = initialIcon
 	copyStringToUTF16(t.nid.szTip[:], "Zorya RAW Engine — Standby (Ocioso)")
 
+	log.Printf("[Zorya Tray] CreateWindowExW hwnd=%v, nid.hwnd=%v", hwnd, t.nid.hwnd)
+
 	procShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&t.nid)))
+	return nil
+}
 
-	ready <- nil
-
-	// Loop de Mensagens Win32
+// Run executa a bomba de mensagens (message pump) Win32 na thread principal
+func (t *windowsTray) Run() error {
 	var m msg
 	for {
-		res, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
-		if res == 0 || int32(res) == -1 {
+		res, _, err := procGetMessageW.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
+		if int32(res) == 0 || int32(res) == -1 {
+			log.Printf("[Zorya Win32] GetMessageW terminou: res=%v err=%v msg=%x", res, err, m.message)
 			break
 		}
 		procTranslateMessage.Call(uintptr(unsafe.Pointer(&m)))
 		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))
 	}
+	return nil
 }
 
 func trayWndProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr {
@@ -295,7 +288,12 @@ func (t *windowsTray) showContextMenu(hwnd uintptr) {
 
 func (t *windowsTray) openWebUI() {
 	url := fmt.Sprintf("http://localhost:%d", t.port)
-	_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	cmd := exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+	}
+	_ = cmd.Start()
 }
 
 func (t *windowsTray) SetActive(active bool) {
@@ -346,28 +344,35 @@ func copyStringToUTF16(dst []uint16, src string) {
 }
 
 func loadTrayIcons() (uintptr, uintptr, error) {
-	// Procura icon.png em múltiplos caminhos
-	possiblePaths := []string{
-		"assets/icon.png",
-		filepath.Join("assets", "icon.png"),
-		"C:\\dev\\zorya\\assets\\icon.png",
-		"../assets/icon.png",
+	// Utiliza prioritariamente os bytes do ícone embutidos via go:embed
+	rawBytes := defaultIconBytes
+	if len(rawBytes) == 0 && len(assets.DefaultIconBytes) > 0 {
+		rawBytes = assets.DefaultIconBytes
 	}
 
-	var rawBytes []byte
-	var readErr error
-	for _, p := range possiblePaths {
-		if b, err := os.ReadFile(p); err == nil && len(b) > 0 {
-			rawBytes = b
-			readErr = nil
-			break
-		} else {
-			readErr = err
+	// Fallback em disco caso os bytes não estejam disponíveis em memória
+	if len(rawBytes) == 0 {
+		possiblePaths := []string{
+			"assets/icon.png",
+			filepath.Join("assets", "icon.png"),
+			"C:\\dev\\zorya\\assets\\icon.png",
+			"../assets/icon.png",
+			"../../assets/icon.png",
 		}
-	}
 
-	if readErr != nil || len(rawBytes) == 0 {
-		return 0, 0, readErr
+		var readErr error
+		for _, p := range possiblePaths {
+			if b, err := os.ReadFile(p); err == nil && len(b) > 0 {
+				rawBytes = b
+				readErr = nil
+				break
+			} else {
+				readErr = err
+			}
+		}
+		if readErr != nil || len(rawBytes) == 0 {
+			return 0, 0, readErr
+		}
 	}
 
 	img, err := png.Decode(bytes.NewReader(rawBytes))
@@ -448,7 +453,7 @@ func makeGrayscaleImage(src image.Image) image.Image {
 				dst.Set(x, y, color.Transparent)
 				continue
 			}
-			// Fórmula luminância clássica ITU-R BT.601
+			// Fórmula de luminância clássica ITU-R BT.601
 			lum := uint8((0.299*float64(r) + 0.587*float64(g) + 0.114*float64(b)) / 256.0)
 			alpha := uint8(a / 256)
 			dst.Set(x, y, color.RGBA{R: lum, G: lum, B: lum, A: alpha})

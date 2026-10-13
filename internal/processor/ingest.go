@@ -49,7 +49,9 @@ type IngestItemResult struct {
 	LaplacianVariance float64 `json:"laplacian_variance"`
 	MeanLuminance     float64 `json:"mean_luminance"`
 	BlinkDetected     bool    `json:"blink_detected"`
-	Recommendation    string  `json:"recommendation"` // APPROVED, REVIEW, REJECTED
+	BokehDetected     bool    `json:"bokeh_detected"`
+	SubjectSharpness  float64 `json:"subject_sharpness"`
+	Recommendation    string  `json:"recommendation"` // APPROVED, REVIEW, REVIEW_BOKEH, REJECTED
 	ElapsedMs         int64   `json:"elapsed_ms"`
 	Status            string  `json:"status"` // SUCCESS, FAILED
 	Error             string  `json:"error,omitempty"`
@@ -62,6 +64,7 @@ type IngestBatchResult struct {
 	SuccessCount     int                `json:"success_count"`
 	ApprovedCount    int                `json:"approved_count"`
 	ReviewCount      int                `json:"review_count"`
+	BokehCount       int                `json:"bokeh_count"`
 	RejectedCount    int                `json:"rejected_count"`
 	AverageSharpness float64            `json:"average_sharpness"`
 	AverageScore     float64            `json:"average_score"`
@@ -180,6 +183,8 @@ func (p *Processor) ProcessIngestBatch(req IngestBatchRequest, cpuCores int) (*I
 				approved++
 			case "REVIEW":
 				review++
+			case "REVIEW_BOKEH":
+				review++
 			case "REJECTED":
 				rejected++
 			}
@@ -199,6 +204,7 @@ func (p *Processor) ProcessIngestBatch(req IngestBatchRequest, cpuCores int) (*I
 		SuccessCount:     success,
 		ApprovedCount:    approved,
 		ReviewCount:      review,
+		BokehCount:       review, // count of reviewed/protected bokeh
 		RejectedCount:    rejected,
 		AverageSharpness: mathRound(avgSharpness, 1),
 		AverageScore:     mathRound(avgScore, 1),
@@ -270,6 +276,8 @@ func (p *Processor) processSingleIngestItem(rawPath, outDir string, targetW, qua
 	res.LaplacianVariance = analysis.LaplacianVariance
 	res.MeanLuminance = analysis.MeanLuminance
 	res.BlinkDetected = analysis.BlinkDetected
+	res.BokehDetected = analysis.BokehDetected
+	res.SubjectSharpness = analysis.SubjectSharpness
 	res.Recommendation = analysis.Recommendation
 
 	// 4. Fast resize to 2048px preserving aspect ratio

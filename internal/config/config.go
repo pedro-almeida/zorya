@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/pedro-almeida/zorya/internal/sysproc"
 )
 
 // Role defines the operation role of this node in the Tailscale grid.
@@ -330,9 +332,11 @@ func ApplyWindowsAutostart(enabled bool) error {
 	if enabled {
 		cmdVal := fmt.Sprintf(`"%s" --background`, exePath)
 		cmd := exec.Command("reg", "add", regKey, "/v", valName, "/t", "REG_SZ", "/d", cmdVal, "/f")
+		sysproc.PrepareCmd(cmd)
 		return cmd.Run()
 	} else {
 		cmd := exec.Command("reg", "delete", regKey, "/v", valName, "/f")
+		sysproc.PrepareCmd(cmd)
 		_ = cmd.Run()
 		return nil
 	}

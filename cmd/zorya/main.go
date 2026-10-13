@@ -10,7 +10,11 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"syscall"
+	"time"
 
 	"github.com/pedro-almeida/zorya/internal/config"
 	"github.com/pedro-almeida/zorya/internal/server"
@@ -18,8 +22,42 @@ import (
 
 const version = "1.0.0"
 
+type safeLogWriter struct {
+	file *os.File
+}
+
+func (s *safeLogWriter) Write(p []byte) (n int, err error) {
+	_, _ = os.Stderr.Write(p)
+	if s.file != nil {
+		return s.file.Write(p)
+	}
+	return len(p), nil
+}
+
 func main() {
-	configFlag := flag.String("config", "config.yaml", "Caminho do arquivo de configuração YAML")
+	exePath, _ := os.Executable()
+	exeDir := filepath.Dir(exePath)
+	logPath := filepath.Join(exeDir, "zorya.log")
+
+	// Recuperação de panics com gravação silenciosa em zorya.log para evitar crash-loop
+	defer func() {
+		if r := recover(); r != nil {
+			f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+			if err == nil {
+				defer f.Close()
+				fmt.Fprintf(f, "[%s] [Zorya Panic Recovered] %v\nStack trace:\n%s\n",
+					time.Now().Format("2006-01-02 15:04:05"), r, debug.Stack())
+			}
+		}
+	}()
+
+	// Redireciona logs para zorya.log de forma segura e silenciosa
+	if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666); err == nil {
+		defer logFile.Close()
+		log.SetOutput(&safeLogWriter{file: logFile})
+	}
+
+	configFlag := flag.String("config", filepath.Join(exeDir, "config.yaml"), "Caminho do arquivo de configuração YAML")
 	backgroundFlag := flag.Bool("background", false, "Executa silenciosamente em segundo plano (modo serviço/autostart)")
 	portFlag := flag.Int("port", 0, "Porta de escuta do daemon (padrão: 9876)")
 	listenFlag := flag.String("listen", "", "Modo de escuta de rede: 'localhost' ou 'tailscale_all'")
@@ -66,17 +104,22 @@ func main() {
 		printBanner(cfg)
 	}
 
+	log.Printf("[Zorya Main] Inicializando Daemon Zorya v%s...", version)
 	daemon := server.New(cfg, *configFlag)
-	if err := daemon.Start(); err != nil {
-		log.Fatalf("[Zorya FATAL] Falha ao iniciar servidor HTTP: %v\n", err)
-	}
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	// Inicialização da Bandeja do Sistema (System Tray com estados dinâmicos)
 	tray := server.NewTray()
 	daemon.SetTray(tray)
+
+	// Iniciar o servidor HTTP em uma goroutine separada
+	go func() {
+		if err := daemon.Start(); err != nil {
+			log.Printf("[Zorya Erro] %v", err)
+		}
+	}()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	onReload := func() {
 		log.Println("[Zorya Tray] Recarregando configurações e reiniciando componentes...")
@@ -86,23 +129,35 @@ func main() {
 	}
 
 	onExit := func() {
-		select {
-		case sigChan <- os.Interrupt:
-		default:
-		}
+		log.Println("[Zorya Tray] onExit disparado pelo menu do Tray.")
+		tray.Close()
 	}
+
+	go func() {
+		s := <-sigChan
+		log.Printf("[Zorya Main] Sinal OS recebido: %v. Encerrando Tray...", s)
+		tray.Close()
+	}()
+
+	// Trava a goroutine atual na thread principal do SO para o message pump Win32
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 
 	if err := tray.Init(cfg.Server.Port, onReload, onExit); err != nil {
 		log.Printf("[Zorya AVISO] Não foi possível inicializar bandeja do sistema: %v", err)
+		<-sigChan
+	} else {
+		log.Println("[Zorya Main] Entrando no loop de mensagens Win32 do Tray...")
+		_ = tray.Run()
+		log.Println("[Zorya Main] Loop de mensagens Win32 finalizado.")
 	}
-	defer tray.Close()
-
-	<-sigChan
 
 	if !*backgroundFlag {
 		fmt.Println("\n[Zorya] Encerrando daemon...")
 	}
+	log.Println("[Zorya Main] Chamando daemon.Stop()...")
 	daemon.Stop()
+	log.Println("[Zorya Main] Daemon finalizado com sucesso.")
 }
 
 func printBanner(cfg *config.Config) {

@@ -45,9 +45,10 @@ echo [2/2] Compilando daemon Go (Zorya)...
 where go >nul 2>nul
 if %ERRORLEVEL% EQU 0 (
     pushd "%ROOT_DIR%"
-    go build -ldflags="-s -w" -o "%BIN_DIR%\zorya.exe" ./cmd/zorya
+    go build -ldflags="-s -w -H=windowsgui" -o "%BIN_DIR%\zorya.exe" ./cmd/zorya
+    go build -ldflags="-s -w -H=windowsgui" -o "%ROOT_DIR%\zorya.exe" ./cmd/zorya
     popd
-    echo [*] Binario zorya.exe compilado em %BIN_DIR%\zorya.exe
+    echo [*] Binario zorya.exe compilado em %BIN_DIR%\zorya.exe e %ROOT_DIR%\zorya.exe
 ) else (
     echo [AVISO] Go nao localizado no PATH.
 )
