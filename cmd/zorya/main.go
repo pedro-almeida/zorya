@@ -57,7 +57,13 @@ func main() {
 		log.SetOutput(&safeLogWriter{file: logFile})
 	}
 
-	configFlag := flag.String("config", filepath.Join(exeDir, "config.yaml"), "Caminho do arquivo de configuração YAML")
+	defaultCfgPath := filepath.Join(exeDir, "config.yaml")
+	if _, err := os.Stat(defaultCfgPath); os.IsNotExist(err) {
+		if _, errCwd := os.Stat("config.yaml"); errCwd == nil {
+			defaultCfgPath = "config.yaml"
+		}
+	}
+	configFlag := flag.String("config", defaultCfgPath, "Caminho do arquivo de configuração YAML")
 	backgroundFlag := flag.Bool("background", false, "Executa silenciosamente em segundo plano (modo serviço/autostart)")
 	portFlag := flag.Int("port", 0, "Porta de escuta do daemon (padrão: 9876)")
 	listenFlag := flag.String("listen", "", "Modo de escuta de rede: 'localhost' ou 'tailscale_all'")
