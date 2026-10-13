@@ -1,6 +1,6 @@
-﻿// PT: Renderizador de Marca d'Água para Galerias de Seleção
-// EN: Watermark Rendering Engine for Proofing and Client Gallery
-// AI: @llm-context Módulo Zorya v1.0.0 / Estágio 1 Aplicação de Marca d'Água
+// PT: Marca d'Água Oficial Tenorio Foto: Malha Diagonal com TF25.png a -30° e Linhas Tracejadas
+// EN: Tenorio Foto Official Watermark: Diagonal Grid with TF25.png at -30° and Dashed Lines
+// AI: @llm-context Módulo Zorya v1.0.0 / Estágio 1 Proteção de Galeria e Marca d'Água Diagonal
 
 package processor
 
@@ -18,9 +18,9 @@ import (
 // WatermarkOptions defines formatting for the gallery watermark.
 type WatermarkOptions struct {
 	Text      string  `json:"text"`       // default: "PEDRO ALMEIDA | PROVA"
-	Opacity   float64 `json:"opacity"`    // 0.0 - 1.0 (default 0.35)
-	Position  string  `json:"position"`   // "center", "diagonal", "bottom-right"
-	DrawLines bool    `json:"draw_lines"`
+	Opacity   float64 `json:"opacity"`    // 0.28 - 0.35 (default 0.32)
+	Position  string  `json:"position"`   // "diagonal_grid", "center", etc.
+	DrawLines bool    `json:"draw_lines"` // default: true (linhas tracejadas a -30°)
 	ImagePath string  `json:"image_path"` // Caminho do PNG oficial (ex: TF25.png)
 }
 
@@ -28,273 +28,402 @@ type WatermarkOptions struct {
 func DefaultWatermarkOptions() WatermarkOptions {
 	return WatermarkOptions{
 		Text:      "PEDRO ALMEIDA | PROVA",
-		Opacity:   0.35,
-		Position:  "center",
+		Opacity:   0.32,
+		Position:  "diagonal_grid",
 		DrawLines: true,
-		ImagePath: "",
+		ImagePath: "D:\\Tenorio.fot.br\\IDV TENORIO FOTO_RGB\\IDV TENORIO FOTO_RGB\\TF25.png",
 	}
 }
 
-// ApplyWatermark renders a semi-transparent watermark onto an image.
-// If ImagePath is provided and the file exists on disk, decodes and overlays the PNG logo.
-// If ImagePath is empty or invalid, falls back to the high-contrast text generator.
+var (
+	logoCacheMu sync.RWMutex
+	rawLogoPNG  image.Image
+	cachedScale map[int]*image.RGBA // chave: targetLogoW -> logo rotacionado a -30°
+)
+
+func init() {
+	cachedScale = make(map[int]*image.RGBA)
+}
+
+// loadOfficialTF25Logo carrega o arquivo PNG oficial TF25.png do disco com fallback
+func loadOfficialTF25Logo(customPath string) image.Image {
+	logoCacheMu.RLock()
+	if rawLogoPNG != nil {
+		img := rawLogoPNG
+		logoCacheMu.RUnlock()
+		return img
+	}
+	logoCacheMu.RUnlock()
+
+	candidates := []string{
+		customPath,
+		"D:\\Tenorio.fot.br\\IDV TENORIO FOTO_RGB\\IDV TENORIO FOTO_RGB\\TF25.png",
+		"C:\\dev\\zorya\\assets\\TF25.png",
+		filepath.Join("assets", "TF25.png"),
+		"TF25.png",
+	}
+
+	for _, cand := range candidates {
+		if cand == "" {
+			continue
+		}
+		if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
+			f, err := os.Open(cand)
+			if err == nil {
+				img, _, err := image.Decode(f)
+				f.Close()
+				if err == nil && img != nil {
+					logoCacheMu.Lock()
+					rawLogoPNG = img
+					logoCacheMu.Unlock()
+					return img
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// getRotatedLogo gera ou obtém do cache o logo TF25.png inclinado a -30 graus
+func getRotatedLogo(logo image.Image, targetWidth int) *image.RGBA {
+	logoCacheMu.RLock()
+	cached, ok := cachedScale[targetWidth]
+	logoCacheMu.RUnlock()
+	if ok && cached != nil {
+		return cached
+	}
+
+	// 1. Redimensionar logo original para largura proporcional
+	origB := logo.Bounds()
+	aspect := float64(origB.Dy()) / float64(origB.Dx())
+	targetHeight := int(float64(targetWidth) * aspect)
+	if targetHeight < 1 {
+		targetHeight = 1
+	}
+
+	scaled := resizeImageBilinear(logo, targetWidth, targetHeight)
+
+	// 2. Rotacionar a -30° (-pi/6 radianos - inclinação diagonal ascendente)
+	angleRad := -30.0 * (math.Pi / 180.0)
+	cosA := math.Cos(angleRad)
+	sinA := math.Sin(angleRad)
+
+	sw := scaled.Bounds().Dx()
+	sh := scaled.Bounds().Dy()
+
+	// Dimensões da bounding box rotacionada
+	rotW := int(math.Ceil(math.Abs(float64(sw)*cosA) + math.Abs(float64(sh)*sinA)))
+	rotH := int(math.Ceil(math.Abs(float64(sw)*sinA) + math.Abs(float64(sh)*cosA)))
+
+	rotImg := image.NewRGBA(image.Rect(0, 0, rotW, rotH))
+
+	cxSrc := float64(sw) / 2.0
+	cySrc := float64(sh) / 2.0
+	cxDst := float64(rotW) / 2.0
+	cyDst := float64(rotH) / 2.0
+
+	for ry := 0; ry < rotH; ry++ {
+		for rx := 0; rx < rotW; rx++ {
+			xDst := float64(rx) - cxDst
+			yDst := float64(ry) - cyDst
+
+			// Rotação inversa para amostragem
+			xSrc := xDst*cosA + yDst*sinA + cxSrc
+			ySrc := -xDst*sinA + yDst*cosA + cySrc
+
+			if xSrc >= 0 && xSrc < float64(sw) && ySrc >= 0 && ySrc < float64(sh) {
+				x0 := int(xSrc)
+				y0 := int(ySrc)
+				x1 := x0 + 1
+				y1 := y0 + 1
+				if x1 >= sw {
+					x1 = sw - 1
+				}
+				if y1 >= sh {
+					y1 = sh - 1
+				}
+
+				fx := xSrc - float64(x0)
+				fy := ySrc - float64(y0)
+
+				c00 := scaled.RGBAAt(x0, y0)
+				c10 := scaled.RGBAAt(x1, y0)
+				c01 := scaled.RGBAAt(x0, y1)
+				c11 := scaled.RGBAAt(x1, y1)
+
+				w00 := (1.0 - fx) * (1.0 - fy)
+				w10 := fx * (1.0 - fy)
+				w01 := (1.0 - fx) * fy
+				w11 := fx * fy
+
+				r := uint8(float64(c00.R)*w00 + float64(c10.R)*w10 + float64(c01.R)*w01 + float64(c11.R)*w11)
+				g := uint8(float64(c00.G)*w00 + float64(c10.G)*w10 + float64(c01.G)*w01 + float64(c11.G)*w11)
+				b := uint8(float64(c00.B)*w00 + float64(c10.B)*w10 + float64(c01.B)*w01 + float64(c11.B)*w11)
+				a := uint8(float64(c00.A)*w00 + float64(c10.A)*w10 + float64(c01.A)*w01 + float64(c11.A)*w11)
+
+				rotImg.SetRGBA(rx, ry, color.RGBA{R: r, G: g, B: b, A: a})
+			}
+		}
+	}
+
+	logoCacheMu.Lock()
+	cachedScale[targetWidth] = rotImg
+	logoCacheMu.Unlock()
+
+	return rotImg
+}
+
+// ApplyWatermark renderiza a marca d'água oficial da Tenorio Foto:
+// - TF25.png inclinado a -30° distribuído em malha diagonal (3x3 / 4x4) cobrindo toda a extensão.
+// - Linhas tracejadas (- - - -) finas com ângulo de -30° interligando a malha e protegendo contra recortes.
+// - Opacidade suave e comercial entre 0.28 e 0.35.
 func ApplyWatermark(src image.Image, opts WatermarkOptions) *image.RGBA {
 	bounds := src.Bounds()
 	dst := image.NewRGBA(bounds)
 
-	// Copy base image pixels
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			dst.Set(x, y, src.At(x, y))
+	// Cópia dos pixels base
+	if rgba, ok := src.(*image.RGBA); ok {
+		copy(dst.Pix, rgba.Pix)
+	} else {
+		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+				dst.Set(x, y, src.At(x, y))
+			}
 		}
 	}
 
 	w := bounds.Dx()
 	h := bounds.Dy()
-	if w == 0 || h == 0 {
+	if w <= 0 || h <= 0 {
 		return dst
 	}
 
-	if opts.Opacity <= 0 {
-		opts.Opacity = 0.38
-	}
-	if opts.Opacity > 1.0 {
-		opts.Opacity = 1.0
-	}
-	if opts.Position == "" {
-		opts.Position = "center"
+	opacity := opts.Opacity
+	if opacity < 0.20 {
+		opacity = 0.32
+	} else if opacity > 0.45 {
+		opacity = 0.35
 	}
 
-	// 1. Auto-discover official PNG watermark (TF25.png) if ImagePath not explicitly provided
-	if opts.ImagePath == "" {
-		candidates := []string{
-			filepath.Join("assets", "TF25.png"),
-			"C:\\dev\\zorya\\assets\\TF25.png",
-			"TF25.png",
-			"C:\\dev\\zorya\\TF25.png",
-			"D:\\Tenorio.fot.br\\IDV TENORIO FOTO_RGB\\IDV TENORIO FOTO_RGB\\TF25.png",
-		}
-		for _, cand := range candidates {
-			if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
-				opts.ImagePath = cand
-				break
-			}
-		}
+	logoImg := loadOfficialTF25Logo(opts.ImagePath)
+
+	// 1. Renderizar Linhas Diagonais Tracejadas a -30° (- - - -) se solicitado ou na malha diagonal
+	isDiagonalGrid := opts.Position == "" || strings.Contains(strings.ToLower(opts.Position), "diag")
+	if opts.DrawLines && isDiagonalGrid {
+		renderDiagonalDashedGrid(dst, opacity*0.65)
 	}
 
-	// 2. Check if PNG image logo was supplied and exists on disk
-	appliedPNG := false
-	if opts.ImagePath != "" {
-		pngImg := loadCachedPNG(opts.ImagePath)
-		if pngImg != nil {
-			applyPNGWatermark(dst, pngImg, opts)
-			appliedPNG = true
-			// When official PNG logo is used, do not draw diagonal lines or fallback text
-			opts.DrawLines = false
-		}
-	}
-
-	// 3. Optional subtle diagonal security line across frame (ONLY if PNG logo is NOT active)
-	if opts.DrawLines && !appliedPNG {
-		lineAlpha := opts.Opacity * 0.45
-		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-			x1 := int(float64(y-bounds.Min.Y) * float64(w) / float64(h))
-			drawSoftLine(dst, x1, y, 2, lineAlpha)
-			x2 := w - x1
-			drawSoftLine(dst, x2, y, 2, lineAlpha)
-		}
-	}
-
-	// 4. Fallback: if ImagePath is empty or file not found, use existing text watermark generator
-	if !appliedPNG {
-		if opts.Text == "" {
-			opts.Text = "PEDRO ALMEIDA | PROVA"
-		}
-		text := strings.ToUpper(opts.Text)
-		scale := int(math.Max(2.0, float64(w)/380.0))
-
-		switch opts.Position {
-		case "bottom-right":
-			textW := len(text) * 6 * scale
-			textH := 8 * scale
-			startX := w - textW - 40
-			startY := h - textH - 40
-			renderText(dst, text, startX, startY, scale, opts.Opacity)
-
-		case "diagonal":
-			// Repeat diagonal pattern across 3 zones
-			renderText(dst, text, w/6, h/4, scale, opts.Opacity*0.8)
-			renderText(dst, text, w/2-(len(text)*3*scale), h/2, scale, opts.Opacity)
-			renderText(dst, text, w*2/5, h*3/4, scale, opts.Opacity*0.8)
-
-		case "bottom", "rodape", "footer":
-			textW := len(text) * 6 * scale
-			startX := (w - textW) / 2
-			startY := h - (8 * scale) - 40
-			renderText(dst, text, startX, startY, scale, opts.Opacity)
-
+	// 2. Renderizar logos TF25.png
+	if logoImg != nil {
+		switch strings.ToLower(opts.Position) {
 		case "center":
-			fallthrough
+			renderSingleLogo(dst, logoImg, "center", opacity)
+		case "bottom-right":
+			renderSingleLogo(dst, logoImg, "bottom-right", opacity)
+		case "bottom", "rodape", "footer":
+			renderSingleLogo(dst, logoImg, "bottom", opacity)
 		default:
-			textW := len(text) * 6 * scale
-			startX := (w - textW) / 2
-			startY := (h - (8 * scale)) / 2
-			renderText(dst, text, startX, startY, scale, opts.Opacity)
+			// Malha Diagonal com TF25.png rotacionado a -30° (Padrão Oficial)
+			renderDiagonalLogoGrid(dst, logoImg, opacity)
 		}
+	} else {
+		// Fallback textual em malha caso o PNG esteja inacessível
+		renderFallbackTextGrid(dst, opts.Text, opacity)
 	}
 
 	return dst
 }
 
-var (
-	pngCacheMu   sync.RWMutex
-	pngCacheMap  = make(map[string]image.Image)
-)
+// renderSingleLogo desenha o logo único quando requisitado em posição específica (center, bottom-right)
+func renderSingleLogo(dst *image.RGBA, logo image.Image, pos string, opacity float64) {
+	bounds := dst.Bounds()
+	w := bounds.Dx()
+	h := bounds.Dy()
 
-func loadCachedPNG(path string) image.Image {
-	if path == "" {
-		return nil
+	targetLogoW := int(float64(w) * 0.25)
+	if targetLogoW < 48 {
+		targetLogoW = 48
 	}
-
-	pngCacheMu.RLock()
-	img, ok := pngCacheMap[path]
-	pngCacheMu.RUnlock()
-	if ok && img != nil {
-		return img
-	}
-
-	resolvedPath := path
-	if fi, err := os.Stat(resolvedPath); err != nil || fi.IsDir() {
-		candidates := []string{
-			filepath.Join("assets", filepath.Base(path)),
-			filepath.Join("C:\\dev\\zorya\\assets", filepath.Base(path)),
-			filepath.Join("C:\\dev\\zorya", filepath.Base(path)),
-			"D:\\Tenorio.fot.br\\IDV TENORIO FOTO_RGB\\IDV TENORIO FOTO_RGB\\TF25.png",
-		}
-		found := false
-		for _, cand := range candidates {
-			if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
-				resolvedPath = cand
-				found = true
-				break
-			}
-		}
-		if !found {
-			return nil
-		}
-	}
-
-	f, err := os.Open(resolvedPath)
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-
-	decoded, _, err := image.Decode(f)
-	if err != nil || decoded == nil {
-		return nil
-	}
-
-	pngCacheMu.Lock()
-	pngCacheMap[path] = decoded
-	pngCacheMap[resolvedPath] = decoded
-	pngCacheMu.Unlock()
-
-	return decoded
-}
-
-// applyPNGWatermark overlays a transparent PNG logo onto dst.
-// Resizes proportionally to ~22% of photo width and blends with soft alpha (opacity 0.38).
-func applyPNGWatermark(dst *image.RGBA, logo image.Image, opts WatermarkOptions) {
-	dstBounds := dst.Bounds()
-	dstW := dstBounds.Dx()
-	dstH := dstBounds.Dy()
-	if dstW == 0 || dstH == 0 {
-		return
-	}
-
-	logoBounds := logo.Bounds()
-	origW := logoBounds.Dx()
-	origH := logoBounds.Dy()
-	if origW == 0 || origH == 0 {
-		return
-	}
-
-	// Redimensionar proporcionalmente para ocupar cerca de ~22% da largura da imagem já rotacionada
-	targetLogoW := int(float64(dstW) * 0.25)
-	if targetLogoW < 24 {
-		targetLogoW = 24
-	}
-	if targetLogoW > dstW {
-		targetLogoW = dstW
-	}
-
-	targetLogoH := int(float64(origH) * float64(targetLogoW) / float64(origW))
+	origB := logo.Bounds()
+	aspect := float64(origB.Dy()) / float64(origB.Dx())
+	targetLogoH := int(float64(targetLogoW) * aspect)
 	if targetLogoH < 1 {
 		targetLogoH = 1
 	}
-	if targetLogoH > dstH {
-		targetLogoH = dstH
-	}
 
-	scaledLogo := resizeImageBilinear(logo, targetLogoW, targetLogoH)
+	scaled := resizeImageBilinear(logo, targetLogoW, targetLogoH)
 
-	// Determinar posição: centro, rodapé / bottom, ou canto inferior direito
 	var startX, startY int
-	switch strings.ToLower(opts.Position) {
+	switch strings.ToLower(pos) {
 	case "bottom-right":
-		margin := int(float64(dstW) * 0.03)
-		if margin < 15 {
-			margin = 15
-		}
-		startX = dstW - targetLogoW - margin
-		startY = dstH - targetLogoH - margin
-	case "bottom", "rodape", "footer", "bottom-center":
-		margin := int(float64(dstH) * 0.04)
-		if margin < 15 {
-			margin = 15
-		}
-		startX = (dstW - targetLogoW) / 2
-		startY = dstH - targetLogoH - margin
+		startX = w - targetLogoW - 20
+		startY = h - targetLogoH - 20
+	case "bottom", "rodape", "footer":
+		startX = (w - targetLogoW) / 2
+		startY = h - targetLogoH - 20
 	case "center":
 		fallthrough
 	default:
-		startX = (dstW - targetLogoW) / 2
-		startY = (dstH - targetLogoH) / 2
-	}
-	if startX < 0 {
-		startX = 0
-	}
-	if startY < 0 {
-		startY = 0
+		startX = (w - targetLogoW) / 2
+		startY = (h - targetLogoH) / 2
 	}
 
-	// Opacidade suave (padrão 0.38)
-	opacity := opts.Opacity
-	if opacity <= 0 {
-		opacity = 0.38
-	} else if opacity > 1.0 {
-		opacity = 1.0
+	blendSubImage(dst, scaled, startX, startY, opacity)
+}
+
+// renderDiagonalDashedGrid traça linhas finas tracejadas a -30 graus cobrindo toda a área da foto
+func renderDiagonalDashedGrid(dst *image.RGBA, alpha float64) {
+	bounds := dst.Bounds()
+	w := bounds.Dx()
+	h := bounds.Dy()
+
+	// Ângulo de -30°: vetor diretor unitário u = (cos(-30°), sin(-30°))
+	const angleDeg = -30.0
+	rad := angleDeg * (math.Pi / 180.0)
+	cosA := math.Cos(rad) // ~0.866
+	sinA := math.Sin(rad) // ~-0.500
+
+	// Vetor normal n = (-sinA, cosA)
+	nx := -sinA // ~0.500
+	ny := cosA  // ~0.866
+
+	// Espaçamento entre linhas diagonais: cerca de 18% da largura da imagem
+	lineSpacing := float64(w) * 0.19
+	if lineSpacing < 140 {
+		lineSpacing = 140
 	}
 
-	// Alpha blending suave sobre a imagem final
-	for ly := 0; ly < targetLogoH; ly++ {
+	// Range de distâncias normais cobrindo o bounding box
+	corners := [][2]float64{
+		{0, 0},
+		{float64(w), 0},
+		{0, float64(h)},
+		{float64(w), float64(h)},
+	}
+	minD := 1e9
+	maxD := -1e9
+	for _, c := range corners {
+		d := c[0]*nx + c[1]*ny
+		if d < minD {
+			minD = d
+		}
+		if d > maxD {
+			maxD = d
+		}
+	}
+
+	dashLen := 14.0
+	gapLen := 12.0
+	cycle := dashLen + gapLen
+
+	// Para cada linha da família paralela a -30°
+	for d := minD - lineSpacing; d <= maxD + lineSpacing; d += lineSpacing {
+		// Ponto base na linha: P0 = d * n
+		p0x := d * nx
+		p0y := d * ny
+
+		// Varrer ao longo da linha em passos de 1px
+		diagSpan := math.Sqrt(float64(w*w + h*h))
+		for s := -diagSpan; s <= diagSpan; s += 1.0 {
+			// Testar padrão tracejado
+			mod := math.Mod(math.Mod(s, cycle)+cycle, cycle)
+			if mod > dashLen {
+				continue // Intervalo de espaço
+			}
+
+			px := int(p0x + s*cosA)
+			py := int(p0y + s*sinA)
+
+			if px >= bounds.Min.X && px < bounds.Max.X && py >= bounds.Min.Y && py < bounds.Max.Y {
+				orig := dst.RGBAAt(px, py)
+				invA := 1.0 - alpha
+
+				// Linha clara suave com contraste natural
+				rOut := uint8(math.Min(255, float64(orig.R)*invA+255.0*alpha))
+				gOut := uint8(math.Min(255, float64(orig.G)*invA+255.0*alpha))
+				bOut := uint8(math.Min(255, float64(orig.B)*invA+255.0*alpha))
+
+				dst.SetRGBA(px, py, color.RGBA{R: rOut, G: gOut, B: bOut, A: orig.A})
+			}
+		}
+	}
+}
+
+// renderDiagonalLogoGrid distribui o logo TF25.png rotacionado a -30° em malha repetida
+func renderDiagonalLogoGrid(dst *image.RGBA, logo image.Image, opacity float64) {
+	bounds := dst.Bounds()
+	w := bounds.Dx()
+	h := bounds.Dy()
+
+	// Tamanho de cada logo na malha: cerca de 13% da largura da foto
+	targetLogoW := int(float64(w) * 0.13)
+	if targetLogoW < 48 {
+		targetLogoW = 48
+	}
+	if targetLogoW > 320 {
+		targetLogoW = 320
+	}
+
+	rotLogo := getRotatedLogo(logo, targetLogoW)
+	lw := rotLogo.Bounds().Dx()
+	lh := rotLogo.Bounds().Dy()
+
+	// Número de divisões na malha (grade 3x3 ou 4x4 dependendo da proporção)
+	cols := 4
+	rows := 4
+	if w < h { // Retrato vertical
+		cols = 3
+		rows = 5
+	}
+
+	stepX := float64(w) / float64(cols)
+	stepY := float64(h) / float64(rows)
+
+	for r := 0; r < rows; r++ {
+		// Offset diagonal intercalado por linha para efeito losango comercial
+		rowOffset := 0.0
+		if r%2 == 1 {
+			rowOffset = stepX * 0.50
+		}
+
+		for c := -1; c <= cols; c++ {
+			centerX := float64(c)*stepX + rowOffset + (stepX * 0.50)
+			centerY := float64(r)*stepY + (stepY * 0.50)
+
+			startX := int(centerX - float64(lw)/2.0)
+			startY := int(centerY - float64(lh)/2.0)
+
+			blendSubImage(dst, rotLogo, startX, startY, opacity)
+		}
+	}
+}
+
+// blendSubImage realiza a fusão alfa rápida de um sub-bitmap rotacionado sobre a imagem de destino
+func blendSubImage(dst *image.RGBA, src *image.RGBA, startX, startY int, opacity float64) {
+	dstBounds := dst.Bounds()
+	srcBounds := src.Bounds()
+	sw := srcBounds.Dx()
+	sh := srcBounds.Dy()
+
+	for ly := 0; ly < sh; ly++ {
 		py := startY + ly
 		if py < dstBounds.Min.Y || py >= dstBounds.Max.Y {
 			continue
 		}
-		for lx := 0; lx < targetLogoW; lx++ {
+
+		for lx := 0; lx < sw; lx++ {
 			px := startX + lx
 			if px < dstBounds.Min.X || px >= dstBounds.Max.X {
 				continue
 			}
 
-			logoColor := scaledLogo.RGBAAt(lx, ly)
-			if logoColor.A == 0 {
+			srcCol := src.RGBAAt(lx, ly)
+			if srcCol.A == 0 {
 				continue
 			}
 
-			effectiveAlpha := (float64(logoColor.A) / 255.0) * opacity
+			effectiveAlpha := (float64(srcCol.A) / 255.0) * opacity
 			if effectiveAlpha < 0.005 {
 				continue
 			}
@@ -302,16 +431,42 @@ func applyPNGWatermark(dst *image.RGBA, logo image.Image, opts WatermarkOptions)
 			orig := dst.RGBAAt(px, py)
 			invA := 1.0 - effectiveAlpha
 
-			outR := uint8(math.Min(255, math.Max(0, float64(orig.R)*invA+float64(logoColor.R)*effectiveAlpha)))
-			outG := uint8(math.Min(255, math.Max(0, float64(orig.G)*invA+float64(logoColor.G)*effectiveAlpha)))
-			outB := uint8(math.Min(255, math.Max(0, float64(orig.B)*invA+float64(logoColor.B)*effectiveAlpha)))
+			outR := uint8(math.Min(255, float64(orig.R)*invA+float64(srcCol.R)*effectiveAlpha))
+			outG := uint8(math.Min(255, float64(orig.G)*invA+float64(srcCol.G)*effectiveAlpha))
+			outB := uint8(math.Min(255, float64(orig.B)*invA+float64(srcCol.B)*effectiveAlpha))
 
 			dst.SetRGBA(px, py, color.RGBA{R: outR, G: outG, B: outB, A: orig.A})
 		}
 	}
 }
 
-// resizeImageBilinear scales an image using bilinear interpolation preserving alpha transparency.
+// renderFallbackTextGrid gera a malha repetida caso o PNG oficial esteja ausente
+func renderFallbackTextGrid(dst *image.RGBA, text string, opacity float64) {
+	if text == "" {
+		text = "TENORIO FOTO | PROVA"
+	}
+	bounds := dst.Bounds()
+	w := bounds.Dx()
+	h := bounds.Dy()
+	scale := int(math.Max(2.0, float64(w)/500.0))
+
+	stepX := w / 3
+	stepY := h / 4
+
+	for r := 0; r < 4; r++ {
+		offset := 0
+		if r%2 == 1 {
+			offset = stepX / 2
+		}
+		for c := 0; c < 3; c++ {
+			x := c*stepX + offset + 20
+			y := r*stepY + 30
+			renderText(dst, text, x, y, scale, opacity)
+		}
+	}
+}
+
+// resizeImageBilinear redimensiona com interpolação bilinear preservando transparência alfa
 func resizeImageBilinear(src image.Image, targetW, targetH int) *image.RGBA {
 	bounds := src.Bounds()
 	w := bounds.Dx()
@@ -370,35 +525,12 @@ func resizeImageBilinear(src image.Image, targetW, targetH int) *image.RGBA {
 	return dst
 }
 
-// drawSoftLine blends a faint security line across coordinates.
-func drawSoftLine(dst *image.RGBA, cx, cy, thickness int, alpha float64) {
-	bounds := dst.Bounds()
-	rVal := 255.0
-	gVal := 255.0
-	bVal := 255.0
-
-	for dx := -thickness; dx <= thickness; dx++ {
-		x := cx + dx
-		if x < bounds.Min.X || x >= bounds.Max.X || cy < bounds.Min.Y || cy >= bounds.Max.Y {
-			continue
-		}
-		orig := dst.RGBAAt(x, cy)
-		invA := 1.0 - alpha
-		outR := uint8(math.Min(255, float64(orig.R)*invA+rVal*alpha))
-		outG := uint8(math.Min(255, float64(orig.G)*invA+gVal*alpha))
-		outB := uint8(math.Min(255, float64(orig.B)*invA+bVal*alpha))
-		dst.SetRGBA(x, cy, color.RGBA{R: outR, G: outG, B: outB, A: orig.A})
-	}
-}
-
-// renderText renders a pixel-perfect 5x7 matrix font with outline glow and semi-transparent fill.
+// renderText desenha fonte matricial de alta legibilidade para fallback
 func renderText(dst *image.RGBA, text string, startX, startY, scale int, alpha float64) {
 	cursorX := startX
 	for _, ch := range text {
 		bitmap := getGlyph(ch)
-		// Draw dark glow outline first
 		drawGlyph(dst, bitmap, cursorX, startY, scale, color.RGBA{R: 20, G: 20, B: 20, A: 255}, alpha*0.8, true)
-		// Draw bright text inside
 		drawGlyph(dst, bitmap, cursorX, startY, scale, color.RGBA{R: 255, G: 255, B: 255, A: 255}, alpha, false)
 		cursorX += 6 * scale
 	}
@@ -417,7 +549,6 @@ func drawGlyph(dst *image.RGBA, bitmap [7]uint8, x0, y0, scale int, col color.RG
 			row := bitmap[r]
 			for c := 0; c < 5; c++ {
 				if (row & (1 << (4 - c))) != 0 {
-					// Draw pixel scaled block
 					for py := 0; py < scale; py++ {
 						for px := 0; px < scale; px++ {
 							x := x0 + ox + (c * scale) + px

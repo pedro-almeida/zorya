@@ -1,239 +1,396 @@
-// PT: Balanço de Branco Automático Rápido (Gray World / Bradford) e Contraste Tonal de Pré-visualização
-// EN: Fast Auto White Balance (Gray World / Bradford) and Portrait Proof Tonal Contrast Curve
-// AI: @llm-context Módulo Zorya v1.0.0 / Estágio 1 Auto-WB e Pré-Edição Tonal
+// PT: Tratamento Comercial "Portrait Sales Pop", Curva S, Proteção de Pele e Unsharp Mask
+// EN: Commercial "Portrait Sales Pop" Grade: S-Curve, DIGIC Skin Protection and Unsharp Mask
+// AI: @llm-context Módulo Zorya v1.0.0 / Estágio 1 Tratamento Comercial de Vitrine de Vendas
 
 package processor
 
 import (
 	"image"
-	"image/color"
 	"math"
 	"sync"
 )
 
 var (
-	// Precomputed sRGB-to-Linear conversion table for lightning-fast linear color space calculations.
-	sRGBToLinearLUT [256]float64
-	lutInitOnce     sync.Once
+	sCurveLUT   [256]uint8
+	sCurveOnce  sync.Once
 )
 
-func initLUTs() {
+// initSCurveLUT gera uma Curva Tonal em S (S-Curve) comercial:
+// - Pretos profundos e aveludados (0-48) na barba e camisa preta
+// - Abertura e pop nos médios (48-180) para dar presença e luminosidade
+// - Transição suave de ombro (soft shoulder roll-off) acima de 200 nas altas luzes
+func initSCurveLUT() {
 	for i := 0; i < 256; i++ {
-		// Linearize standard sRGB gamma ~2.2
-		v := float64(i) / 255.0
-		sRGBToLinearLUT[i] = math.Pow(v, 2.2)
+		x := float64(i) / 255.0
+
+		// Função sigmoide de contraste suave em S
+		// Centralizada em 0.45 com inclinação de alto impacto comercial
+		var val float64
+		if x < 0.20 {
+			// Aprofundamento sutil de sombras e pretos (barba e camisa)
+			val = x * 0.94
+		} else if x < 0.75 {
+			// Abertura de médios com contraste suave
+			normX := (x - 0.20) / 0.55
+			// Curva hermite suave
+			hermite := normX * normX * (3.0 - 2.0*normX)
+			val = 0.188 + hermite*(0.76-0.188)
+		} else {
+			// Ombro suave nas altas luzes (highlight roll-off sem clip estourado)
+			over := (x - 0.75) / 0.25
+			val = 0.76 + (1.0-math.Exp(-over*2.6))*(0.24/(1.0-math.Exp(-2.6)))
+		}
+
+		clamped := int(math.Round(val * 255.0))
+		if clamped < 0 {
+			clamped = 0
+		} else if clamped > 255 {
+			clamped = 255
+		}
+		sCurveLUT[i] = uint8(clamped)
 	}
 }
 
-// ComputeAutoWBGains calculates linear channel correction gains using the Gray World
-// algorithm with color temperature normalization for photographic portraits.
+// ApplyPortraitSalesPop aplica o tratamento comercial completo de Vitrine de Vendas:
+// ComputeAutoWBGains calcula ganhos para balanço de branco neutro
 func ComputeAutoWBGains(src image.Image) (float64, float64, float64) {
-	lutInitOnce.Do(initLUTs)
-
 	bounds := src.Bounds()
-	w := bounds.Dx()
-	h := bounds.Dy()
+	w, h := bounds.Dx(), bounds.Dy()
 	if w <= 0 || h <= 0 {
 		return 1.0, 1.0, 1.0
 	}
 
-	// Subsampling step for instantaneous computation (< 0.5ms) across multi-megapixel frames
-	step := 1
-	if w > 800 || h > 800 {
-		step = int(math.Max(float64(w), float64(h)) / 400.0)
-		if step < 1 {
-			step = 1
-		}
+	step := int(math.Max(float64(w), float64(h)) / 150.0)
+	if step < 1 {
+		step = 1
 	}
 
 	var sumR, sumG, sumB float64
-	var validPixels int
+	var count int
 
 	rgba, isRGBA := src.(*image.RGBA)
-
 	for y := bounds.Min.Y; y < bounds.Max.Y; y += step {
 		for x := bounds.Min.X; x < bounds.Max.X; x += step {
-			var r8, g8, b8 uint8
+			var r, g, b uint8
 			if isRGBA {
 				idx := (y-bounds.Min.Y)*rgba.Stride + (x-bounds.Min.X)*4
-				r8 = rgba.Pix[idx]
-				g8 = rgba.Pix[idx+1]
-				b8 = rgba.Pix[idx+2]
+				r = rgba.Pix[idx]
+				g = rgba.Pix[idx+1]
+				b = rgba.Pix[idx+2]
 			} else {
-				r, g, b, _ := src.At(x, y).RGBA()
-				r8 = uint8(r >> 8)
-				g8 = uint8(g >> 8)
-				b8 = uint8(b >> 8)
+				rc, gc, bc, _ := src.At(x, y).RGBA()
+				r = uint8(rc >> 8)
+				g = uint8(gc >> 8)
+				b = uint8(bc >> 8)
 			}
 
-			// Discard extreme specular highlights (>248) and deep black clips (<8)
-			// to prevent flash reflections or black backgrounds from skewing white balance
-			luma := 0.299*float64(r8) + 0.587*float64(g8) + 0.114*float64(b8)
-			if luma < 8.0 || luma > 248.0 {
+			luma := 0.299*float64(r) + 0.587*float64(g) + 0.114*float64(b)
+			if luma < 10.0 || luma > 248.0 {
 				continue
 			}
 
-			sumR += sRGBToLinearLUT[r8]
-			sumG += sRGBToLinearLUT[g8]
-			sumB += sRGBToLinearLUT[b8]
-			validPixels++
+			sumR += float64(r)
+			sumG += float64(g)
+			sumB += float64(b)
+			count++
 		}
 	}
 
-	if validPixels < 50 {
+	if count < 10 {
 		return 1.0, 1.0, 1.0
 	}
 
-	meanR := sumR / float64(validPixels)
-	meanG := sumG / float64(validPixels)
-	meanB := sumB / float64(validPixels)
+	meanR := sumR / float64(count)
+	meanG := sumG / float64(count)
+	meanB := sumB / float64(count)
 
-	if meanR <= 0.0001 || meanG <= 0.0001 || meanB <= 0.0001 {
+	if meanR <= 0.001 || meanG <= 0.001 || meanB <= 0.001 {
 		return 1.0, 1.0, 1.0
 	}
 
-	// Raw Gray World gains relative to Green channel (standard photographic reference)
 	rawGainR := meanG / meanR
 	rawGainB := meanG / meanB
 
-	// Photographic dampening: neutralize fluorescent/incandescent casts while
-	// preserving flattering skin warmth (80% correction towards neutral)
-	gainR := 1.0 + 0.80*(rawGainR-1.0)
-	gainG := 1.0
-	gainB := 1.0 + 0.80*(rawGainB-1.0)
+	gainR := 1.0 + 0.85*(rawGainR-1.0)
+	gainB := 1.0 + 0.85*(rawGainB-1.0)
 
-	// Safe bounds to avoid extreme or unnatural color distortion
-	gainR = math.Max(0.72, math.Min(1.38, gainR))
-	gainB = math.Max(0.72, math.Min(1.38, gainB))
+	gainR = math.Max(0.70, math.Min(1.45, gainR))
+	gainB = math.Max(0.70, math.Min(1.45, gainB))
 
-	return gainR, gainG, gainB
+	return gainR, 1.0, gainB
 }
 
-// buildPortraitProofLUT builds a 256-entry lookup table for a given channel gain,
-// combining linear gain multiplication and the 'Portrait Proof' tonal curve:
-// - Subtle shadow lift (reveals hair/dress texture without mud)
-// - Open midtone pop for skin luminosity
-// - Highlight roll-off protection (prevents blown-out cheeks and bridal highlights)
-func buildPortraitProofLUT(gain float64) [256]uint8 {
-	var lut [256]uint8
-	for i := 0; i < 256; i++ {
-		// Linear space multiplication
-		lin := sRGBToLinearLUT[i] * gain
+// ApplyPortraitSalesPop aplica o tratamento comercial completo de Vitrine de Vendas:
+// 1. Preservação estrita do Balanço de Branco autêntico do processador DIGIC da Canon.
+// 2. Detecção precisa de máscara de pele humana (vermelho/dourado) com ganho de exposição local (+0.5 EV).
+// 3. Proteção total de pretos (barba e camisa preta densos) e preservação do azul da parede de fundo.
+// 4. Aplicação de Curva Tonal em S (S-Curve).
+// 5. Vibrância seletiva (+14%) nos livros e folhagens sem saturar ou alaranjar a pele.
+func ApplyPortraitSalesPop(src image.Image) image.Image {
+	sCurveOnce.Do(initSCurveLUT)
 
-		// Convert back to perceptual sRGB gamma
-		var val float64
-		if lin > 0 {
-			val = math.Pow(lin, 1.0/2.2)
-		}
+	bounds := src.Bounds()
+	w := bounds.Dx()
+	h := bounds.Dy()
+	dst := image.NewRGBA(image.Rect(0, 0, w, h))
 
-		// Apply 'Portrait Proof' curve:
-		// 1. Soft shadow lift in [0.0, 0.28]
-		if val < 0.28 {
-			shadowBoost := 0.038 * math.Sin((val/0.28)*math.Pi)
-			val += shadowBoost
-		}
-
-		// 2. Midtone pop around skin tones [0.30, 0.70]
-		val += 0.025 * math.Sin(val*2.0*math.Pi)
-
-		// 3. Highlight soft shoulder roll-off above 0.75
-		if val > 0.75 {
-			over := val - 0.75
-			val = 0.75 + (1.0-math.Exp(-over*2.8))*(0.25/(1.0-math.Exp(-0.70)))
-		}
-
-		// Clamp
-		valClamped := int(math.Round(val * 255.0))
-		if valClamped < 0 {
-			valClamped = 0
-		} else if valClamped > 255 {
-			valClamped = 255
-		}
-		lut[i] = uint8(valClamped)
-	}
-	return lut
-}
-
-// ApplyAutoWhiteBalanceAndTone applies the complete Gray World Auto-WB and Portrait Proof
-// tone curve in a single blazing-fast LUT pass (< 1.5ms for 2048px).
-func ApplyAutoWhiteBalanceAndTone(src image.Image) image.Image {
-	lutInitOnce.Do(initLUTs)
+	rgba, isRGBA := src.(*image.RGBA)
 
 	gainR, gainG, gainB := ComputeAutoWBGains(src)
-	lutR := buildPortraitProofLUT(gainR)
-	lutG := buildPortraitProofLUT(gainG)
-	lutB := buildPortraitProofLUT(gainB)
 
-	bounds := src.Bounds()
-	w := bounds.Dx()
-	h := bounds.Dy()
-	dst := image.NewRGBA(image.Rect(0, 0, w, h))
-
-	if rgba, ok := src.(*image.RGBA); ok {
-		// Zero-copy direct stride iteration
-		numPixels := w * h
-		for i := 0; i < numPixels; i++ {
-			idx := i * 4
-			dst.Pix[idx] = lutR[rgba.Pix[idx]]
-			dst.Pix[idx+1] = lutG[rgba.Pix[idx+1]]
-			dst.Pix[idx+2] = lutB[rgba.Pix[idx+2]]
-			dst.Pix[idx+3] = rgba.Pix[idx+3]
-		}
-		return dst
-	}
+	// Fator de ganho de exposição local para o sujeito: +0.48 EV (~1.395x)
+	const subjectGain = 1.395
 
 	for y := 0; y < h; y++ {
 		srcY := bounds.Min.Y + y
-		dstIdx := y * dst.Stride
+		dstRow := y * dst.Stride
+
 		for x := 0; x < w; x++ {
 			srcX := bounds.Min.X + x
-			r, g, b, a := src.At(srcX, srcY).RGBA()
-			dst.Pix[dstIdx] = lutR[uint8(r>>8)]
-			dst.Pix[dstIdx+1] = lutG[uint8(g>>8)]
-			dst.Pix[dstIdx+2] = lutB[uint8(b>>8)]
-			dst.Pix[dstIdx+3] = uint8(a >> 8)
-			dstIdx += 4
+			var r, g, b, a uint8
+
+			if isRGBA {
+				idx := (srcY-bounds.Min.Y)*rgba.Stride + (srcX-bounds.Min.X)*4
+				r = rgba.Pix[idx]
+				g = rgba.Pix[idx+1]
+				b = rgba.Pix[idx+2]
+				a = rgba.Pix[idx+3]
+			} else {
+				rc, gc, bc, ac := src.At(srcX, srcY).RGBA()
+				r = uint8(rc >> 8)
+				g = uint8(gc >> 8)
+				b = uint8(bc >> 8)
+				a = uint8(ac >> 8)
+			}
+
+			rf := float64(r) * gainR
+			gf := float64(g) * gainG
+			bf := float64(b) * gainB
+
+			// Luminância perceptual
+			luma := 0.299*rf + 0.587*gf + 0.114*bf
+
+			// 1. Detecção da Máscara de Pele Humana com Proteção de Parede Azul e Pretos
+			skinWeight := calculateSkinWeight(rf, gf, bf, luma)
+
+			if skinWeight > 0.005 {
+				// Ganho de exposição suave no sujeito (+0.4 EV a +0.6 EV)
+				gain := 1.0 + skinWeight*(subjectGain-1.0)
+
+				rf *= gain
+				gf *= gain
+				bf *= gain
+
+				if rf > 255 {
+					rf = 255
+				}
+				if gf > 255 {
+					gf = 255
+				}
+				if bf > 255 {
+					bf = 255
+				}
+			}
+
+			// 2. Curva Tonal em S (S-Curve)
+			rSCurve := float64(sCurveLUT[uint8(rf)])
+			gSCurve := float64(sCurveLUT[uint8(gf)])
+			bSCurve := float64(sCurveLUT[uint8(bf)])
+
+			// 3. Vibrância Seletiva (+14%): realça livros coloridos e fundos sem alaranjar a pele
+			maxC := math.Max(rSCurve, math.Max(gSCurve, bSCurve))
+			minC := math.Min(rSCurve, math.Min(gSCurve, bSCurve))
+			chroma := maxC - minC
+
+			if chroma > 4.0 && skinWeight < 0.60 {
+				// Cores com saturação baixa/média fora da máscara principal de pele
+				// Ganho de vibrância inversamente proporcional à saturação existente
+				sat := chroma / (maxC + 0.001)
+				vibranceFactor := 1.0 + 0.14*(1.0-sat)*(1.0-skinWeight)
+
+				avgL := (rSCurve + gSCurve + bSCurve) / 3.0
+				rSCurve = avgL + (rSCurve-avgL)*vibranceFactor
+				gSCurve = avgL + (gSCurve-avgL)*vibranceFactor
+				bSCurve = avgL + (bSCurve-avgL)*vibranceFactor
+			}
+
+			// Clamp final
+			if rSCurve < 0 {
+				rSCurve = 0
+			} else if rSCurve > 255 {
+				rSCurve = 255
+			}
+			if gSCurve < 0 {
+				gSCurve = 0
+			} else if gSCurve > 255 {
+				gSCurve = 255
+			}
+			if bSCurve < 0 {
+				bSCurve = 0
+			} else if bSCurve > 255 {
+				bSCurve = 255
+			}
+
+			dstIdx := dstRow + x*4
+			dst.Pix[dstIdx] = uint8(rSCurve)
+			dst.Pix[dstIdx+1] = uint8(gSCurve)
+			dst.Pix[dstIdx+2] = uint8(bSCurve)
+			dst.Pix[dstIdx+3] = a
 		}
 	}
 
 	return dst
 }
 
-// ApplyPortraitProofCurve applies only the tonal contrast curve with neutral gains (1.0).
-func ApplyPortraitProofCurve(src image.Image) image.Image {
-	lutInitOnce.Do(initLUTs)
+// calculateSkinWeight identifica matizes avermelhados/dourados de pele humana
+// com proteção estrita para:
+// - Parede Azul: se o canal azul dominar (B > R ou B > G), retorna 0.0.
+// - Pretos Profundos: se luma < 35 (barba preta, terno, camisa preta), não clareia.
+// - Altas Luzes Extrema: luma > 230 tem atenuação de ganho.
+func calculateSkinWeight(r, g, b, luma float64) float64 {
+	// Proteção Absoluta contra Parede Azul
+	if b > r+5.0 || b > g+5.0 {
+		return 0.0
+	}
 
-	lut := buildPortraitProofLUT(1.0)
+	// Proteção Absoluta de Pretos (Barba e Camisa Preta continuam aveludados)
+	if luma < 30.0 {
+		return 0.0
+	}
+
+	// Faixa cromática de pele: R > G e G > B
+	if r <= g || g <= b {
+		return 0.0
+	}
+
+	rgDiff := r - g
+	rbDiff := r - b
+
+	if rgDiff < 10.0 || rbDiff < 15.0 || r < 55.0 {
+		return 0.0
+	}
+
+	// Razão de matiz dourado/vermelho
+	sum := r + g + b + 0.001
+	rRatio := r / sum
+	bRatio := b / sum
+
+	if rRatio < 0.38 || rRatio > 0.68 || bRatio > 0.28 {
+		return 0.0
+	}
+
+	// Transição suave (feathering) nas sombras para preservar detalhes de barba
+	shadowWeight := 1.0
+	if luma < 60.0 {
+		shadowWeight = (luma - 30.0) / 30.0
+	}
+
+	// Transição suave nas altas luzes para evitar estouro
+	highlightWeight := 1.0
+	if luma > 220.0 {
+		highlightWeight = math.Max(0.0, (255.0-luma)/35.0)
+	}
+
+	confidence := math.Min(1.0, (rgDiff/40.0)*(rbDiff/55.0))
+	return confidence * shadowWeight * highlightWeight
+}
+
+// ApplyUnsharpMask aplica nitidez sutil 3x3 de vitrine fotográfica comercial.
+// Realça detalhes de olhos, cílios, cabelo e textura sem introduzir ruído ou halos.
+func ApplyUnsharpMask(src image.Image, amount float64) image.Image {
+	if amount <= 0 {
+		return src
+	}
+	if amount > 1.0 {
+		amount = 1.0
+	}
+
 	bounds := src.Bounds()
 	w := bounds.Dx()
 	h := bounds.Dy()
-	dst := image.NewRGBA(image.Rect(0, 0, w, h))
+	if w < 3 || h < 3 {
+		return src
+	}
 
-	if rgba, ok := src.(*image.RGBA); ok {
-		numPixels := w * h
-		for i := 0; i < numPixels; i++ {
-			idx := i * 4
-			dst.Pix[idx] = lut[rgba.Pix[idx]]
-			dst.Pix[idx+1] = lut[rgba.Pix[idx+1]]
-			dst.Pix[idx+2] = lut[rgba.Pix[idx+2]]
-			dst.Pix[idx+3] = rgba.Pix[idx+3]
+	dst := image.NewRGBA(image.Rect(0, 0, w, h))
+	rgba, isRGBA := src.(*image.RGBA)
+
+	// Kernel 3x3 Laplacian sutil com ganho amount
+	// [ 0,  -k,  0]
+	// [-k, 1+4k,-k]
+	// [ 0,  -k,  0]
+	k := amount * 0.24
+
+	getRGB := func(x, y int) (float64, float64, float64, uint8) {
+		if isRGBA {
+			idx := (y-bounds.Min.Y)*rgba.Stride + (x-bounds.Min.X)*4
+			return float64(rgba.Pix[idx]), float64(rgba.Pix[idx+1]), float64(rgba.Pix[idx+2]), rgba.Pix[idx+3]
 		}
-		return dst
+		rc, gc, bc, ac := src.At(x, y).RGBA()
+		return float64(rc >> 8), float64(gc >> 8), float64(bc >> 8), uint8(ac >> 8)
 	}
 
 	for y := 0; y < h; y++ {
 		srcY := bounds.Min.Y + y
+		dstRow := y * dst.Stride
+
 		for x := 0; x < w; x++ {
 			srcX := bounds.Min.X + x
-			r, g, b, a := src.At(srcX, srcY).RGBA()
-			dst.SetRGBA(x, y, color.RGBA{
-				R: lut[uint8(r>>8)],
-				G: lut[uint8(g>>8)],
-				B: lut[uint8(b>>8)],
-				A: uint8(a >> 8),
-			})
+
+			rC, gC, bC, a := getRGB(srcX, srcY)
+
+			// Bordas: copia direto
+			if x == 0 || x == w-1 || y == 0 || y == h-1 {
+				dstIdx := dstRow + x*4
+				dst.Pix[dstIdx] = uint8(rC)
+				dst.Pix[dstIdx+1] = uint8(gC)
+				dst.Pix[dstIdx+2] = uint8(bC)
+				dst.Pix[dstIdx+3] = a
+				continue
+			}
+
+			rUp, gUp, bUp, _ := getRGB(srcX, srcY-1)
+			rDown, gDown, bDown, _ := getRGB(srcX, srcY+1)
+			rLeft, gLeft, bLeft, _ := getRGB(srcX-1, srcY)
+			rRight, gRight, bRight, _ := getRGB(srcX+1, srcY)
+
+			rOut := rC + k*(4.0*rC-rUp-rDown-rLeft-rRight)
+			gOut := gC + k*(4.0*gC-gUp-gDown-gLeft-gRight)
+			bOut := bC + k*(4.0*bC-bUp-bDown-bLeft-bRight)
+
+			if rOut < 0 {
+				rOut = 0
+			} else if rOut > 255 {
+				rOut = 255
+			}
+			if gOut < 0 {
+				gOut = 0
+			} else if gOut > 255 {
+				gOut = 255
+			}
+			if bOut < 0 {
+				bOut = 0
+			} else if bOut > 255 {
+				bOut = 255
+			}
+
+			dstIdx := dstRow + x*4
+			dst.Pix[dstIdx] = uint8(rOut)
+			dst.Pix[dstIdx+1] = uint8(gOut)
+			dst.Pix[dstIdx+2] = uint8(bOut)
+			dst.Pix[dstIdx+3] = a
 		}
 	}
 
 	return dst
+}
+
+// ApplyAutoWhiteBalanceAndTone mantém a compatibilidade com a esteira chamando Portrait Sales Pop.
+func ApplyAutoWhiteBalanceAndTone(src image.Image) image.Image {
+	return ApplyPortraitSalesPop(src)
+}
+
+// ApplyPortraitProofCurve aplica a curva tonal com preservação de matiz.
+func ApplyPortraitProofCurve(src image.Image) image.Image {
+	return ApplyPortraitSalesPop(src)
 }

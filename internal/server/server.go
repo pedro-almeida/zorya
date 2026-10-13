@@ -1,4 +1,4 @@
-﻿// PT: Servidor HTTP REST e Painel Web Embarcado do Zorya v1.0.0
+// PT: Servidor HTTP REST e Painel Web Embarcado do Zorya v1.0.0
 // EN: Zorya v1.0.0 HTTP REST Server and Embedded Web UI
 // AI: @llm-context Módulo Zorya v1.0.0 / Servidor de Rede, API e UI Embarcada
 
@@ -288,6 +288,7 @@ func (d *Daemon) mountRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/video/apply-lut", d.wrapCORS(d.handleVideoApplyLUT))
 	mux.HandleFunc("/api/v1/raw/decode", d.wrapCORS(d.handleRawDecode))
 	mux.HandleFunc("/api/v1/raw/ingest-batch", d.wrapCORS(d.handleRawIngestBatch))
+	mux.HandleFunc("/api/v1/raw/ingest-progress", d.wrapCORS(d.handleIngestProgress))
 	mux.HandleFunc("/api/v1/raw/master-export", d.wrapCORS(d.handleRawMasterExport))
 	mux.HandleFunc("/api/v1/pipeline/status", d.wrapCORS(d.handlePipelineStatus))
 	mux.HandleFunc("/api/v1/config/save", d.wrapCORS(d.handleConfigSave))
@@ -296,7 +297,7 @@ func (d *Daemon) mountRoutes(mux *http.ServeMux) {
 	_ = os.MkdirAll("thumbnails", 0755)
 	_ = os.MkdirAll("C:\\dev\\zorya\\thumbnails", 0755)
 	mux.HandleFunc("/thumbnails/", func(w http.ResponseWriter, r *http.Request) {
-		applyPNAHeaders(w)
+		applyPNAHeaders(w, r)
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
 			return
@@ -338,16 +339,22 @@ func (d *Daemon) mountRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/grid/config", d.wrapCORS(d.handleConfig))
 }
 
-func applyPNAHeaders(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", "https://www.tenorio.fot.br")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Authorization, X-Requested-With")
+func applyPNAHeaders(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		origin = "https://www.tenorio.fot.br"
+	}
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, HEAD")
+	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Authorization, X-Requested-With, Range, Origin, Access-Control-Request-Private-Network")
 	w.Header().Set("Access-Control-Allow-Private-Network", "true")
+	w.Header().Set("Access-Control-Max-Age", "86400")
+	w.Header().Set("Vary", "Origin, Access-Control-Request-Private-Network")
 }
 
 func (d *Daemon) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		applyPNAHeaders(w)
+		applyPNAHeaders(w, r)
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
 			return
@@ -358,13 +365,19 @@ func (d *Daemon) corsMiddleware(next http.Handler) http.Handler {
 
 func (d *Daemon) wrapCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		applyPNAHeaders(w)
+		applyPNAHeaders(w, r)
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 		next(w, r)
 	}
+}
+
+// GET /api/v1/raw/ingest-progress
+func (d *Daemon) handleIngestProgress(w http.ResponseWriter, r *http.Request) {
+	prog := processor.GetCurrentIngestProgress()
+	writeJSON(w, http.StatusOK, prog)
 }
 
 // handleRootUI serves the embedded index.html at root /.

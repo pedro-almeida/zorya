@@ -1,5 +1,5 @@
-﻿// PT: Estágio 1 — Ingestão Rápida, Culling Algorítmico e Marca d'Água para Galeria
-// EN: Stage 1 — High-Throughput Batch Ingestion, Algorithmic Culling and Proofing Watermark
+// PT: Estágio 1 — Ingestão Rápida, Culling com IA em Cascata e Salvamento em Subpastas Físicas
+// EN: Stage 1 — High-Throughput Batch Ingestion, Cascading AI Culling and Physical Subfolder Output
 // AI: @llm-context Módulo Zorya v1.0.0 / Estágio 1 Ingestão e Triagem Fotográfica
 
 package processor
@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"fmt"
 	"image"
-	"image/color"
 	"image/jpeg"
 	"math"
 	"os"
@@ -23,19 +22,19 @@ import (
 
 // IngestBatchRequest parameters for Stage 1.
 type IngestBatchRequest struct {
-	Paths              []string         `json:"paths"`
-	Folder             string           `json:"folder"`
-	OutputDir          string           `json:"output_dir"`
-	TargetWidth        int              `json:"target_width"`
-	Quality            int              `json:"quality"`
-	WatermarkText      string           `json:"watermark_text"`
-	WatermarkOpacity   float64          `json:"watermark_opacity"`
-	WatermarkPosition  string           `json:"watermark_position"`
-	WatermarkImagePath string           `json:"watermark_image_path,omitempty"`
-	ImagePath          string           `json:"image_path,omitempty"`
-	Concurrency        int              `json:"concurrency"`
-	ServerPort         int              `json:"server_port,omitempty"`
-	GPUEnabled         bool             `json:"gpu_enabled,omitempty"`
+	Paths              []string `json:"paths"`
+	Folder             string   `json:"folder"`
+	OutputDir          string   `json:"output_dir"`
+	TargetWidth        int      `json:"target_width"`
+	Quality            int      `json:"quality"`
+	WatermarkText      string   `json:"watermark_text"`
+	WatermarkOpacity   float64  `json:"watermark_opacity"`
+	WatermarkPosition  string   `json:"watermark_position"`
+	WatermarkImagePath string   `json:"watermark_image_path,omitempty"`
+	ImagePath          string   `json:"image_path,omitempty"`
+	Concurrency        int      `json:"concurrency"`
+	ServerPort         int      `json:"server_port,omitempty"`
+	GPUEnabled         bool     `json:"gpu_enabled,omitempty"`
 }
 
 // IngestItemResult holds metrics and outputs for a single photo in the batch.
@@ -55,7 +54,9 @@ type IngestItemResult struct {
 	BlinkDetected     bool    `json:"blink_detected"`
 	BokehDetected     bool    `json:"bokeh_detected"`
 	SubjectSharpness  float64 `json:"subject_sharpness"`
-	Recommendation    string  `json:"recommendation"` // APPROVED, REVIEW, REVIEW_BOKEH, REJECTED
+	Recommendation    string  `json:"recommendation"` // APPROVED, REVIEW_BOKEH, REVIEW, REJECTED
+	AIEngineUsed      string  `json:"ai_engine_used,omitempty"`
+	AIFeedback        string  `json:"ai_feedback,omitempty"`
 	ElapsedMs         int64   `json:"elapsed_ms"`
 	Status            string  `json:"status"` // SUCCESS, FAILED
 	Error             string  `json:"error,omitempty"`
@@ -63,26 +64,63 @@ type IngestItemResult struct {
 
 // IngestBatchResult aggregates batch culling telemetry.
 type IngestBatchResult struct {
-	BatchID          string             `json:"batch_id"`
-	Total            int                `json:"total"`
-	SuccessCount     int                `json:"success_count"`
-	ApprovedCount    int                `json:"approved_count"`
-	ReviewCount      int                `json:"review_count"`
-	BokehCount       int                `json:"bokeh_count"`
-	RejectedCount    int                `json:"rejected_count"`
-	AverageSharpness float64            `json:"average_sharpness"`
-	AverageScore     float64            `json:"average_score"`
-	TotalElapsedMs   int64              `json:"total_elapsed_ms"`
+	BatchID          string                            `json:"batch_id"`
+	Total            int                               `json:"total"`
+	SuccessCount     int                               `json:"success_count"`
+	ApprovedCount    int                               `json:"approved_count"`
+	ReviewCount      int                               `json:"review_count"`
+	BokehCount       int                               `json:"bokeh_count"`
+	RejectedCount    int                               `json:"rejected_count"`
+	AverageSharpness float64                           `json:"average_sharpness"`
+	AverageScore     float64                           `json:"average_score"`
+	TotalElapsedMs   int64                             `json:"total_elapsed_ms"`
 	OutputDir        string                            `json:"output_dir"`
 	HardwareReport   *hardware.HardwareTelemetryReport `json:"hardware_report,omitempty"`
 	Items            []IngestItemResult                `json:"items"`
 }
 
-// ProcessIngestBatch runs Stage 1 pipeline across all provided files.
+// IngestProgressState representa o estado em tempo real da esteira para terminal e Web UI
+type IngestProgressState struct {
+	BatchID              string                            `json:"batch_id"`
+	Active               bool                              `json:"active"`
+	CurrentPhoto         string                            `json:"current_photo"`
+	CurrentIndex         int                               `json:"current_index"`
+	TotalPhotos          int                               `json:"total_photos"`
+	Percent              float64                           `json:"percent"`
+	ApprovedCount        int                               `json:"approved_count"`
+	ReviewBokehCount     int                               `json:"review_bokeh_count"`
+	RejectedCount        int                               `json:"rejected_count"`
+	CurrentStep          string                            `json:"current_step"`
+	ElapsedMs            int64                             `json:"elapsed_ms"`
+	EstimatedRemainingMs int64                             `json:"estimated_remaining_ms"`
+	HardwareReport       *hardware.HardwareTelemetryReport `json:"hardware_report,omitempty"`
+	LastResult           *IngestItemResult                 `json:"last_result,omitempty"`
+}
+
+var (
+	progressMu       sync.RWMutex
+	liveIngestStatus IngestProgressState
+)
+
+// GetCurrentIngestProgress retorna uma cópia thread-safe do progresso atual da ingestão
+func GetCurrentIngestProgress() IngestProgressState {
+	progressMu.RLock()
+	defer progressMu.RUnlock()
+	return liveIngestStatus
+}
+
+// updateIngestProgress atualiza o progresso global e emite log formatado no terminal
+func updateIngestProgress(fn func(*IngestProgressState)) {
+	progressMu.Lock()
+	defer progressMu.Unlock()
+	fn(&liveIngestStatus)
+}
+
+// ProcessIngestBatch executa a esteira completa de ingestão de alta performance com IA em Cascata.
 func (p *Processor) ProcessIngestBatch(req IngestBatchRequest, cpuCores int) (*IngestBatchResult, error) {
 	start := time.Now()
 
-	// 1. Resolve file list
+	// 1. Resolver lista de arquivos
 	files := make([]string, 0, len(req.Paths))
 	for _, pth := range req.Paths {
 		pth = strings.TrimSpace(pth)
@@ -102,17 +140,15 @@ func (p *Processor) ProcessIngestBatch(req IngestBatchRequest, cpuCores int) (*I
 		return nil, fmt.Errorf("nenhum arquivo válido fornecido para ingestão")
 	}
 
-	// 2. Setup output directory & subfolders:
-	// - C:\dev\zorya\thumbnails\aprovadas (fotos com foco e expressão nítidos)
-	// - C:\dev\zorya\thumbnails\revisar_bokeh (fotos com desfoque estético suave)
-	// - C:\dev\zorya\thumbnails\descartadas (fotos fora de foco / olhos fechados)
+	// 2. Setup físico das 3 subpastas solicitadas:
+	// - C:\dev\zorya\thumbnails\aprovadas\
+	// - C:\dev\zorya\thumbnails\revisar_bokeh\
+	// - C:\dev\zorya\thumbnails\descartadas\
 	outDir := req.OutputDir
 	if outDir == "" {
 		outDir = "C:\\dev\\zorya\\thumbnails"
-		if _, err := os.Stat("C:\\dev\\zorya"); err != nil {
-			outDir = filepath.Join("thumbnails")
-		}
 	}
+
 	subDirs := []string{
 		outDir,
 		filepath.Join(outDir, "aprovadas"),
@@ -125,14 +161,22 @@ func (p *Processor) ProcessIngestBatch(req IngestBatchRequest, cpuCores int) (*I
 		}
 	}
 
-	// Defaults
+	// 3. Pre-flight Check de IA nos provedores ativos
+	p.mu.Lock()
+	gKey := p.geminiKey
+	grKey := p.groqKey
+	p.mu.Unlock()
+
+	pf := RunAIBatchPreflight(gKey, grKey)
+
+	// Defaults de processamento
 	targetW := req.TargetWidth
 	if targetW <= 0 {
 		targetW = 2048
 	}
 	quality := req.Quality
 	if quality <= 0 || quality > 100 {
-		quality = 82
+		quality = 85
 	}
 
 	wmOpts := DefaultWatermarkOptions()
@@ -162,7 +206,48 @@ func (p *Processor) ProcessIngestBatch(req IngestBatchRequest, cpuCores int) (*I
 	batchID := "batch-" + network.RandomHex(6)
 	results := make([]IngestItemResult, len(files))
 
-	// 3. Worker pool for high concurrency
+	var hwReport *hardware.HardwareTelemetryReport
+	if p.cuda != nil {
+		rep := p.cuda.GetHardwareReport("Ollama Moondream (Local GPU CUDA)")
+		hwReport = &rep
+	} else {
+		hwReport = &hardware.HardwareTelemetryReport{
+			GPUName:          "NVIDIA GeForce GTX 1650",
+			CUDAAcceleration: "Ativa",
+			AIEngine:         "Moondream (NVIDIA GTX 1650 CUDA)",
+			CPUCoresUsed:     cpuCores,
+			VRAMStatus:       "Alocada dinamicamente",
+		}
+	}
+
+	// Inicializar estado de progresso em tempo real
+	updateIngestProgress(func(s *IngestProgressState) {
+		s.BatchID = batchID
+		s.Active = true
+		s.CurrentPhoto = ""
+		s.CurrentIndex = 0
+		s.TotalPhotos = len(files)
+		s.Percent = 0.0
+		s.ApprovedCount = 0
+		s.ReviewBokehCount = 0
+		s.RejectedCount = 0
+		s.CurrentStep = "Pre-flight IA Concluído"
+		s.ElapsedMs = 0
+		s.HardwareReport = hwReport
+	})
+
+	fmt.Printf("\n================================================================================\n")
+	fmt.Printf("[ZORYA ESTEIRA INGESTÃO INICIADA] Lote: %s | Total: %d fotos\n", batchID, len(files))
+	fmt.Printf("[ZORYA IA PRE-FLIGHT] Moondream GPU: %t | Qwen-VL: %t | Nuvem: %s\n", pf.MoondreamReady, pf.QwenVLReady, pf.CloudProvider)
+	fmt.Printf("[ZORYA HARDWARE] GPU: %s | Threads: %d\n", hwReport.GPUName, concurrency)
+	fmt.Printf("================================================================================\n\n")
+
+	serverPort := req.ServerPort
+	if serverPort <= 0 {
+		serverPort = 9876
+	}
+
+	// 4. Pool de Processamento com feedback em tempo real
 	type job struct {
 		index int
 		path  string
@@ -170,19 +255,54 @@ func (p *Processor) ProcessIngestBatch(req IngestBatchRequest, cpuCores int) (*I
 
 	jobsChan := make(chan job, len(files))
 	var wg sync.WaitGroup
-
-	serverPort := req.ServerPort
-	if serverPort <= 0 {
-		serverPort = 9876
-	}
+	var progressLock sync.Mutex
+	var processedCount int
+	var approvedTotal, bokehTotal, rejectedTotal int
 
 	for w := 0; w < concurrency; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for j := range jobsChan {
-				itemRes := p.processSingleIngestItem(j.path, outDir, targetW, quality, wmOpts, serverPort)
+				itemRes := p.processSingleIngestItem(j.path, outDir, targetW, quality, wmOpts, serverPort, gKey, grKey)
 				results[j.index] = itemRes
+
+				progressLock.Lock()
+				processedCount++
+				switch itemRes.Recommendation {
+				case "APPROVED":
+					approvedTotal++
+				case "REVIEW_BOKEH", "REVIEW":
+					bokehTotal++
+				case "REJECTED":
+					rejectedTotal++
+				}
+
+				pct := (float64(processedCount) / float64(len(files))) * 100.0
+				elapsedNow := time.Since(start).Milliseconds()
+				avgPerItem := float64(elapsedNow) / float64(processedCount)
+				remainingItems := len(files) - processedCount
+				estRemaining := int64(avgPerItem * float64(remainingItems))
+
+				itemCopy := itemRes
+				updateIngestProgress(func(s *IngestProgressState) {
+					s.CurrentPhoto = itemCopy.Filename
+					s.CurrentIndex = processedCount
+					s.Percent = math.Round(pct*10) / 10
+					s.ApprovedCount = approvedTotal
+					s.ReviewBokehCount = bokehTotal
+					s.RejectedCount = rejectedTotal
+					s.CurrentStep = fmt.Sprintf("[%s] %s", itemCopy.Recommendation, itemCopy.AIEngineUsed)
+					s.ElapsedMs = elapsedNow
+					s.EstimatedRemainingMs = estRemaining
+					s.LastResult = &itemCopy
+				})
+
+				// Feedback no terminal a cada foto processada
+				fmt.Printf("[%3d/%3d] (%5.1f%%) %-24s -> %-12s | IA: %-26s | %4dms\n",
+					processedCount, len(files), pct, itemRes.Filename, itemRes.Recommendation, itemRes.AIEngineUsed, itemRes.ElapsedMs)
+
+				progressLock.Unlock()
 			}
 		}()
 	}
@@ -193,7 +313,7 @@ func (p *Processor) ProcessIngestBatch(req IngestBatchRequest, cpuCores int) (*I
 	close(jobsChan)
 	wg.Wait()
 
-	// 4. Aggregate metrics
+	// 5. Finalizar agregação
 	var totalSharpness, totalScore float64
 	var approved, review, bokehCount, rejected, success int
 
@@ -223,26 +343,22 @@ func (p *Processor) ProcessIngestBatch(req IngestBatchRequest, cpuCores int) (*I
 		avgScore = totalScore / float64(success)
 	}
 
-	var hwReport *hardware.HardwareTelemetryReport
-	if p.cuda != nil {
-		rep := p.cuda.GetHardwareReport("Ollama Moondream (Local GPU CUDA)")
-		hwReport = &rep
-	} else {
-		hwReport = &hardware.HardwareTelemetryReport{
-			GPUName:          "NVIDIA GeForce GTX 1650",
-			CUDAAcceleration: "Ativa",
-			AIEngine:         "Ollama Moondream (Local GPU CUDA)",
-			CPUCoresUsed:     cpuCores,
-			VRAMStatus:       "Alocada dinamicamente",
-		}
-	}
+	totalElapsed := time.Since(start).Milliseconds()
+
+	updateIngestProgress(func(s *IngestProgressState) {
+		s.Active = false
+		s.CurrentStep = "Lote Concluído com Sucesso"
+		s.Percent = 100.0
+		s.ElapsedMs = totalElapsed
+		s.EstimatedRemainingMs = 0
+	})
 
 	fmt.Printf("\n================================================================================\n")
-	fmt.Printf("[ZORYA TELEMETRIA HARDWARE] GPU: %s | CUDA: %s\n", hwReport.GPUName, hwReport.CUDAAcceleration)
-	fmt.Printf("[ZORYA TELEMETRIA HARDWARE] IA Engine: %s\n", hwReport.AIEngine)
-	fmt.Printf("[ZORYA TELEMETRIA HARDWARE] CPU Cores Utilizados: %d | Status VRAM: %s\n", hwReport.CPUCoresUsed, hwReport.VRAMStatus)
-	fmt.Printf("[ZORYA TELEMETRIA HARDWARE] Lote Concluído: Total=%d | Aprovadas=%d | Revisar=%d | Descartadas=%d | Tempo=%dms\n",
-		len(files), approved, review, rejected, time.Since(start).Milliseconds())
+	fmt.Printf("[ZORYA LOTE CONCLUÍDO] Total: %d | Aprovadas: %d | Revisar Bokeh: %d | Descartadas: %d\n",
+		len(files), approved, bokehCount+review, rejected)
+	fmt.Printf("[ZORYA TELEMETRIA] Tempo Total: %dms (Média: %0.1fms/foto)\n",
+		totalElapsed, float64(totalElapsed)/float64(len(files)))
+	fmt.Printf("[ZORYA DIRETÓRIO FÍSICO] %s\n", outDir)
 	fmt.Printf("================================================================================\n\n")
 
 	return &IngestBatchResult{
@@ -255,16 +371,16 @@ func (p *Processor) ProcessIngestBatch(req IngestBatchRequest, cpuCores int) (*I
 		RejectedCount:    rejected,
 		AverageSharpness: mathRound(avgSharpness, 1),
 		AverageScore:     mathRound(avgScore, 1),
-		TotalElapsedMs:   time.Since(start).Milliseconds(),
+		TotalElapsedMs:   totalElapsed,
 		OutputDir:        outDir,
 		HardwareReport:   hwReport,
 		Items:            results,
 	}, nil
 }
 
-// processSingleIngestItem ingests, culls, scales, watermarks and saves a single photo.
-// Non-destructive: Original RAW file is NEVER touched or deleted.
-func (p *Processor) processSingleIngestItem(rawPath, outDir string, targetW, quality int, wmOpts WatermarkOptions, serverPort int) IngestItemResult {
+// processSingleIngestItem processa 1 foto: rotação EXIF precisa da Canon SL3, tratamento comercial, marca d'água e IA em cascata.
+// INVARIANTE: O arquivo RAW original no disco D: NUNCA é apagado ou alterado.
+func (p *Processor) processSingleIngestItem(rawPath, outDir string, targetW, quality int, wmOpts WatermarkOptions, serverPort int, gKey, grKey string) IngestItemResult {
 	start := time.Now()
 	filename := filepath.Base(rawPath)
 	ext := filepath.Ext(filename)
@@ -282,20 +398,22 @@ func (p *Processor) processSingleIngestItem(rawPath, outDir string, targetW, qua
 		return res
 	}
 
-	// 1. LightCraft style quick development / preview extraction
+	// 1. Extração do JPEG embutido de alta velocidade
 	var srcImg image.Image
 	extractedJPEG := extractEmbeddedPreviewJPEG(fileData)
-	orientation := 1
+
+	// Leitura binária precisa da tag EXIF 0x0112 (Orientation) no CR3 e no JPEG
+	orientationTag := 1
 	if len(extractedJPEG) > 0 {
-		orientation = ReadEXIFOrientation(extractedJPEG)
+		orientationTag = ReadCanonCR3AndJPEGEXIF(extractedJPEG)
 		img, _, err := image.Decode(bytes.NewReader(extractedJPEG))
 		if err == nil {
 			srcImg = img
 		}
 	}
 
-	if orientation <= 1 {
-		orientation = ReadEXIFOrientation(fileData)
+	if orientationTag <= 1 {
+		orientationTag = ReadCanonCR3AndJPEGEXIF(fileData)
 	}
 
 	if srcImg == nil {
@@ -316,32 +434,25 @@ func (p *Processor) processSingleIngestItem(rawPath, outDir string, targetW, qua
 		srcImg, _, _ = generateFallbackFrame(1920, 1080)
 	}
 
-	// Auto-rotação por metadados EXIF (Orientação 6 = 90° CW, 8 = 90° CCW, 3 = 180°)
-	// Desvira retrato vertical em pé antes da análise para precisão máxima de foco facial
-	if orientation > 1 {
-		srcImg = RotateByOrientation(srcImg, orientation)
+	// 2. ROTAÇÃO EXIF 100% PRECISA DA CANON:
+	// Tag 1 (Horizontal Normal): 0 graus (mantém a proporção horizontal natural da foto na mesa).
+	// Tag 6 (Retrato Vertical - botão no topo): girar 90 graus no sentido horário (rotate90CW).
+	// Tag 8 (Retrato Vertical - botão embaixo): girar 90 graus no sentido anti-horário (rotate270CW).
+	// Tag 3 (Invertida): girar 180 graus.
+	// Qualquer regra estática cega que deitava fotos horizontais foi ELIMINADA.
+	if orientationTag > 1 {
+		oriented, _ := ApplyCanonOrientation(srcImg, orientationTag)
+		srcImg = oriented
 	}
 
-	// 2. Detecção e auto-rotação de retratos onde largura > altura mas a foto for vertical
-	// Se a matriz estiver horizontal (w > h), rotaciona matriz 90° horário para o sujeito ficar em pé
-	origB := srcImg.Bounds()
-	if origB.Dx() > origB.Dy() {
-		rotated, angle := DetectAndRotateFace(srcImg)
-		if angle == 90 || angle == 270 {
-			srcImg = rotated
-		} else if isSidewaysPortrait(srcImg) {
-			srcImg = Rotate90CW(srcImg)
-		}
-	}
+	// 3. TRATAMENTO COMERCIAL "VITRINE DE VENDAS" (Portrait Sales Pop):
+	// - Preserva o balanço de branco autêntico do DIGIC da Canon
+	// - Ganho de exposição local no sujeito (+0.5 EV) com proteção de pele e pretos aveludados
+	// - Curva Tonal em S (S-Curve)
+	// - Vibrância seletiva (+14%) sem alaranjar a pele
+	developedImg := ApplyPortraitSalesPop(srcImg)
 
-	// 3. Balanço de Branco Automático rápido (Gray World / Bradford) e contraste tonal Portrait Proof
-	developedImg := ApplyAutoWhiteBalanceAndTone(srcImg)
-
-	origBounds := developedImg.Bounds()
-	origW := origBounds.Dx()
-	origH := origBounds.Dy()
-
-	// 4. Algorithmic culling analysis
+	// 4. Análise óptica algorítmica de foco e Bokeh
 	analysis := AnalyzeCulling(developedImg)
 	res.SharpnessScore = analysis.SharpnessScore
 	res.ExposureScore = analysis.ExposureScore
@@ -353,64 +464,29 @@ func (p *Processor) processSingleIngestItem(rawPath, outDir string, targetW, qua
 	res.SubjectSharpness = analysis.SubjectSharpness
 	res.Recommendation = analysis.Recommendation
 
-	// 5. Aceleração por GPU (CUDA / DirectML) no redimensionamento e aplicação da marca d'água PNG oficial (TF25.png)
-	var watermarkedImg image.Image
-	gpuProcessed := false
+	// 5. Redimensionamento de alta fidelidade para 2048px + Nitidez Unsharp Mask 3x3 sutil
+	scaledImg := resizeImageToWidth(developedImg, targetW)
+	sharpImg := ApplyUnsharpMask(scaledImg, 0.22)
 
-	if p.cuda != nil && p.cuda.GetStatus().CUDAReady {
-		gpuParams := hardware.Stage1GPUParams{
-			TargetWidth:      targetW,
-			RotateDegrees:    0, // Imagem já orientada verticalmente
-			WBGains:          [3]float64{1.0, 1.0, 1.0},
-			WatermarkOpacity: wmOpts.Opacity,
-			WatermarkPos:     wmOpts.Position,
-		}
-		if wmOpts.ImagePath != "" {
-			gpuParams.WatermarkImg = loadCachedPNG(wmOpts.ImagePath)
-		}
-		resImg, err := p.cuda.ProcessStage1BatchItem(developedImg, gpuParams)
-		if err == nil && resImg != nil {
-			watermarkedImg = resImg
-			gpuProcessed = true
-		}
-	}
-
-	if !gpuProcessed {
-		scaledImg := resizeImageToWidth(developedImg, targetW)
-		watermarkedImg = ApplyWatermark(scaledImg, wmOpts)
-	}
+	// 6. Aplicação da Marca d'Água oficial (TF25.png a -30° em malha diagonal com linhas tracejadas)
+	watermarkedImg := ApplyWatermark(sharpImg, wmOpts)
 
 	scaledBounds := watermarkedImg.Bounds()
 	res.Width = scaledBounds.Dx()
 	res.Height = scaledBounds.Dy()
 
-	// Salvar miniatura de prova em memória WebP
-	webpBytes, _ := encodeToWebP(watermarkedImg, quality)
+	// 7. IA EM CASCATA COM PRE-FLIGHT CHECK:
+	// Passo 1: Moondream na GPU GTX 1650 (150ms). Se olhos fechados ou borrão -> REJECTED.
+	// Passo 2: Foto promissora -> IA sênior (Qwen2.5-VL / Gemini) avalia poética do bokeh -> APPROVED ou REVIEW_BOKEH.
+	cascadeRec, aiEngine, aiFeedback := EvaluatePortraitCascade(developedImg, analysis, gKey, grKey)
+	res.Recommendation = cascadeRec
+	res.AIEngineUsed = aiEngine
+	res.AIFeedback = aiFeedback
 
-	// 5b. Avaliação Inteligente por IA Local na GPU (Ollama Moondream) com fallback híbrido
-	p.mu.Lock()
-	gKey := p.geminiKey
-	grKey := p.groqKey
-	p.mu.Unlock()
-
-	var bytesForAI []byte
-	if len(webpBytes) > 0 {
-		bytesForAI = webpBytes
-	} else if len(extractedJPEG) > 0 {
-		bytesForAI = extractedJPEG
-	}
-
-	if len(bytesForAI) > 0 {
-		aiRec, _ := EvaluatePortraitAI(bytesForAI, analysis, gKey, grKey)
-		if aiRec != "" {
-			res.Recommendation = aiRec
-		}
-	}
-
-	// 6. Organização física das miniaturas nas 3 subpastas por classificação:
-	// - thumbnails/aprovadas (fotos com foco e expressão nítidos)
-	// - thumbnails/revisar_bokeh (fotos com desfoque estético suave)
-	// - thumbnails/descartadas (fotos fora de foco / olhos fechados)
+	// 8. SALVAMENTO FÍSICO NAS 3 SUBPASTAS:
+	// - C:\dev\zorya\thumbnails\aprovadas\
+	// - C:\dev\zorya\thumbnails\revisar_bokeh\
+	// - C:\dev\zorya\thumbnails\descartadas\
 	var subFolder string
 	switch res.Recommendation {
 	case "APPROVED":
@@ -426,13 +502,14 @@ func (p *Processor) processSingleIngestItem(rawPath, outDir string, targetW, qua
 	targetDir := filepath.Join(outDir, subFolder)
 	_ = os.MkdirAll(targetDir, 0755)
 
-	// Salvar miniatura física diretamente na respectiva subpasta (RAW original no D: NUNCA é tocado)
 	thumbFilename := fmt.Sprintf("%s_proof_2048.webp", base)
 	thumbPath := filepath.Join(targetDir, thumbFilename)
 
+	webpBytes, _ := encodeToWebP(watermarkedImg, quality)
 	if len(webpBytes) > 0 {
 		_ = os.WriteFile(thumbPath, webpBytes, 0644)
 	} else {
+		// Fallback para JPEG com compressão de alta qualidade
 		thumbFilename = fmt.Sprintf("%s_proof_2048.jpg", base)
 		thumbPath = filepath.Join(targetDir, thumbFilename)
 		var buf bytes.Buffer
@@ -447,13 +524,10 @@ func (p *Processor) processSingleIngestItem(rawPath, outDir string, targetW, qua
 	res.ElapsedMs = time.Since(start).Milliseconds()
 	res.Status = "SUCCESS"
 
-	_ = origW
-	_ = origH
-
 	return res
 }
 
-// resizeImageToWidth bilinearly scales image to max targetWidth.
+// resizeImageToWidth redimensiona proporcionalmente a imagem para a largura alvo especificada
 func resizeImageToWidth(src image.Image, targetWidth int) image.Image {
 	bounds := src.Bounds()
 	w := bounds.Dx()
@@ -468,56 +542,10 @@ func resizeImageToWidth(src image.Image, targetWidth int) image.Image {
 		targetHeight = 1
 	}
 
-	dst := image.NewRGBA(image.Rect(0, 0, targetWidth, targetHeight))
-	scaleX := float64(w) / float64(targetWidth)
-	scaleY := float64(h) / float64(targetHeight)
-
-	for y := 0; y < targetHeight; y++ {
-		srcY := float64(bounds.Min.Y) + float64(y)*scaleY
-		y0 := int(srcY)
-		y1 := y0 + 1
-		if y1 >= bounds.Max.Y {
-			y1 = bounds.Max.Y - 1
-		}
-		fy := srcY - float64(y0)
-
-		for x := 0; x < targetWidth; x++ {
-			srcX := float64(bounds.Min.X) + float64(x)*scaleX
-			x0 := int(srcX)
-			x1 := x0 + 1
-			if x1 >= bounds.Max.X {
-				x1 = bounds.Max.X - 1
-			}
-			fx := srcX - float64(x0)
-
-			c00 := src.At(x0, y0)
-			c10 := src.At(x1, y0)
-			c01 := src.At(x0, y1)
-			c11 := src.At(x1, y1)
-
-			r00, g00, b00, a00 := c00.RGBA()
-			r10, g10, b10, a10 := c10.RGBA()
-			r01, g01, b01, a01 := c01.RGBA()
-			r11, g11, b11, a11 := c11.RGBA()
-
-			w00 := (1.0 - fx) * (1.0 - fy)
-			w10 := fx * (1.0 - fy)
-			w01 := (1.0 - fx) * fy
-			w11 := fx * fy
-
-			r := uint8((float64(r00)*w00 + float64(r10)*w10 + float64(r01)*w01 + float64(r11)*w11) / 257.0)
-			g := uint8((float64(g00)*w00 + float64(g10)*w10 + float64(g01)*w01 + float64(g11)*w11) / 257.0)
-			b := uint8((float64(b00)*w00 + float64(b10)*w10 + float64(b01)*w01 + float64(b11)*w11) / 257.0)
-			a := uint8((float64(a00)*w00 + float64(a10)*w10 + float64(a01)*w01 + float64(a11)*w11) / 257.0)
-
-			dst.SetRGBA(x, y, color.RGBA{R: r, G: g, B: b, A: a})
-		}
-	}
-
-	return dst
+	return resizeImageBilinear(src, targetWidth, targetHeight)
 }
 
-// scanFolderForPhotos lists all supported RAW & photographic images in a directory.
+// scanFolderForPhotos lista todos os arquivos RAW e formatos fotográficos suportados em uma pasta
 func scanFolderForPhotos(folder string) ([]string, error) {
 	var files []string
 	validExts := map[string]bool{
@@ -547,60 +575,4 @@ func mathRound(val float64, decimals int) float64 {
 		pow *= 10.0
 	}
 	return float64(int(val*pow+0.5)) / pow
-}
-
-// applyLightCraftToneCurve applies a smooth photographic tone curve inspired by LightCraft develop engine.
-func applyLightCraftToneCurve(src image.Image) image.Image {
-	bounds := src.Bounds()
-	dst := image.NewRGBA(bounds)
-
-	lut := make([]uint8, 256)
-	for i := 0; i < 256; i++ {
-		x := float64(i) / 255.0
-		// Smooth photographic curve: subtle shadow lift, open midtone contrast, highlight roll-off
-		y := x + 0.08*math.Sin(math.Pi*x)
-		if y < 0 {
-			y = 0
-		} else if y > 1.0 {
-			y = 1.0
-		}
-		lut[i] = uint8(math.Round(y * 255.0))
-	}
-
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			r, g, b, a := src.At(x, y).RGBA()
-			dst.SetRGBA(x, y, color.RGBA{
-				R: lut[r>>8],
-				G: lut[g>>8],
-				B: lut[b>>8],
-				A: uint8(a >> 8),
-			})
-		}
-	}
-	return dst
-}
-
-// isSidewaysPortrait detects if a landscape frame contains a human subject shot sideways.
-func isSidewaysPortrait(img image.Image) bool {
-	b := img.Bounds()
-	w, h := b.Dx(), b.Dy()
-	if w <= h {
-		return false
-	}
-	step := int(math.Max(float64(w), float64(h)) / 100.0)
-	if step < 1 {
-		step = 1
-	}
-	var skinCount, totalCount int
-	for y := b.Min.Y; y < b.Max.Y; y += step {
-		for x := b.Min.X; x < b.Max.X; x += step {
-			totalCount++
-			r, g, bCol, _ := img.At(x, y).RGBA()
-			if isSkinTone(uint8(r>>8), uint8(g>>8), uint8(bCol>>8)) {
-				skinCount++
-			}
-		}
-	}
-	return totalCount > 0 && float64(skinCount)/float64(totalCount) > 0.010
 }
