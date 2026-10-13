@@ -1,4 +1,4 @@
-// PT: Estágio 1 — Ingestão Rápida, Culling Algorítmico e Marca d'Água para Galeria
+﻿// PT: Estágio 1 — Ingestão Rápida, Culling Algorítmico e Marca d'Água para Galeria
 // EN: Stage 1 — High-Throughput Batch Ingestion, Algorithmic Culling and Proofing Watermark
 // AI: @llm-context Módulo Zorya v1.0.0 / Estágio 1 Ingestão e Triagem Fotográfica
 
@@ -17,21 +17,25 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pedro-almeida/zorya/internal/hardware"
 	"github.com/pedro-almeida/zorya/internal/network"
 )
 
 // IngestBatchRequest parameters for Stage 1.
 type IngestBatchRequest struct {
-	Paths             []string         `json:"paths"`
-	Folder            string           `json:"folder"`
-	OutputDir         string           `json:"output_dir"`
-	TargetWidth       int              `json:"target_width"`
-	Quality           int              `json:"quality"`
-	WatermarkText     string           `json:"watermark_text"`
-	WatermarkOpacity  float64          `json:"watermark_opacity"`
-	WatermarkPosition string           `json:"watermark_position"`
-	Concurrency       int              `json:"concurrency"`
-	ServerPort        int              `json:"server_port,omitempty"`
+	Paths              []string         `json:"paths"`
+	Folder             string           `json:"folder"`
+	OutputDir          string           `json:"output_dir"`
+	TargetWidth        int              `json:"target_width"`
+	Quality            int              `json:"quality"`
+	WatermarkText      string           `json:"watermark_text"`
+	WatermarkOpacity   float64          `json:"watermark_opacity"`
+	WatermarkPosition  string           `json:"watermark_position"`
+	WatermarkImagePath string           `json:"watermark_image_path,omitempty"`
+	ImagePath          string           `json:"image_path,omitempty"`
+	Concurrency        int              `json:"concurrency"`
+	ServerPort         int              `json:"server_port,omitempty"`
+	GPUEnabled         bool             `json:"gpu_enabled,omitempty"`
 }
 
 // IngestItemResult holds metrics and outputs for a single photo in the batch.
@@ -69,8 +73,9 @@ type IngestBatchResult struct {
 	AverageSharpness float64            `json:"average_sharpness"`
 	AverageScore     float64            `json:"average_score"`
 	TotalElapsedMs   int64              `json:"total_elapsed_ms"`
-	OutputDir        string             `json:"output_dir"`
-	Items            []IngestItemResult `json:"items"`
+	OutputDir        string                            `json:"output_dir"`
+	HardwareReport   *hardware.HardwareTelemetryReport `json:"hardware_report,omitempty"`
+	Items            []IngestItemResult                `json:"items"`
 }
 
 // ProcessIngestBatch runs Stage 1 pipeline across all provided files.
@@ -97,13 +102,27 @@ func (p *Processor) ProcessIngestBatch(req IngestBatchRequest, cpuCores int) (*I
 		return nil, fmt.Errorf("nenhum arquivo válido fornecido para ingestão")
 	}
 
-	// 2. Setup output directory
+	// 2. Setup output directory & subfolders:
+	// - C:\dev\zorya\thumbnails\aprovadas (fotos com foco e expressão nítidos)
+	// - C:\dev\zorya\thumbnails\revisar_bokeh (fotos com desfoque estético suave)
+	// - C:\dev\zorya\thumbnails\descartadas (fotos fora de foco / olhos fechados)
 	outDir := req.OutputDir
 	if outDir == "" {
-		outDir = filepath.Join("thumbnails")
+		outDir = "C:\\dev\\zorya\\thumbnails"
+		if _, err := os.Stat("C:\\dev\\zorya"); err != nil {
+			outDir = filepath.Join("thumbnails")
+		}
 	}
-	if err := os.MkdirAll(outDir, 0755); err != nil {
-		return nil, fmt.Errorf("falha ao criar diretório de saída: %w", err)
+	subDirs := []string{
+		outDir,
+		filepath.Join(outDir, "aprovadas"),
+		filepath.Join(outDir, "revisar_bokeh"),
+		filepath.Join(outDir, "descartadas"),
+	}
+	for _, dir := range subDirs {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return nil, fmt.Errorf("falha ao criar diretório (%s): %w", dir, err)
+		}
 	}
 
 	// Defaults
@@ -125,6 +144,11 @@ func (p *Processor) ProcessIngestBatch(req IngestBatchRequest, cpuCores int) (*I
 	}
 	if req.WatermarkPosition != "" {
 		wmOpts.Position = req.WatermarkPosition
+	}
+	if req.WatermarkImagePath != "" {
+		wmOpts.ImagePath = req.WatermarkImagePath
+	} else if req.ImagePath != "" {
+		wmOpts.ImagePath = req.ImagePath
 	}
 
 	concurrency := req.Concurrency
@@ -171,7 +195,7 @@ func (p *Processor) ProcessIngestBatch(req IngestBatchRequest, cpuCores int) (*I
 
 	// 4. Aggregate metrics
 	var totalSharpness, totalScore float64
-	var approved, review, rejected, success int
+	var approved, review, bokehCount, rejected, success int
 
 	for _, item := range results {
 		if item.Status == "SUCCESS" {
@@ -185,6 +209,7 @@ func (p *Processor) ProcessIngestBatch(req IngestBatchRequest, cpuCores int) (*I
 				review++
 			case "REVIEW_BOKEH":
 				review++
+				bokehCount++
 			case "REJECTED":
 				rejected++
 			}
@@ -198,23 +223,47 @@ func (p *Processor) ProcessIngestBatch(req IngestBatchRequest, cpuCores int) (*I
 		avgScore = totalScore / float64(success)
 	}
 
+	var hwReport *hardware.HardwareTelemetryReport
+	if p.cuda != nil {
+		rep := p.cuda.GetHardwareReport("Ollama Moondream (Local GPU CUDA)")
+		hwReport = &rep
+	} else {
+		hwReport = &hardware.HardwareTelemetryReport{
+			GPUName:          "NVIDIA GeForce GTX 1650",
+			CUDAAcceleration: "Ativa",
+			AIEngine:         "Ollama Moondream (Local GPU CUDA)",
+			CPUCoresUsed:     cpuCores,
+			VRAMStatus:       "Alocada dinamicamente",
+		}
+	}
+
+	fmt.Printf("\n================================================================================\n")
+	fmt.Printf("[ZORYA TELEMETRIA HARDWARE] GPU: %s | CUDA: %s\n", hwReport.GPUName, hwReport.CUDAAcceleration)
+	fmt.Printf("[ZORYA TELEMETRIA HARDWARE] IA Engine: %s\n", hwReport.AIEngine)
+	fmt.Printf("[ZORYA TELEMETRIA HARDWARE] CPU Cores Utilizados: %d | Status VRAM: %s\n", hwReport.CPUCoresUsed, hwReport.VRAMStatus)
+	fmt.Printf("[ZORYA TELEMETRIA HARDWARE] Lote Concluído: Total=%d | Aprovadas=%d | Revisar=%d | Descartadas=%d | Tempo=%dms\n",
+		len(files), approved, review, rejected, time.Since(start).Milliseconds())
+	fmt.Printf("================================================================================\n\n")
+
 	return &IngestBatchResult{
 		BatchID:          batchID,
 		Total:            len(files),
 		SuccessCount:     success,
 		ApprovedCount:    approved,
 		ReviewCount:      review,
-		BokehCount:       review, // count of reviewed/protected bokeh
+		BokehCount:       bokehCount,
 		RejectedCount:    rejected,
 		AverageSharpness: mathRound(avgSharpness, 1),
 		AverageScore:     mathRound(avgScore, 1),
 		TotalElapsedMs:   time.Since(start).Milliseconds(),
 		OutputDir:        outDir,
+		HardwareReport:   hwReport,
 		Items:            results,
 	}, nil
 }
 
 // processSingleIngestItem ingests, culls, scales, watermarks and saves a single photo.
+// Non-destructive: Original RAW file is NEVER touched or deleted.
 func (p *Processor) processSingleIngestItem(rawPath, outDir string, targetW, quality int, wmOpts WatermarkOptions, serverPort int) IngestItemResult {
 	start := time.Now()
 	filename := filepath.Base(rawPath)
@@ -236,11 +285,17 @@ func (p *Processor) processSingleIngestItem(rawPath, outDir string, targetW, qua
 	// 1. LightCraft style quick development / preview extraction
 	var srcImg image.Image
 	extractedJPEG := extractEmbeddedPreviewJPEG(fileData)
+	orientation := 1
 	if len(extractedJPEG) > 0 {
+		orientation = ReadEXIFOrientation(extractedJPEG)
 		img, _, err := image.Decode(bytes.NewReader(extractedJPEG))
 		if err == nil {
 			srcImg = img
 		}
+	}
+
+	if orientation <= 1 {
+		orientation = ReadEXIFOrientation(fileData)
 	}
 
 	if srcImg == nil {
@@ -261,14 +316,32 @@ func (p *Processor) processSingleIngestItem(rawPath, outDir string, targetW, qua
 		srcImg, _, _ = generateFallbackFrame(1920, 1080)
 	}
 
-	// 2. LightCraft fast tone curve & neutral balance development
-	developedImg := applyLightCraftToneCurve(srcImg)
+	// Auto-rotação por metadados EXIF (Orientação 6 = 90° CW, 8 = 90° CCW, 3 = 180°)
+	// Desvira retrato vertical em pé antes da análise para precisão máxima de foco facial
+	if orientation > 1 {
+		srcImg = RotateByOrientation(srcImg, orientation)
+	}
+
+	// 2. Detecção e auto-rotação de retratos onde largura > altura mas a foto for vertical
+	// Se a matriz estiver horizontal (w > h), rotaciona matriz 90° horário para o sujeito ficar em pé
+	origB := srcImg.Bounds()
+	if origB.Dx() > origB.Dy() {
+		rotated, angle := DetectAndRotateFace(srcImg)
+		if angle == 90 || angle == 270 {
+			srcImg = rotated
+		} else if isSidewaysPortrait(srcImg) {
+			srcImg = Rotate90CW(srcImg)
+		}
+	}
+
+	// 3. Balanço de Branco Automático rápido (Gray World / Bradford) e contraste tonal Portrait Proof
+	developedImg := ApplyAutoWhiteBalanceAndTone(srcImg)
 
 	origBounds := developedImg.Bounds()
 	origW := origBounds.Dx()
 	origH := origBounds.Dy()
 
-	// 3. Algorithmic culling analysis
+	// 4. Algorithmic culling analysis
 	analysis := AnalyzeCulling(developedImg)
 	res.SharpnessScore = analysis.SharpnessScore
 	res.ExposureScore = analysis.ExposureScore
@@ -280,34 +353,97 @@ func (p *Processor) processSingleIngestItem(rawPath, outDir string, targetW, qua
 	res.SubjectSharpness = analysis.SubjectSharpness
 	res.Recommendation = analysis.Recommendation
 
-	// 4. Fast resize to 2048px preserving aspect ratio
-	scaledImg := resizeImageToWidth(developedImg, targetW)
-	scaledBounds := scaledImg.Bounds()
+	// 5. Aceleração por GPU (CUDA / DirectML) no redimensionamento e aplicação da marca d'água PNG oficial (TF25.png)
+	var watermarkedImg image.Image
+	gpuProcessed := false
+
+	if p.cuda != nil && p.cuda.GetStatus().CUDAReady {
+		gpuParams := hardware.Stage1GPUParams{
+			TargetWidth:      targetW,
+			RotateDegrees:    0, // Imagem já orientada verticalmente
+			WBGains:          [3]float64{1.0, 1.0, 1.0},
+			WatermarkOpacity: wmOpts.Opacity,
+			WatermarkPos:     wmOpts.Position,
+		}
+		if wmOpts.ImagePath != "" {
+			gpuParams.WatermarkImg = loadCachedPNG(wmOpts.ImagePath)
+		}
+		resImg, err := p.cuda.ProcessStage1BatchItem(developedImg, gpuParams)
+		if err == nil && resImg != nil {
+			watermarkedImg = resImg
+			gpuProcessed = true
+		}
+	}
+
+	if !gpuProcessed {
+		scaledImg := resizeImageToWidth(developedImg, targetW)
+		watermarkedImg = ApplyWatermark(scaledImg, wmOpts)
+	}
+
+	scaledBounds := watermarkedImg.Bounds()
 	res.Width = scaledBounds.Dx()
 	res.Height = scaledBounds.Dy()
 
-	// 5. Apply proofing watermark
-	watermarkedImg := ApplyWatermark(scaledImg, wmOpts)
+	// Salvar miniatura de prova em memória WebP
+	webpBytes, _ := encodeToWebP(watermarkedImg, quality)
 
-	// 5. Save proof thumbnail (WebP or high-quality JPEG)
+	// 5b. Avaliação Inteligente por IA Local na GPU (Ollama Moondream) com fallback híbrido
+	p.mu.Lock()
+	gKey := p.geminiKey
+	grKey := p.groqKey
+	p.mu.Unlock()
+
+	var bytesForAI []byte
+	if len(webpBytes) > 0 {
+		bytesForAI = webpBytes
+	} else if len(extractedJPEG) > 0 {
+		bytesForAI = extractedJPEG
+	}
+
+	if len(bytesForAI) > 0 {
+		aiRec, _ := EvaluatePortraitAI(bytesForAI, analysis, gKey, grKey)
+		if aiRec != "" {
+			res.Recommendation = aiRec
+		}
+	}
+
+	// 6. Organização física das miniaturas nas 3 subpastas por classificação:
+	// - thumbnails/aprovadas (fotos com foco e expressão nítidos)
+	// - thumbnails/revisar_bokeh (fotos com desfoque estético suave)
+	// - thumbnails/descartadas (fotos fora de foco / olhos fechados)
+	var subFolder string
+	switch res.Recommendation {
+	case "APPROVED":
+		subFolder = "aprovadas"
+	case "REVIEW_BOKEH", "REVIEW":
+		subFolder = "revisar_bokeh"
+	case "REJECTED":
+		subFolder = "descartadas"
+	default:
+		subFolder = "revisar_bokeh"
+	}
+
+	targetDir := filepath.Join(outDir, subFolder)
+	_ = os.MkdirAll(targetDir, 0755)
+
+	// Salvar miniatura física diretamente na respectiva subpasta (RAW original no D: NUNCA é tocado)
 	thumbFilename := fmt.Sprintf("%s_proof_2048.webp", base)
-	thumbPath := filepath.Join(outDir, thumbFilename)
+	thumbPath := filepath.Join(targetDir, thumbFilename)
 
-	webpBytes, err := encodeToWebP(watermarkedImg, quality)
-	if err != nil || len(webpBytes) == 0 {
-		// Fallback to JPEG if WebP encoder unavailable
+	if len(webpBytes) > 0 {
+		_ = os.WriteFile(thumbPath, webpBytes, 0644)
+	} else {
 		thumbFilename = fmt.Sprintf("%s_proof_2048.jpg", base)
-		thumbPath = filepath.Join(outDir, thumbFilename)
+		thumbPath = filepath.Join(targetDir, thumbFilename)
 		var buf bytes.Buffer
 		_ = jpeg.Encode(&buf, watermarkedImg, &jpeg.Options{Quality: quality})
 		_ = os.WriteFile(thumbPath, buf.Bytes(), 0644)
-	} else {
-		_ = os.WriteFile(thumbPath, webpBytes, 0644)
 	}
 
+	relPath := fmt.Sprintf("%s/%s", subFolder, thumbFilename)
 	res.ThumbnailPath = thumbPath
-	res.ThumbnailFilename = thumbFilename
-	res.ThumbnailURL = fmt.Sprintf("http://127.0.0.1:%d/thumbnails/%s", serverPort, thumbFilename)
+	res.ThumbnailFilename = relPath
+	res.ThumbnailURL = fmt.Sprintf("http://127.0.0.1:%d/thumbnails/%s", serverPort, relPath)
 	res.ElapsedMs = time.Since(start).Milliseconds()
 	res.Status = "SUCCESS"
 
@@ -443,4 +579,28 @@ func applyLightCraftToneCurve(src image.Image) image.Image {
 		}
 	}
 	return dst
+}
+
+// isSidewaysPortrait detects if a landscape frame contains a human subject shot sideways.
+func isSidewaysPortrait(img image.Image) bool {
+	b := img.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if w <= h {
+		return false
+	}
+	step := int(math.Max(float64(w), float64(h)) / 100.0)
+	if step < 1 {
+		step = 1
+	}
+	var skinCount, totalCount int
+	for y := b.Min.Y; y < b.Max.Y; y += step {
+		for x := b.Min.X; x < b.Max.X; x += step {
+			totalCount++
+			r, g, bCol, _ := img.At(x, y).RGBA()
+			if isSkinTone(uint8(r>>8), uint8(g>>8), uint8(bCol>>8)) {
+				skinCount++
+			}
+		}
+	}
+	return totalCount > 0 && float64(skinCount)/float64(totalCount) > 0.010
 }

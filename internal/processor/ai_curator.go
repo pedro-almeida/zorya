@@ -1,4 +1,4 @@
-// PT: Curadoria Fotográfica com IA, Análise Estética e Sliders LightCraft
+﻿// PT: Curadoria Fotográfica com IA, Análise Estética e Sliders LightCraft
 // EN: AI Photographic Curation, Aesthetic Scoring and LightCraft Sliders
 // AI: @llm-context Módulo Zorya v1.0.0 / Curadoria Inteligente e Integração Multimodal
 
@@ -87,7 +87,19 @@ func CurateImage(imgData []byte, filename string, culling CullingAnalysis, gemin
 		result.CompositionRating = "EXCELLENT_BOKEH"
 	}
 
-	// 2. Query Gemini API if configured
+	// 1. Canal Local Prioritário: Inferência de Visão Multimodal com Moondream no Ollama (Acelerado por GPU CUDA GTX 1650)
+	if len(imgData) > 0 {
+		aiRes, err := queryOllamaMoondream(imgData, culling)
+		if err == nil && aiRes != nil {
+			aiRes.ImagePath = filename
+			aiRes.ThumbnailFilename = thumbName
+			aiRes.ThumbnailURL = thumbURL
+			aiRes.BokehProtected = culling.BokehDetected
+			return aiRes, nil
+		}
+	}
+
+	// 2. Canal Nuvem Híbrido: Gemini API se configurada
 	if geminiKey != "" && len(imgData) > 0 {
 		aiRes, err := queryGeminiVision(imgData, geminiKey, culling)
 		if err == nil && aiRes != nil {
@@ -358,4 +370,146 @@ Responda APENAS em JSON:
 
 	aiRes.ProviderUsed = "GROQ_LLAMA_VISION"
 	return &aiRes, nil
+}
+
+// PT: Consulta o modelo Moondream no Ollama local via GPU NVIDIA CUDA
+// EN: Queries local Moondream model in Ollama accelerated by NVIDIA CUDA GPU
+// AI: @llm-context Módulo Zorya v1.0.0 / Visão Local na GPU Ollama Moondream
+//     @llm-invariant Conexão local em http://localhost:11434/api/generate com stream: false
+//     @llm-rule Retorna AICurationResult com ProviderUsed="Ollama Moondream (Local GPU CUDA)"
+func queryOllamaMoondream(imgBytes []byte, culling CullingAnalysis) (*AICurationResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+
+	previewBytes := imgBytes
+	if len(previewBytes) > 1024*1024 {
+		previewBytes = previewBytes[:1024*1024]
+	}
+
+	b64Image := base64.StdEncoding.EncodeToString(previewBytes)
+	url := "http://localhost:11434/api/generate"
+
+	payload := map[string]interface{}{
+		"model":  "moondream",
+		"prompt": "Evaluate this portrait: is the face sharp and eyes open? Answer in one word: APPROVED, REVIEW or REJECTED.",
+		"images": []string{b64Image},
+		"stream": false,
+	}
+
+	bodyJSON, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyJSON))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 14 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ollama api returned status %d", resp.StatusCode)
+	}
+
+	var ollamaResp struct {
+		Model    string `json:"model"`
+		Response string `json:"response"`
+		Done     bool   `json:"done"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&ollamaResp); err != nil {
+		return nil, err
+	}
+
+	raw := strings.ToUpper(strings.TrimSpace(ollamaResp.Response))
+	decision := "REVIEW"
+	score := math.Round(culling.OverallScore*10) / 10
+	feedback := "Moondream GPU: Retrato sob análise técnica."
+
+	if strings.Contains(raw, "APPROVED") {
+		decision = "APPROVED"
+		score = math.Max(85.0, score)
+		feedback = "Moondream GPU: Rosto nítido e olhos abertos. Foto aprovada com sucesso."
+	} else if strings.Contains(raw, "REJECT") {
+		decision = "REJECTED"
+		score = math.Min(45.0, score)
+		feedback = "Moondream GPU: Foco facial insuficiente ou olhos fechados detectados."
+	} else if strings.Contains(raw, "REVIEW") {
+		decision = "REVIEW"
+		feedback = "Moondream GPU: Recomendada revisão estética manual do enquadramento."
+	}
+
+	if culling.BokehDetected {
+		feedback += " Bokeh artístico suave identificado e protegido."
+		if decision == "REVIEW" {
+			decision = "REVIEW_BOKEH"
+		}
+	}
+
+	sliders := computeBaselineSliders(culling)
+	result := &AICurationResult{
+		AestheticScore:    score,
+		CompositionRating: decision,
+		ColorPalette:      []string{"#1A1A1A", "#E0A96D", "#778899", "#F5F5F5"},
+		AestheticFeedback: feedback,
+		RecommendedCrop:   "ORIGINAL",
+		Sliders:           sliders,
+		ProviderUsed:      "Ollama Moondream (Local GPU CUDA)",
+		BokehProtected:    culling.BokehDetected,
+	}
+
+	return result, nil
+}
+
+// PT: Avalia o retrato com IA em cascata: Ollama Moondream GPU -> Nuvem Gemini/Groq -> Fallback Laplaciano
+// EN: Evaluates portrait via tiered AI pipeline: Ollama Moondream GPU -> Gemini/Groq Cloud -> Laplacian Math Fallback
+// AI: @llm-context Módulo Zorya v1.0.0 / Classificação Inteligente de Retratos
+//     @llm-invariant Tenta Moondream local na GPU primeiro; se indisponível, recorre à nuvem ou cálculo Laplaciano
+//     @llm-rule Retorna (recomendação, provedor_utilizado)
+func EvaluatePortraitAI(imgBytes []byte, culling CullingAnalysis, geminiKey, groqKey string) (string, string) {
+	// 1. Canal Local Prioritário (Ollama na GPU NVIDIA CUDA)
+	if len(imgBytes) > 0 {
+		aiRes, err := queryOllamaMoondream(imgBytes, culling)
+		if err == nil && aiRes != nil && aiRes.CompositionRating != "" {
+			return aiRes.CompositionRating, "Ollama Moondream (Local GPU CUDA)"
+		}
+	}
+
+	// 2. Canal Nuvem Híbrido: Gemini API
+	if geminiKey != "" && len(imgBytes) > 0 {
+		aiRes, err := queryGeminiVision(imgBytes, geminiKey, culling)
+		if err == nil && aiRes != nil {
+			rec := "APPROVED"
+			if aiRes.AestheticScore < 50.0 {
+				rec = "REJECTED"
+			} else if aiRes.AestheticScore < 75.0 {
+				rec = "REVIEW"
+			}
+			return rec, "Gemini Cloud"
+		}
+	}
+
+	// 2b. Canal Nuvem Híbrido: Groq API
+	if groqKey != "" && len(imgBytes) > 0 {
+		aiRes, err := queryGroqVision(imgBytes, groqKey, culling)
+		if err == nil && aiRes != nil {
+			rec := "APPROVED"
+			if aiRes.AestheticScore < 50.0 {
+				rec = "REJECTED"
+			} else if aiRes.AestheticScore < 75.0 {
+				rec = "REVIEW"
+			}
+			return rec, "Groq Cloud"
+		}
+	}
+
+	// 3. Fallback Matemático: Variância Laplaciana do culling.go
+	return culling.Recommendation, "LOCAL_LAPLACIAN_ENGINE"
 }

@@ -1,4 +1,4 @@
-// PT: Módulo de Configuração Persistente do Zorya (YAML / Runtime)
+﻿// PT: Módulo de Configuração Persistente do Zorya (YAML / Runtime)
 // EN: Zorya Persistent Configuration Module (YAML / Runtime)
 // AI: @llm-context Módulo Zorya v1.0.0 / Configuração e Registro do Windows
 
@@ -149,7 +149,16 @@ func Load(path string) (*Config, error) {
 
 	file, err := os.Open(path)
 	if err != nil {
-		return cfg, err
+		if exePath, errExe := os.Executable(); errExe == nil {
+			candidate := filepath.Join(filepath.Dir(exePath), path)
+			if f2, err2 := os.Open(candidate); err2 == nil {
+				file = f2
+				err = nil
+			}
+		}
+		if err != nil {
+			return cfg, err
+		}
 	}
 	defer file.Close()
 

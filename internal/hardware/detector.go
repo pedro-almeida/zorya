@@ -1,4 +1,4 @@
-// PT: Detector de Hardware, Memória e Malha Tailscale (Zorya Engine)
+﻿// PT: Detector de Hardware, Memória e Malha Tailscale (Zorya Engine)
 // EN: Hardware, Memory and Tailscale Mesh Detector (Zorya Engine)
 // AI: @llm-context Módulo Zorya v1.0.0 / Diagnóstico de Hardware e Rede
 
@@ -166,6 +166,9 @@ func DetectTailscaleIP() (string, bool) {
 // detectCPUModel retrieves processor brand string.
 func detectCPUModel() string {
 	if runtime.GOOS == "windows" {
+		if proc := os.Getenv("PROCESSOR_IDENTIFIER"); proc != "" {
+			return proc
+		}
 		cmd := exec.Command("powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_Processor | Select-Object -First 1).Name")
 		sysproc.PrepareCmd(cmd)
 		var out bytes.Buffer

@@ -1,4 +1,4 @@
-//go:build windows
+﻿//go:build windows
 
 // PT: Gerenciador do Ícone de Bandeja do Windows (System Tray Nativo Win32)
 // EN: Windows System Tray Manager (Native Win32, Zero-CGO)

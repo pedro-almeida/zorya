@@ -1,4 +1,4 @@
-// PT: Servidor HTTP REST e Painel Web Embarcado do Zorya v1.0.0
+﻿// PT: Servidor HTTP REST e Painel Web Embarcado do Zorya v1.0.0
 // EN: Zorya v1.0.0 HTTP REST Server and Embedded Web UI
 // AI: @llm-context Módulo Zorya v1.0.0 / Servidor de Rede, API e UI Embarcada
 
@@ -164,6 +164,9 @@ func New(cfg *config.Config, configPath string) *Daemon {
 	if configPath == "" {
 		configPath = "config.yaml"
 	}
+	if loaded, err := config.Load(configPath); err == nil && loaded != nil {
+		cfg = loaded
+	}
 
 	if cfg.Node.ID == "" {
 		cfg.Node.ID = "zorya-" + network.RandomHex(4)
@@ -191,6 +194,9 @@ func New(cfg *config.Config, configPath string) *Daemon {
 		ctx:              ctx,
 		cancel:           cancel,
 	}
+
+	d.proc.SetOrchestrator(d.cuda)
+	d.proc.SetAIKeys(cfg.AI.GeminiAPIKey, cfg.AI.GroqAPIKey)
 
 	return d
 }
@@ -288,6 +294,7 @@ func (d *Daemon) mountRoutes(mux *http.ServeMux) {
 
 	// Registrar a pasta local 'thumbnails' para servir os WebPs:
 	_ = os.MkdirAll("thumbnails", 0755)
+	_ = os.MkdirAll("C:\\dev\\zorya\\thumbnails", 0755)
 	mux.HandleFunc("/thumbnails/", func(w http.ResponseWriter, r *http.Request) {
 		applyPNAHeaders(w)
 		if r.Method == http.MethodOptions {
@@ -297,8 +304,11 @@ func (d *Daemon) mountRoutes(mux *http.ServeMux) {
 		filePath := strings.TrimPrefix(r.URL.Path, "/thumbnails/")
 		fullPath := filepath.Join("thumbnails", filepath.Clean(filePath))
 		if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-			http.NotFound(w, r)
-			return
+			fullPath = filepath.Join("C:\\dev\\zorya\\thumbnails", filepath.Clean(filePath))
+			if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+				http.NotFound(w, r)
+				return
+			}
 		}
 		w.Header().Set("Cache-Control", "public, max-age=86400")
 		http.ServeFile(w, r, fullPath)
@@ -724,6 +734,9 @@ func (d *Daemon) handleRawIngestBatch(w http.ResponseWriter, r *http.Request) {
 
 	if req.ServerPort <= 0 {
 		req.ServerPort = d.cfg.Server.Port
+	}
+	if !req.GPUEnabled {
+		req.GPUEnabled = d.cfg.Hardware.GPUEnabled
 	}
 
 	d.mu.RLock()
