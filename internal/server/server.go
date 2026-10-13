@@ -395,6 +395,23 @@ func (d *Daemon) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 	copy(recentMasterJobsCopy, d.recentMasterJobs)
 	d.pipelineMu.RUnlock()
 
+	d.mu.RLock()
+	geminiConfigured := d.cfg.AI.GeminiAPIKey != ""
+	geminiMasked := maskAPIKey(d.cfg.AI.GeminiAPIKey, "AIzaSy...")
+	groqConfigured := d.cfg.AI.GroqAPIKey != ""
+	groqMasked := maskAPIKey(d.cfg.AI.GroqAPIKey, "gsk_...")
+	activeProvider := d.cfg.AI.ActiveProvider
+	if activeProvider == "" {
+		activeProvider = "gemini"
+	}
+	customProvs := make([]config.AIProvider, len(d.cfg.AI.CustomProviders))
+	for i, cp := range d.cfg.AI.CustomProviders {
+		cpCopy := cp
+		cpCopy.APIKey = maskAPIKey(cp.APIKey, "sk-...")
+		customProvs[i] = cpCopy
+	}
+	d.mu.RUnlock()
+
 	response := map[string]interface{}{
 		"version":   info.Version,
 		"os":        info.OS,
@@ -404,6 +421,14 @@ func (d *Daemon) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 		"gpu":       info.GPU,
 		"tailscale": info.Tailscale,
 		"node_url":  info.NodeURL,
+		"ai": map[string]interface{}{
+			"gemini_configured": geminiConfigured,
+			"gemini_masked_key": geminiMasked,
+			"groq_configured":   groqConfigured,
+			"groq_masked_key":   groqMasked,
+			"active_provider":   activeProvider,
+			"custom_providers":  customProvs,
+		},
 		"pipeline": map[string]interface{}{
 			"stats":              statsCopy,
 			"recent_ingests":     recentIngestsCopy,
@@ -412,6 +437,25 @@ func (d *Daemon) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, response)
+}
+
+func maskAPIKey(key, prefix string) string {
+	if key == "" {
+		return ""
+	}
+	if len(key) <= 8 {
+		return "********"
+	}
+	prefixLen := 6
+	if len(prefix) > 0 && len(prefix) < len(key)/2 {
+		prefixLen = len(prefix)
+	}
+	if prefixLen > len(key)-4 {
+		prefixLen = len(key) - 4
+	}
+	last4 := key[len(key)-4:]
+	firstPart := key[:prefixLen]
+	return fmt.Sprintf("%s...%s", firstPart, last4)
 }
 
 // POST /api/v1/raw/decode
@@ -750,15 +794,17 @@ func (d *Daemon) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		CPUCores         int     `json:"cpu_cores"`
-		GPUEnabled       bool    `json:"gpu_enabled"`
-		VRAMLimitGB      float64 `json:"vram_limit_gb"`
-		RAMLimitGB       float64 `json:"ram_limit_gb"`
-		GeminiAPIKey     string  `json:"gemini_api_key"`
-		GroqAPIKey       string  `json:"groq_api_key"`
-		ListenMode       string  `json:"listen_mode"`
-		AuthToken        string  `json:"auth_token"`
-		AutostartWindows bool    `json:"autostart_windows"`
+		CPUCores         int                 `json:"cpu_cores"`
+		GPUEnabled       bool                `json:"gpu_enabled"`
+		VRAMLimitGB      float64             `json:"vram_limit_gb"`
+		RAMLimitGB       float64             `json:"ram_limit_gb"`
+		GeminiAPIKey     string              `json:"gemini_api_key"`
+		GroqAPIKey       string              `json:"groq_api_key"`
+		ActiveProvider   string              `json:"active_provider"`
+		CustomProviders  *[]config.AIProvider `json:"custom_providers"`
+		ListenMode       string              `json:"listen_mode"`
+		AuthToken        string              `json:"auth_token"`
+		AutostartWindows bool                `json:"autostart_windows"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -778,8 +824,42 @@ func (d *Daemon) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 	if req.RAMLimitGB > 0 {
 		d.cfg.Hardware.RAMLimitGB = req.RAMLimitGB
 	}
-	d.cfg.AI.GeminiAPIKey = req.GeminiAPIKey
-	d.cfg.AI.GroqAPIKey = req.GroqAPIKey
+
+	// Preservação de chaves existentes de IA (não sobrescrever se vazia ou se vier máscara com "...")
+	trimmedGemini := strings.TrimSpace(req.GeminiAPIKey)
+	if trimmedGemini != "" && !strings.Contains(trimmedGemini, "...") && !strings.Contains(trimmedGemini, "***") {
+		d.cfg.AI.GeminiAPIKey = trimmedGemini
+	}
+
+	trimmedGroq := strings.TrimSpace(req.GroqAPIKey)
+	if trimmedGroq != "" && !strings.Contains(trimmedGroq, "...") && !strings.Contains(trimmedGroq, "***") {
+		d.cfg.AI.GroqAPIKey = trimmedGroq
+	}
+
+	if req.ActiveProvider != "" {
+		d.cfg.AI.ActiveProvider = req.ActiveProvider
+	}
+
+	if req.CustomProviders != nil {
+		// Map existing custom providers by ID to preserve unmasked keys if incoming key is masked
+		existingMap := make(map[string]string)
+		for _, cp := range d.cfg.AI.CustomProviders {
+			existingMap[cp.ID] = cp.APIKey
+		}
+
+		updatedProvs := make([]config.AIProvider, 0, len(*req.CustomProviders))
+		for _, cp := range *req.CustomProviders {
+			prov := cp
+			provKey := strings.TrimSpace(prov.APIKey)
+			if strings.Contains(provKey, "...") || strings.Contains(provKey, "***") || provKey == "" {
+				if oldKey, ok := existingMap[prov.ID]; ok && oldKey != "" {
+					prov.APIKey = oldKey
+				}
+			}
+			updatedProvs = append(updatedProvs, prov)
+		}
+		d.cfg.AI.CustomProviders = updatedProvs
+	}
 
 	if req.ListenMode != "" {
 		d.cfg.Server.ListenMode = config.ListenMode(req.ListenMode)

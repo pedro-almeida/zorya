@@ -6,6 +6,7 @@ package config
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -34,6 +35,24 @@ const (
 	ListenLocalhost    ListenMode = "localhost"     // 127.0.0.1
 	ListenTailscaleAll ListenMode = "tailscale_all" // 0.0.0.0 / Tailscale Mesh
 )
+
+// AIProvider represents an OpenAI-compatible provider (DeepSeek, OpenRouter, OpenAI, Groq, etc.).
+type AIProvider struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`     // ex: "DeepSeek V3", "OpenAI GPT-4o", "OpenRouter"
+	BaseURL  string `json:"base_url"` // ex: "https://api.deepseek.com/v1"
+	APIKey   string `json:"api_key"`
+	Model    string `json:"model"` // ex: "deepseek-chat", "gpt-4o-mini"
+	IsActive bool   `json:"is_active"`
+}
+
+// AIConfig holds API keys, provider configurations and routing choices.
+type AIConfig struct {
+	GeminiAPIKey    string       `json:"gemini_api_key"`
+	GroqAPIKey      string       `json:"groq_api_key"`
+	ActiveProvider  string       `json:"active_provider"` // "gemini", "groq" or custom provider ID
+	CustomProviders []AIProvider `json:"custom_providers"`
+}
 
 // Config holds runtime and persistent settings for the Zorya daemon.
 type Config struct {
@@ -64,10 +83,7 @@ type Config struct {
 		CooldownTemperature float64 `json:"cooldown_temperature_c"`
 	} `json:"hardware"`
 
-	AI struct {
-		GeminiAPIKey string `json:"gemini_api_key"`
-		GroqAPIKey   string `json:"groq_api_key"`
-	} `json:"ai"`
+	AI AIConfig `json:"ai"`
 
 	OS struct {
 		AutostartWindows bool `json:"autostart_windows"`
@@ -108,6 +124,8 @@ func NewDefault() *Config {
 
 	cfg.AI.GeminiAPIKey = ""
 	cfg.AI.GroqAPIKey = ""
+	cfg.AI.ActiveProvider = "gemini"
+	cfg.AI.CustomProviders = make([]AIProvider, 0)
 
 	cfg.OS.AutostartWindows = true
 	cfg.OS.BackgroundMode = true
@@ -215,6 +233,13 @@ func Load(path string) (*Config, error) {
 				cfg.AI.GeminiAPIKey = val
 			case "groq_api_key":
 				cfg.AI.GroqAPIKey = val
+			case "active_provider":
+				cfg.AI.ActiveProvider = val
+			case "custom_providers_json":
+				var provs []AIProvider
+				if err := json.Unmarshal([]byte(val), &provs); err == nil {
+					cfg.AI.CustomProviders = provs
+				}
 			}
 		case "os":
 			switch key {
@@ -248,6 +273,13 @@ func Save(path string, cfg *Config) error {
 		path = "config.yaml"
 	}
 
+	customProvsJSON := "[]"
+	if len(cfg.AI.CustomProviders) > 0 {
+		if b, err := json.Marshal(cfg.AI.CustomProviders); err == nil {
+			customProvsJSON = string(b)
+		}
+	}
+
 	content := fmt.Sprintf(`# =============================================================================
 # ZORYA RAW COMPUTE ENGINE - Configuration File v1.0.0
 # Autonomous RAW Coprocessor & Distributed Tailscale Mesh Node
@@ -277,6 +309,8 @@ hardware:
 ai:
   gemini_api_key: "%s"
   groq_api_key: "%s"
+  active_provider: "%s"
+  custom_providers_json: '%s'
 
 os:
   autostart_windows: %t
@@ -304,6 +338,8 @@ processing:
 		cfg.Hardware.CooldownTemperature,
 		cfg.AI.GeminiAPIKey,
 		cfg.AI.GroqAPIKey,
+		cfg.AI.ActiveProvider,
+		customProvsJSON,
 		cfg.OS.AutostartWindows,
 		cfg.OS.BackgroundMode,
 		cfg.Processing.DefaultFormat,

@@ -171,6 +171,175 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  // State for Custom OpenAI-compatible providers
+  let customProviders = [];
+  let currentActiveProvider = 'gemini';
+
+  function renderCustomProviders() {
+    const listEl = document.getElementById('custom-providers-list');
+    const activeSelect = document.getElementById('active_ai_provider');
+    if (!listEl) return;
+
+    listEl.innerHTML = '';
+
+    // Rebuild active provider select options
+    if (activeSelect) {
+      activeSelect.innerHTML = `
+        <option value="gemini" ${currentActiveProvider === 'gemini' ? 'selected' : ''}>Google Gemini (Visão Multimodal Nativa)</option>
+        <option value="groq" ${currentActiveProvider === 'groq' ? 'selected' : ''}>Groq (LLaMA / Mixtral)</option>
+      `;
+      customProviders.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = `${p.name || 'Provedor OpenAI'} (${p.model || 'OpenAI Compat'})`;
+        if (currentActiveProvider === p.id) {
+          opt.selected = true;
+        }
+        activeSelect.appendChild(opt);
+      });
+    }
+
+    if (customProviders.length === 0) {
+      listEl.innerHTML = `
+        <div style="font-size: 12px; color: var(--text-muted); font-style: italic; padding: 10px; background: var(--bg-card-subtle); border-radius: var(--radius-sm); border: 1px dashed var(--border-light); text-align: center;">
+          Nenhum provedor customizado configurado. Clique acima para adicionar DeepSeek, OpenRouter ou outros compatíveis.
+        </div>
+      `;
+      return;
+    }
+
+    customProviders.forEach((prov, idx) => {
+      const isSelected = (currentActiveProvider === prov.id);
+      const card = document.createElement('div');
+      card.className = `provider-card ${isSelected ? 'is-active-provider' : ''}`;
+      card.dataset.id = prov.id;
+
+      card.innerHTML = `
+        <div class="provider-card-header">
+          <label class="provider-radio-label">
+            <input type="radio" name="active_custom_radio" value="${prov.id}" ${isSelected ? 'checked' : ''}>
+            <span>${prov.name || 'Provedor ' + (idx + 1)}</span>
+            ${isSelected ? '<span class="ai-key-badge badge-active" style="font-size: 10px;">Ativo na Triagem</span>' : ''}
+          </label>
+          <button type="button" class="btn-danger-sm btn-remove-provider" data-id="${prov.id}" title="Excluir este provedor">Excluir</button>
+        </div>
+        <div class="provider-fields-grid">
+          <div class="form-group" style="margin: 0;">
+            <label style="font-size: 11px; margin-bottom: 2px;">Nome Amigável</label>
+            <input type="text" class="prov-field-name" value="${escapeHtml(prov.name || '')}" placeholder="ex: DeepSeek V3">
+          </div>
+          <div class="form-group" style="margin: 0;">
+            <label style="font-size: 11px; margin-bottom: 2px;">Base URL</label>
+            <input type="text" class="prov-field-baseurl" value="${escapeHtml(prov.base_url || '')}" placeholder="https://api.deepseek.com/v1">
+          </div>
+          <div class="form-group" style="margin: 0;">
+            <label style="font-size: 11px; margin-bottom: 2px;">Chave de API</label>
+            <div class="input-with-action">
+              <input type="password" class="prov-field-apikey" value="${escapeHtml(prov.api_key || '')}" placeholder="sk-...">
+              <button type="button" class="btn-icon reveal-btn" title="Mostrar/Ocultar">&#128065;</button>
+            </div>
+          </div>
+          <div class="form-group" style="margin: 0;">
+            <label style="font-size: 11px; margin-bottom: 2px;">Modelo</label>
+            <input type="text" class="prov-field-model" value="${escapeHtml(prov.model || '')}" placeholder="ex: deepseek-chat">
+          </div>
+        </div>
+      `;
+
+      listEl.appendChild(card);
+    });
+
+    // Attach listeners
+    listEl.querySelectorAll('input[name="active_custom_radio"]').forEach(radio => {
+      radio.addEventListener('change', (e) => {
+        currentActiveProvider = e.target.value;
+        if (activeSelect) activeSelect.value = currentActiveProvider;
+        renderCustomProviders();
+      });
+    });
+
+    listEl.querySelectorAll('.btn-remove-provider').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idToRemove = btn.dataset.id;
+        customProviders = customProviders.filter(p => p.id !== idToRemove);
+        if (currentActiveProvider === idToRemove) {
+          currentActiveProvider = 'gemini';
+        }
+        renderCustomProviders();
+      });
+    });
+
+    listEl.querySelectorAll('.reveal-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const inp = btn.parentElement.querySelector('input');
+        if (inp) {
+          inp.type = inp.type === 'password' ? 'text' : 'password';
+          btn.innerHTML = inp.type === 'password' ? '&#128065;' : '&#128584;';
+        }
+      });
+    });
+
+    listEl.querySelectorAll('.prov-field-name').forEach(inp => {
+      inp.addEventListener('input', (e) => {
+        const pId = e.target.closest('.provider-card').dataset.id;
+        const p = customProviders.find(x => x.id === pId);
+        if (p) p.name = e.target.value;
+      });
+    });
+    listEl.querySelectorAll('.prov-field-baseurl').forEach(inp => {
+      inp.addEventListener('input', (e) => {
+        const pId = e.target.closest('.provider-card').dataset.id;
+        const p = customProviders.find(x => x.id === pId);
+        if (p) p.base_url = e.target.value;
+      });
+    });
+    listEl.querySelectorAll('.prov-field-apikey').forEach(inp => {
+      inp.addEventListener('input', (e) => {
+        const pId = e.target.closest('.provider-card').dataset.id;
+        const p = customProviders.find(x => x.id === pId);
+        if (p) p.api_key = e.target.value;
+      });
+    });
+    listEl.querySelectorAll('.prov-field-model').forEach(inp => {
+      inp.addEventListener('input', (e) => {
+        const pId = e.target.closest('.provider-card').dataset.id;
+        const p = customProviders.find(x => x.id === pId);
+        if (p) p.model = e.target.value;
+      });
+    });
+  }
+
+  function escapeHtml(text) {
+    if (!text) return '';
+    return text.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // Active provider select event listener
+  const activeProvSelect = document.getElementById('active_ai_provider');
+  if (activeProvSelect) {
+    activeProvSelect.addEventListener('change', (e) => {
+      currentActiveProvider = e.target.value;
+      renderCustomProviders();
+    });
+  }
+
+  // Add provider button
+  const addProvBtn = document.getElementById('btn-add-provider');
+  if (addProvBtn) {
+    addProvBtn.addEventListener('click', () => {
+      const newId = 'provider_' + Math.random().toString(36).substring(2, 9);
+      customProviders.push({
+        id: newId,
+        name: 'DeepSeek V3',
+        base_url: 'https://api.deepseek.com/v1',
+        api_key: '',
+        model: 'deepseek-chat',
+        is_active: false
+      });
+      renderCustomProviders();
+    });
+  }
+
   // Initial load of saved config values
   async function loadInitialConfig() {
     try {
@@ -198,6 +367,54 @@ document.addEventListener('DOMContentLoaded', () => {
         const listenSelect = document.getElementById('listen_mode');
         if (listenSelect) listenSelect.value = data.tailscale.listen_mode;
       }
+
+      // Process AI Telemetry
+      if (data.ai) {
+        const geminiInput = document.getElementById('gemini_api_key');
+        const geminiBadge = document.getElementById('gemini_status_badge');
+        if (data.ai.gemini_configured) {
+          if (geminiInput) geminiInput.value = data.ai.gemini_masked_key || '••••••••';
+          if (geminiBadge) {
+            geminiBadge.textContent = '✓ Chave Ativa e Gravada';
+            geminiBadge.className = 'ai-key-badge badge-active';
+            geminiBadge.style.display = 'inline-flex';
+          }
+        } else {
+          if (geminiBadge) {
+            geminiBadge.textContent = 'Não configurada';
+            geminiBadge.className = 'ai-key-badge badge-missing';
+            geminiBadge.style.display = 'inline-flex';
+          }
+        }
+
+        const groqInput = document.getElementById('groq_api_key');
+        const groqBadge = document.getElementById('groq_status_badge');
+        if (data.ai.groq_configured) {
+          if (groqInput) groqInput.value = data.ai.groq_masked_key || '••••••••';
+          if (groqBadge) {
+            groqBadge.textContent = '✓ Chave Ativa e Gravada';
+            groqBadge.className = 'ai-key-badge badge-active';
+            groqBadge.style.display = 'inline-flex';
+          }
+        } else {
+          if (groqBadge) {
+            groqBadge.textContent = 'Opcional';
+            groqBadge.className = 'ai-key-badge badge-missing';
+            groqBadge.style.display = 'inline-flex';
+          }
+        }
+
+        if (data.ai.active_provider) {
+          currentActiveProvider = data.ai.active_provider;
+        }
+
+        if (Array.isArray(data.ai.custom_providers)) {
+          customProviders = data.ai.custom_providers;
+        }
+
+        renderCustomProviders();
+      }
+
     } catch (e) {
       console.warn('Initial config fetch failed:', e);
     }
@@ -218,6 +435,16 @@ document.addEventListener('DOMContentLoaded', () => {
       saveToast.className = 'save-toast';
       saveToast.textContent = '';
 
+      // Prepare custom providers with is_active flag
+      const serializedCustomProviders = customProviders.map(p => ({
+        id: p.id,
+        name: p.name || 'Provedor OpenAI',
+        base_url: p.base_url || '',
+        api_key: p.api_key || '',
+        model: p.model || '',
+        is_active: (p.id === currentActiveProvider)
+      }));
+
       const payload = {
         cpu_cores: parseInt(cpuSlider.value, 10),
         gpu_enabled: gpuToggle.checked,
@@ -225,6 +452,8 @@ document.addEventListener('DOMContentLoaded', () => {
         ram_limit_gb: parseFloat(ramSlider.value),
         gemini_api_key: document.getElementById('gemini_api_key').value.trim(),
         groq_api_key: document.getElementById('groq_api_key').value.trim(),
+        active_provider: currentActiveProvider,
+        custom_providers: serializedCustomProviders,
         listen_mode: document.getElementById('listen_mode').value,
         auth_token: document.getElementById('auth_token').value.trim(),
         autostart_windows: document.getElementById('autostart_windows').checked
@@ -250,6 +479,7 @@ document.addEventListener('DOMContentLoaded', () => {
         saveBtn.disabled = false;
         saveBtn.querySelector('.btn-text').textContent = 'Salvar e Aplicar Imediatamente';
         fetchTelemetry();
+        loadInitialConfig();
       }
     });
   }

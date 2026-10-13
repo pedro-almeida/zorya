@@ -187,26 +187,59 @@
                 <div class="panel-icon">&#9729;</div>
                 <div>
                   <h2>Auxílio de IA em Nuvem <span class="badge-accent">Zero VRAM Local</span></h2>
-                  <p>Inferência externa gratuita para legendagem e indexação sem consumir a GPU</p>
+                  <p>Inferência externa para curadoria estética, triagem e indexação sem consumir a GPU</p>
                 </div>
               </div>
 
+              <!-- Gemini API Key -->
               <div class="form-group">
-                <label for="gemini_api_key">Google Gemini API Key (Camada Gratuita)</label>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <label for="gemini_api_key" style="margin: 0; font-weight: 600;">Google Gemini API Key (Camada Gratuita)</label>
+                  <span id="gemini_status_badge" class="ai-key-badge" style="display: none;"></span>
+                </div>
                 <div class="input-with-action">
                   <input type="password" id="gemini_api_key" name="gemini_api_key" placeholder="AIzaSy..." autocomplete="off">
                   <button type="button" class="btn-icon reveal-btn" data-target="gemini_api_key" title="Mostrar/Ocultar">&#128065;</button>
                 </div>
-                <div class="field-hint">Utilizada para transcrição inteligente de metadados e assistência estética.</div>
+                <div class="field-hint">Utilizada para visão computacional multimodal e curadoria estética de RAW.</div>
               </div>
 
+              <!-- Groq API Key -->
               <div class="form-group">
-                <label for="groq_api_key">Groq API Key (Opcional - Ultrarrápida)</label>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <label for="groq_api_key" style="margin: 0; font-weight: 600;">Groq API Key (Ultrarrápida LLaMA)</label>
+                  <span id="groq_status_badge" class="ai-key-badge" style="display: none;"></span>
+                </div>
                 <div class="input-with-action">
                   <input type="password" id="groq_api_key" name="groq_api_key" placeholder="gsk_..." autocomplete="off">
                   <button type="button" class="btn-icon reveal-btn" data-target="groq_api_key" title="Mostrar/Ocultar">&#128065;</button>
                 </div>
-                <div class="field-hint">Alternativa de altíssima velocidade para inferências textuais LLaMA / Mixtral.</div>
+                <div class="field-hint">Inferências ultravelozes com LLaMA 3.3 e Mixtral para metadados e tags.</div>
+              </div>
+
+              <!-- Seletor de Provedor Ativo para Triagem -->
+              <div class="form-group" style="margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border-light);">
+                <label for="active_ai_provider" style="font-weight: 600;">Provedor de IA Ativo para a Triagem do Zorya</label>
+                <select id="active_ai_provider" name="active_ai_provider" style="width: 100%; padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-light); background: var(--bg-card); font-family: inherit; font-size: 13px;">
+                  <option value="gemini">Google Gemini (Visão Multimodal Nativa)</option>
+                  <option value="groq">Groq (LLaMA / Mixtral)</option>
+                </select>
+                <div class="field-hint">Selecione o provedor que o motor executará por padrão nas tarefas de curadoria.</div>
+              </div>
+
+              <!-- Provedores Compatíveis com OpenAI (DeepSeek, OpenRouter, etc.) -->
+              <div class="form-group" style="margin-top: 20px; padding-top: 16px; border-top: 1px dashed var(--border-light);">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                  <div>
+                    <h3 style="font-size: 0.95rem; font-weight: 700; margin: 0; color: var(--text-main);">Provedores Compatíveis com OpenAI</h3>
+                    <p style="font-size: 0.8rem; color: var(--text-muted); margin: 2px 0 0 0;">DeepSeek, OpenRouter, OpenAI, LocalAI, vLLM e Ollama</p>
+                  </div>
+                  <button type="button" id="btn-add-provider" class="btn-secondary" style="font-size: 12px; padding: 6px 12px; font-weight: 600;">+ Adicionar Provedor OpenAI</button>
+                </div>
+
+                <div id="custom-providers-list" style="display: flex; flex-direction: column; gap: 14px;">
+                  <!-- Injetado dinamicamente via app.js -->
+                </div>
               </div>
             </div>
 
