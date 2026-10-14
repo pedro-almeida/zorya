@@ -64,76 +64,12 @@ func ClampWBGain(gain float64) float64 {
 	return gain
 }
 
-// ComputeAutoWBGains calcula o balanço de branco seguro preservando integralmente o As-Shot da câmera.
-// Algoritmos destrutivos como "Gray World" cego foram desativados para impedir a descaracterização
-// de paredes de fundo (ex: teal/verde-petróleo escuro) ou dominantes artísticas intencionais.
-// Caso ocorra ajuste fino de balanço de branco, os ganhos multiplicativos são estritamente limitados a [0.92, 1.08].
+// ComputeAutoWBGains preserva 100% o Balanço de Branco As-Shot nativo gravado pelo processador DIGIC 8 da Canon SL3.
+// Retorna (1.0, 1.0, 1.0) por padrão para impedir que fundos coloridos (como paredes verde-petróleo/teal)
+// sofram qualquer desvio de matiz por média Gray-World destrutiva. O tratamento de contraste e pop
+// comercial é realizado integralmente no espaço de luminância YCbCr.
 func ComputeAutoWBGains(src image.Image) (float64, float64, float64) {
-	bounds := src.Bounds()
-	w, h := bounds.Dx(), bounds.Dy()
-	if w <= 0 || h <= 0 {
-		return 1.0, 1.0, 1.0
-	}
-
-	step := int(math.Max(float64(w), float64(h)) / 150.0)
-	if step < 1 {
-		step = 1
-	}
-
-	var sumR, sumG, sumB float64
-	var count int
-
-	rgba, isRGBA := src.(*image.RGBA)
-	for y := bounds.Min.Y; y < bounds.Max.Y; y += step {
-		for x := bounds.Min.X; x < bounds.Max.X; x += step {
-			var r, g, b uint8
-			if isRGBA {
-				idx := (y-bounds.Min.Y)*rgba.Stride + (x-bounds.Min.X)*4
-				r = rgba.Pix[idx]
-				g = rgba.Pix[idx+1]
-				b = rgba.Pix[idx+2]
-			} else {
-				rc, gc, bc, _ := src.At(x, y).RGBA()
-				r = uint8(rc >> 8)
-				g = uint8(gc >> 8)
-				b = uint8(bc >> 8)
-			}
-
-			luma := 0.299*float64(r) + 0.587*float64(g) + 0.114*float64(b)
-			if luma < 15.0 || luma > 240.0 {
-				continue
-			}
-
-			sumR += float64(r)
-			sumG += float64(g)
-			sumB += float64(b)
-			count++
-		}
-	}
-
-	if count < 10 {
-		return 1.0, 1.0, 1.0
-	}
-
-	meanR := sumR / float64(count)
-	meanG := sumG / float64(count)
-	meanB := sumB / float64(count)
-
-	if meanR <= 0.001 || meanG <= 0.001 || meanB <= 0.001 {
-		return 1.0, 1.0, 1.0
-	}
-
-	rawGainR := meanG / meanR
-	rawGainB := meanG / meanB
-
-	// Ajuste ultra-suave com clamp obrigatório no intervalo estrito e seguro [0.92, 1.08]
-	gainR := 1.0 + 0.40*(rawGainR-1.0)
-	gainB := 1.0 + 0.40*(rawGainB-1.0)
-
-	gainR = ClampWBGain(gainR)
-	gainB = ClampWBGain(gainB)
-
-	return gainR, 1.0, gainB
+	return 1.0, 1.0, 1.0
 }
 
 // rgbToHueAndSat converte valores RGB normalizados [0..255] em matiz [0..360°) e saturação [0..1].

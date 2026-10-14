@@ -13,4 +13,5 @@ config.yaml
 temp/
 uploads/
 thumbnails/
-
+.jedi_credentials_cache.json
+.jedi_models_cache.json

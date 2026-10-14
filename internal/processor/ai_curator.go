@@ -15,6 +15,7 @@ import (
 	_ "image/png"
 	"math"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -115,10 +116,16 @@ func RunAIBatchPreflight(geminiKey, groqKey string) *AICascadePreflight {
 	if geminiKey != "" {
 		pf.CloudProvider = "gemini"
 		pf.CloudModel = "gemini-2.5-flash"
+		if cachedGemini := getCachedJediVisionModel("gemini"); cachedGemini != "" {
+			pf.CloudModel = cachedGemini
+		}
 		pf.CloudReady = true
 	} else if groqKey != "" {
 		pf.CloudProvider = "groq"
-		pf.CloudModel = "llama-3.2-11b-vision-preview"
+		pf.CloudModel = "meta-llama/llama-4-scout-17b-16e-instruct"
+		if cachedGroq := getCachedJediVisionModel("groq"); cachedGroq != "" {
+			pf.CloudModel = cachedGroq
+		}
 		pf.CloudReady = true
 	}
 
@@ -444,7 +451,43 @@ Linha seguinte: frase concisa de feedback estético.`, culling.SharpnessScore, c
 	return decision, feedback, nil
 }
 
-// queryGroqSeniorVision avalia via Groq LLaMA Vision
+// getCachedJediVisionModel lê o cache diário .jedi_models_cache.json se existir.
+func getCachedJediVisionModel(provider string) string {
+	paths := []string{
+		".jedi_models_cache.json",
+		"C:\\dev\\zorya\\.jedi_models_cache.json",
+	}
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var cache map[string]interface{}
+		if err := json.Unmarshal(data, &cache); err != nil {
+			continue
+		}
+		if provider == "groq" {
+			if v, ok := cache["groq_vision"].(string); ok && v != "" {
+				return v
+			}
+			if models, ok := cache["groq"].([]interface{}); ok {
+				for _, m := range models {
+					s, _ := m.(string)
+					if strings.Contains(s, "scout") || strings.Contains(s, "vision") {
+						return s
+					}
+				}
+			}
+		} else if provider == "gemini" {
+			if v, ok := cache["gemini_vision"].(string); ok && v != "" {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+// queryGroqSeniorVision avalia via Groq Vision
 func queryGroqSeniorVision(proxyBytes []byte, apiKey string, culling CullingAnalysis) (string, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -454,8 +497,13 @@ func queryGroqSeniorVision(proxyBytes []byte, apiKey string, culling CullingAnal
 
 	prompt := fmt.Sprintf(`Curadoria fotográfica LightCraft: Nitidez=%0.1f, Bokeh=%t. Responda APENAS: APPROVED, REVIEW_BOKEH ou REVIEW.`, culling.SharpnessScore, culling.BokehDetected)
 
+	modelName := "meta-llama/llama-4-scout-17b-16e-instruct"
+	if cached := getCachedJediVisionModel("groq"); cached != "" {
+		modelName = cached
+	}
+
 	payload := map[string]interface{}{
-		"model": "llama-3.2-11b-vision-preview",
+		"model": modelName,
 		"messages": []map[string]interface{}{
 			{
 				"role": "user",

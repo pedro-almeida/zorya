@@ -294,9 +294,16 @@ func (d *Daemon) mountRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/pipeline/status", d.wrapCORS(d.handlePipelineStatus))
 	mux.HandleFunc("/api/v1/config/save", d.wrapCORS(d.handleConfigSave))
 
-	// Registrar a pasta local 'thumbnails' para servir os WebPs:
+	// 3. USINA CENTRAL DE IA (Templo Jedi, Svitlo AI e Anki Media)
+	mux.HandleFunc("/api/v1/jedi/status", d.wrapCORS(d.handleJediStatus))
+	mux.HandleFunc("/api/v1/jedi/dispatch", d.wrapCORS(d.handleJediDispatch))
+	mux.HandleFunc("/api/v1/svitlo/generate", d.wrapCORS(d.handleSvitloGenerate))
+	mux.HandleFunc("/api/v1/anki/generate-media", d.wrapCORS(d.handleAnkiGenerateMedia))
+
+	// Registrar a pasta local 'thumbnails' para servir os WebPs e mídias do Anki:
 	_ = os.MkdirAll("thumbnails", 0755)
 	_ = os.MkdirAll("C:\\dev\\zorya\\thumbnails", 0755)
+	_ = os.MkdirAll("C:\\dev\\zorya\\thumbnails\\anki_media", 0755)
 	mux.HandleFunc("/thumbnails/", func(w http.ResponseWriter, r *http.Request) {
 		applyPNAHeaders(w, r)
 		if r.Method == http.MethodOptions {
@@ -425,10 +432,20 @@ func (d *Daemon) handleUIAssets(w http.ResponseWriter, r *http.Request) {
 
 // GET /health
 func (d *Daemon) handleHealth(w http.ResponseWriter, r *http.Request) {
+	gpuName := "NVIDIA GeForce GTX 1650 (CUDA)"
+	if d.cuda != nil {
+		st := d.cuda.GetStatus()
+		if st.DeviceName != "" {
+			gpuName = st.DeviceName
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":  "ready",
-		"engine":  "zorya",
-		"version": "1.0.0",
+		"status":       "ready",
+		"engine":       "zorya",
+		"version":      "1.0.0",
+		"gpu":          gpuName,
+		"capabilities": []string{"raw_engine", "templo_jedi", "svitlo_ai", "anki_media"},
 	})
 }
 
@@ -1370,3 +1387,91 @@ func (d *Daemon) handleVideoApplyLUT(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, res)
 }
+
+// GET /api/v1/jedi/status
+func (d *Daemon) handleJediStatus(w http.ResponseWriter, r *http.Request) {
+	out, err := api.GetJediStatus()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(out)
+}
+
+// POST /api/v1/jedi/dispatch
+func (d *Daemon) handleJediDispatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	d.SetTrayActive(true)
+	defer d.SetTrayActive(false)
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to read body: " + err.Error()})
+		return
+	}
+
+	out, err := api.DispatchJediCode(body)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(out)
+}
+
+// POST /api/v1/svitlo/generate
+func (d *Daemon) handleSvitloGenerate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	d.SetTrayActive(true)
+	defer d.SetTrayActive(false)
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to read body: " + err.Error()})
+		return
+	}
+
+	out, err := api.GenerateSvitloStudy(body)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(out)
+}
+
+// POST /api/v1/anki/generate-media
+func (d *Daemon) handleAnkiGenerateMedia(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	d.SetTrayActive(true)
+	defer d.SetTrayActive(false)
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to read body: " + err.Error()})
+		return
+	}
+
+	out, err := api.GenerateAnkiMedia(body)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(out)
+}
+

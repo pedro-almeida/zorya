@@ -6,6 +6,7 @@ package processor
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"image"
 	"image/color"
@@ -219,8 +220,9 @@ func (p *Processor) DecodeStream(r io.Reader, filename string, opts DecodeOption
 }
 
 // extractEmbeddedPreviewJPEG scans for embedded preview JPEGs inside RAW container.
+// It parses JPEG markers past APPn headers until Start of Scan (0xFFDA), and only
+// then seeks EOI (0xFFD9), preventing premature truncation by embedded EXIF thumbnails.
 func extractEmbeddedPreviewJPEG(data []byte) []byte {
-	// Look for JPEG SOI marker: FF D8 FF
 	var largestJPEG []byte
 	maxSize := 0
 
@@ -231,10 +233,48 @@ func extractEmbeddedPreviewJPEG(data []byte) []byte {
 			break
 		}
 		start := pos + idx
-		// Search for EOI marker: FF D9
-		endIdx := bytes.Index(data[start+4:], []byte{0xFF, 0xD9})
+
+		// Step through markers after SOI (0xFFD8) until Start of Scan (SOS: 0xFFDA)
+		p := start + 2
+		sosFound := false
+		for p+4 <= len(data) {
+			if data[p] != 0xFF {
+				p++
+				continue
+			}
+			marker := data[p+1]
+			// Standalone markers without payload
+			if marker == 0xD8 || (marker >= 0xD0 && marker <= 0xD7) || marker == 0x01 || marker == 0x00 {
+				p += 2
+				continue
+			}
+			if marker == 0xD9 {
+				// EOI before SOS (e.g. malformed or standalone marker)
+				p += 2
+				break
+			}
+			if marker == 0xDA { // Start of Scan (SOS)
+				sosFound = true
+				p += 2
+				break
+			}
+			// Markers with length: read big-endian 2-byte length
+			markerLen := int(binary.BigEndian.Uint16(data[p+2 : p+4]))
+			if markerLen < 2 || p+2+markerLen > len(data) {
+				break
+			}
+			p += 2 + markerLen
+		}
+
+		searchFrom := start + 4
+		if sosFound && p < len(data) {
+			searchFrom = p
+		}
+
+		// Search for real EOI (0xFF, 0xD9) after SOS
+		endIdx := bytes.Index(data[searchFrom:], []byte{0xFF, 0xD9})
 		if endIdx != -1 {
-			end := start + 4 + endIdx + 2
+			end := searchFrom + endIdx + 2
 			size := end - start
 			// Previews are typically > 100 KB
 			if size > 100*1024 && size > maxSize {

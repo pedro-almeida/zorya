@@ -358,9 +358,9 @@ func TestAutoWhiteBalanceAndPortraitProof(t *testing.T) {
 		}
 	}
 
-	gainR, _, gainB := ComputeAutoWBGains(warmImg)
-	if gainR >= gainB {
-		t.Fatalf("expected gainB (%f) to be higher than gainR (%f) to neutralize warm cast", gainB, gainR)
+	gainR, gainG, gainB := ComputeAutoWBGains(warmImg)
+	if gainR != 1.0 || gainG != 1.0 || gainB != 1.0 {
+		t.Fatalf("expected As-Shot WB gains (1.0, 1.0, 1.0), got (%f, %f, %f)", gainR, gainG, gainB)
 	}
 
 	corrected := ApplyAutoWhiteBalanceAndTone(warmImg)
