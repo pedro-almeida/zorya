@@ -114,11 +114,11 @@ class ModelsDiscovery:
             "ollama_coder": "qwen2.5-coder:14b-instruct-q4_K_M",
             "ollama_vision": "moondream:latest",
             "groq": [],
-            "groq_priority": "llama-3.3-70b-versatile",
+            "groq_priority": "qwen/qwen3.8-27b",
             "groq_vision": "meta-llama/llama-4-scout-17b-16e-instruct",
             "gemini": [],
-            "gemini_priority": "gemini-3.8-flash",
-            "gemini_vision": "gemini-3.8-flash"
+            "gemini_priority": "gemini-3.5-flash-lite",
+            "gemini_vision": "gemini-3.5-flash-lite"
         }
 
         # 1. Ollama Local
@@ -176,11 +176,9 @@ class ModelsDiscovery:
                         raw_models = [m.get("name", "").replace("models/", "") for m in data.get("models", [])]
                         result["gemini"] = raw_models
                         gem_priority = [
-                            "gemini-3.8-flash",
                             "gemini-3.5-flash-lite",
-                            "gemma-4-31b-it",
-                            "gemini-2.5-flash",
-                            "gemini-1.5-flash"
+                            "gemini-3.8-flash",
+                            "gemma-4-31b-it"
                         ]
                         for cand in gem_priority:
                             if cand in raw_models:
@@ -330,20 +328,32 @@ Responda APENAS com o código completo. Não adicione explicações, comentário
     if not code_generated:
         groq_key = creds.get("groq", {}).get(agent_info["groq_key"]) or creds.get("groq", {}).get("orch")
         if groq_key:
-            try:
-                code_generated = LLMCaller.call_groq(models.get("groq_priority", "llama-3.3-70b-versatile"), coder_prompt, groq_key)
-                engine_used = f"Groq Cloud ({models.get('groq_priority')})"
-            except Exception:
-                pass
+            groq_models = ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "llama-3.3-70b-versatile"]
+            if models.get("groq_priority") and models.get("groq_priority") not in groq_models:
+                groq_models.insert(0, models.get("groq_priority"))
+            for g_model in groq_models:
+                try:
+                    code_generated = LLMCaller.call_groq(g_model, coder_prompt, groq_key)
+                    if code_generated:
+                        engine_used = f"Groq Cloud ({g_model})"
+                        break
+                except Exception:
+                    pass
 
     if not code_generated:
         gemini_key = creds.get("gemini", {}).get(agent_info["gemini_key"]) or creds.get("gemini", {}).get("orch")
         if gemini_key:
-            try:
-                code_generated = LLMCaller.call_gemini(models.get("gemini_priority", "gemini-3.8-flash"), coder_prompt, gemini_key)
-                engine_used = f"Gemini Cloud ({models.get('gemini_priority')})"
-            except Exception:
-                pass
+            gem_models = ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
+            if models.get("gemini_priority") and models.get("gemini_priority") not in gem_models:
+                gem_models.insert(0, models.get("gemini_priority"))
+            for gm in gem_models:
+                try:
+                    code_generated = LLMCaller.call_gemini(gm, coder_prompt, gemini_key)
+                    if code_generated:
+                        engine_used = f"Gemini Cloud ({gm})"
+                        break
+                except Exception:
+                    pass
 
     if not code_generated:
         return {"success": False, "error": "Nenhum motor de IA disponível para o Coder"}
@@ -365,9 +375,21 @@ Responda APENAS com o código corrigido.
 """
         try:
             if creds.get("groq", {}).get("qa"):
-                fixed = LLMCaller.call_groq("llama-3.3-70b-versatile", kant_prompt, creds["groq"]["qa"])
+                for g_model in ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "llama-3.3-70b-versatile"]:
+                    try:
+                        fixed = LLMCaller.call_groq(g_model, kant_prompt, creds["groq"]["qa"])
+                        if fixed:
+                            break
+                    except Exception:
+                        pass
             else:
-                fixed = LLMCaller.call_gemini("gemini-3.8-flash", kant_prompt, creds["gemini"]["qa"])
+                for gm in ["gemini-3.5-flash-lite", "gemini-3.8-flash"]:
+                    try:
+                        fixed = LLMCaller.call_gemini(gm, kant_prompt, creds["gemini"]["qa"])
+                        if fixed:
+                            break
+                    except Exception:
+                        pass
             clean_fixed = strip_code_fences(fixed)
             v2, _ = validate_syntax(dest, clean_fixed)
             if v2:
@@ -442,21 +464,27 @@ Responda APENAS o JSON válido. Não inclua texto introdutório ou notas fora do
     if not resp_text:
         svitlo_key = creds.get("groq", {}).get("svitlo_intelligence") or creds.get("groq", {}).get("orch")
         if svitlo_key:
-            try:
-                resp_text = LLMCaller.call_groq("llama-3.3-70b-versatile", prompt, svitlo_key)
-                model_name = "Groq Cloud (llama-3.3-70b-versatile)"
-            except Exception:
-                pass
+            for g_model in ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "llama-3.3-70b-versatile"]:
+                try:
+                    resp_text = LLMCaller.call_groq(g_model, prompt, svitlo_key)
+                    if resp_text:
+                        model_name = f"Groq Cloud ({g_model})"
+                        break
+                except Exception:
+                    pass
 
     # Fallback: Gemini svitlo_intelligence
     if not resp_text:
         gem_key = creds.get("gemini", {}).get("svitlo_intelligence") or creds.get("gemini", {}).get("orch")
         if gem_key:
-            try:
-                resp_text = LLMCaller.call_gemini("gemini-3.8-flash", prompt, gem_key)
-                model_name = "Gemini Cloud (gemini-3.8-flash)"
-            except Exception:
-                pass
+            for gm in ["gemini-3.5-flash-lite", "gemini-3.8-flash"]:
+                try:
+                    resp_text = LLMCaller.call_gemini(gm, prompt, gem_key)
+                    if resp_text:
+                        model_name = f"Gemini Cloud ({gm})"
+                        break
+                except Exception:
+                    pass
 
     clean_json = strip_code_fences(resp_text)
     try:

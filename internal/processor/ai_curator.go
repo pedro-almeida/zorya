@@ -113,19 +113,28 @@ func RunAIBatchPreflight(geminiKey, groqKey string) *AICascadePreflight {
 	}
 
 	// 2. Validar Provedor Nuvem com Circuit Breaker caso ocorra 404/400
-	if geminiKey != "" {
+	preflightMu.RLock()
+	prevCB := currentPreflight != nil && currentPreflight.CircuitBreakerOpen
+	preflightMu.RUnlock()
+	pf.CircuitBreakerOpen = prevCB
+
+	if groqKey != "" && (prevCB || getCachedActiveProvider() == "groq") {
+		pf.CloudProvider = "groq"
+		pf.CloudModel = "meta-llama/llama-4-scout-17b-16e-instruct"
+		if cachedGroq := getCachedJediVisionModel("groq"); cachedGroq != "" {
+			pf.CloudModel = cachedGroq
+		}
+		pf.CloudReady = true
+	} else if geminiKey != "" && !prevCB {
 		pf.CloudProvider = "gemini"
-		pf.CloudModel = "gemini-2.5-flash"
-		if cachedGemini := getCachedJediVisionModel("gemini"); cachedGemini != "" {
+		pf.CloudModel = "gemini-3.5-flash-lite"
+		if cachedGemini := getCachedJediVisionModel("gemini"); cachedGemini != "" && cachedGemini != "gemini-2.5-flash" {
 			pf.CloudModel = cachedGemini
 		}
 		pf.CloudReady = true
 	} else if groqKey != "" {
 		pf.CloudProvider = "groq"
 		pf.CloudModel = "meta-llama/llama-4-scout-17b-16e-instruct"
-		if cachedGroq := getCachedJediVisionModel("groq"); cachedGroq != "" {
-			pf.CloudModel = cachedGroq
-		}
 		pf.CloudReady = true
 	}
 
@@ -144,7 +153,7 @@ func GetCurrentPreflight(geminiKey, groqKey string) *AICascadePreflight {
 	preflightMu.RLock()
 	pf := currentPreflight
 	preflightMu.RUnlock()
-	if pf != nil && time.Since(pf.LastCheck) < 5*time.Minute {
+	if pf != nil && time.Since(pf.LastCheck) < 60*time.Minute {
 		return pf
 	}
 	return RunAIBatchPreflight(geminiKey, groqKey)
@@ -217,8 +226,13 @@ func EvaluatePortraitCascade(img image.Image, culling CullingAnalysis, geminiKey
 		}
 	}
 
-	// 2b. Canal Nuvem: Gemini Vision (se configurado e Circuit Breaker fechado)
-	if geminiKey != "" && !pf.CircuitBreakerOpen {
+	// 2b. Canal Nuvem: Groq direto se ativo ou se Circuit Breaker estiver aberto
+	if (pf.CloudProvider == "groq" || pf.CircuitBreakerOpen) && groqKey != "" {
+		rec, feedback, err := queryGroqSeniorVision(proxyBytes, groqKey, culling)
+		if err == nil && rec != "" {
+			return rec, "Groq Cloud (Senior Vision)", feedback
+		}
+	} else if geminiKey != "" && !pf.CircuitBreakerOpen {
 		rec, feedback, err := queryGeminiSeniorVision(proxyBytes, geminiKey, culling)
 		if err == nil && rec != "" {
 			return rec, "Gemini Cloud (Senior Vision)", feedback
@@ -232,10 +246,14 @@ func EvaluatePortraitCascade(img image.Image, culling CullingAnalysis, geminiKey
 			preflightMu.Unlock()
 			fmt.Printf("[ZORYA CIRCUIT BREAKER] Ativado para Gemini: %v. Fazendo fallback suave.\n", err)
 		}
-	}
-
-	// 2c. Canal Nuvem: Groq Vision (se configurado)
-	if groqKey != "" {
+		// Fallback para Groq se Gemini falhar
+		if groqKey != "" {
+			rec, feedback, errGroq := queryGroqSeniorVision(proxyBytes, groqKey, culling)
+			if errGroq == nil && rec != "" {
+				return rec, "Groq Cloud (Senior Vision)", feedback
+			}
+		}
+	} else if groqKey != "" {
 		rec, feedback, err := queryGroqSeniorVision(proxyBytes, groqKey, culling)
 		if err == nil && rec != "" {
 			return rec, "Groq Cloud (Senior Vision)", feedback
@@ -365,14 +383,9 @@ Responda EXCLUSIVAMENTE em formato: RATING: [APPROVED|REVIEW_BOKEH|REVIEW] | FEE
 	return decision, feedback, nil
 }
 
-// queryGeminiSeniorVision avalia via Gemini API Nuvem
+// queryGeminiSeniorVision avalia via Gemini API Nuvem tentando gemini-3.5-flash-lite e gemini-3.8-flash
 func queryGeminiSeniorVision(proxyBytes []byte, apiKey string, culling CullingAnalysis) (string, string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-	defer cancel()
-
 	b64 := base64.StdEncoding.EncodeToString(proxyBytes)
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=%s", apiKey)
-
 	prompt := fmt.Sprintf(`Curadoria fotográfica de retrato comercial: Nitidez=%0.1f, Bokeh=%t.
 Classifique em UMA palavra: APPROVED, REVIEW_BOKEH ou REVIEW.
 Linha seguinte: frase concisa de feedback estético.`, culling.SharpnessScore, culling.BokehDetected)
@@ -397,58 +410,124 @@ Linha seguinte: frase concisa de feedback estético.`, culling.SharpnessScore, c
 	}
 
 	bodyJSON, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyJSON))
-	if err != nil {
-		return "", "", err
+
+	models := []string{"gemini-3.5-flash-lite", "gemini-3.8-flash"}
+	if cached := getCachedJediVisionModel("gemini"); cached != "" && cached != "gemini-2.5-flash" {
+		models = append([]string{cached}, models...)
 	}
-	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 7 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", "", err
+	var lastErr error
+
+	for _, model := range models {
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", model, apiKey)
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyJSON))
+		if err != nil {
+			cancel()
+			lastErr = err
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			cancel()
+			lastErr = err
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			cancel()
+			lastErr = fmt.Errorf("gemini (%s) status %d", model, resp.StatusCode)
+			continue
+		}
+
+		var geminiResp struct {
+			Candidates []struct {
+				Content struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				} `json:"content"`
+			} `json:"candidates"`
+		}
+
+		err = json.NewDecoder(resp.Body).Decode(&geminiResp)
+		resp.Body.Close()
+		cancel()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		if len(geminiResp.Candidates) == 0 || len(geminiResp.Candidates[0].Content.Parts) == 0 {
+			lastErr = fmt.Errorf("gemini (%s): empty candidates", model)
+			continue
+		}
+
+		text := geminiResp.Candidates[0].Content.Parts[0].Text
+		lines := strings.Split(text, "\n")
+		firstLine := strings.ToUpper(strings.TrimSpace(lines[0]))
+
+		decision := "APPROVED"
+		if strings.Contains(firstLine, "REVIEW_BOKEH") {
+			decision = "REVIEW_BOKEH"
+		} else if strings.Contains(firstLine, "REVIEW") {
+			decision = "REVIEW"
+		}
+
+		feedback := "Gemini Nuvem: Retrato aprovado com excelente foco e expressão."
+		if len(lines) > 1 && strings.TrimSpace(lines[1]) != "" {
+			feedback = "Gemini Nuvem: " + strings.TrimSpace(lines[1])
+		}
+
+		return decision, feedback, nil
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("gemini status %d", resp.StatusCode)
+	return "", "", lastErr
+}
+
+// getCachedActiveProvider lê config.yaml ou .jedi_models_cache.json para verificar se o usuário selecionou "groq" como provedor ativo.
+func getCachedActiveProvider() string {
+	paths := []string{
+		"config.yaml",
+		"C:\\dev\\zorya\\config.yaml",
+	}
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err == nil {
+			lines := strings.Split(string(data), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "active_provider:") {
+					val := strings.TrimSpace(strings.TrimPrefix(line, "active_provider:"))
+					val = strings.Trim(val, `"'`)
+					if val != "" {
+						return strings.ToLower(val)
+					}
+				}
+			}
+		}
 	}
 
-	var geminiResp struct {
-		Candidates []struct {
-			Content struct {
-				Parts []struct {
-					Text string `json:"text"`
-				} `json:"parts"`
-			} `json:"content"`
-		} `json:"candidates"`
+	cachePaths := []string{
+		".jedi_models_cache.json",
+		"C:\\dev\\zorya\\.jedi_models_cache.json",
 	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&geminiResp); err != nil {
-		return "", "", err
+	for _, p := range cachePaths {
+		data, err := os.ReadFile(p)
+		if err == nil {
+			var cache map[string]interface{}
+			if err := json.Unmarshal(data, &cache); err == nil {
+				if ap, ok := cache["active_provider"].(string); ok && ap != "" {
+					return strings.ToLower(ap)
+				}
+			}
+		}
 	}
-
-	if len(geminiResp.Candidates) == 0 || len(geminiResp.Candidates[0].Content.Parts) == 0 {
-		return "", "", fmt.Errorf("resposta vazia do Gemini")
-	}
-
-	text := geminiResp.Candidates[0].Content.Parts[0].Text
-	lines := strings.Split(text, "\n")
-	firstLine := strings.ToUpper(strings.TrimSpace(lines[0]))
-
-	decision := "APPROVED"
-	if strings.Contains(firstLine, "REVIEW_BOKEH") {
-		decision = "REVIEW_BOKEH"
-	} else if strings.Contains(firstLine, "REVIEW") {
-		decision = "REVIEW"
-	}
-
-	feedback := "Gemini Nuvem: Retrato aprovado com excelente foco e expressão."
-	if len(lines) > 1 && strings.TrimSpace(lines[1]) != "" {
-		feedback = "Gemini Nuvem: " + strings.TrimSpace(lines[1])
-	}
-
-	return decision, feedback, nil
+	return ""
 }
 
 // getCachedJediVisionModel lê o cache diário .jedi_models_cache.json se existir.
