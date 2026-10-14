@@ -299,6 +299,56 @@ func scanEmbeddedJPEGsOrientation(data []byte) int {
 	return 0
 }
 
+// OrientationTagDescription descreve textualmente a tag EXIF 0x0112 para telemetria e console.
+func OrientationTagDescription(tag int) string {
+	switch tag {
+	case 1:
+		return "Normal 0°"
+	case 3:
+		return "Rot 180°"
+	case 6:
+		return "Rot 90° CW"
+	case 8:
+		return "Rot 270° CW"
+	default:
+		return "Normal 0°"
+	}
+}
+
+// ResolveSurgicalOrientation implementa a rotação EXIF cirúrgica da Canon SL3 (Tag 0x0112):
+// - Lê diretamente a tag EXIF de orientação antes de qualquer decisão da IA:
+//   * Tag 1: Orientação normal (0° de rotação).
+//   * Tag 3: Rotacionar 180°.
+//   * Tag 6: Rotacionar 90° no sentido horário.
+//   * Tag 8: Rotacionar 270° no sentido horário (90° anti-horário).
+// - Se a tag for 3, 6 ou 8, a rotação EXIF é aplicada diretamente e a IA NUNCA é acionada.
+// - NUNCA inverte fotos que já vieram verticais da câmera (height > width).
+// - Só aciona a IA Moondream / heurística facial caso o EXIF seja inexistente ou neutro (Tag 0 ou 1)
+//   e haja detecção clara de rosto em ângulo incorreto.
+func ResolveSurgicalOrientation(img image.Image, rawOrJpegData []byte) (image.Image, int, int) {
+	tag := ReadCanonCR3AndJPEGEXIF(rawOrJpegData)
+
+	// Decisão cirúrgica com base na tag EXIF da câmera: IA terminantemente evitada
+	switch tag {
+	case 6:
+		return Rotate90CW(img), 6, 90
+	case 8:
+		return Rotate90CCW(img), 8, 270
+	case 3:
+		return Rotate180(img), 3, 180
+	}
+
+	// NUNCA inverte fotos que já vieram verticais da câmera
+	bounds := img.Bounds()
+	if bounds.Dy() > bounds.Dx() {
+		return img, tag, 0
+	}
+
+	// Caso EXIF seja inexistente ou neutro (0 ou 1), avalia detecção clara de rosto em ângulo incorreto
+	rotated, deg := DetectAndRotateFace(img)
+	return rotated, tag, deg
+}
+
 // ApplyCanonOrientation aplica a transformação geométrica exata baseada na tag EXIF 0x0112 da Canon SL3.
 // Tag 1 (Horizontal Normal): 0 graus (mantém a proporção horizontal natural da foto na mesa).
 // Tag 6 (Retrato Vertical - botão no topo): girar 90 graus no sentido horário (rotate90CW).

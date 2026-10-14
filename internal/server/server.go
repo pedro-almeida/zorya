@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pedro-almeida/zorya/internal/api"
 	"github.com/pedro-almeida/zorya/internal/config"
 	"github.com/pedro-almeida/zorya/internal/hardware"
 	"github.com/pedro-almeida/zorya/internal/network"
@@ -704,7 +705,7 @@ func (d *Daemon) handleRawDecode(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	result, err := d.proc.DecodeStream(fileReader, filename, opts)
+	result, err := api.HandleRawDecodeStream(d.proc, fileReader, filename, opts)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error":   "decode_failed",
@@ -756,7 +757,7 @@ func (d *Daemon) handleRawIngestBatch(w http.ResponseWriter, r *http.Request) {
 	cpuCores := d.cfg.Hardware.CPUCores
 	d.mu.RUnlock()
 
-	result, err := d.proc.ProcessIngestBatch(req, cpuCores)
+	result, err := api.HandleRawIngestBatch(d.proc, req, cpuCores)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

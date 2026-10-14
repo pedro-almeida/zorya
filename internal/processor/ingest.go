@@ -57,6 +57,8 @@ type IngestItemResult struct {
 	Recommendation    string  `json:"recommendation"` // APPROVED, REVIEW_BOKEH, REVIEW, REJECTED
 	AIEngineUsed      string  `json:"ai_engine_used,omitempty"`
 	AIFeedback        string  `json:"ai_feedback,omitempty"`
+	OrientationTag    int     `json:"orientation_tag,omitempty"`
+	RotationApplied   int     `json:"rotation_applied,omitempty"`
 	ElapsedMs         int64   `json:"elapsed_ms"`
 	Status            string  `json:"status"` // SUCCESS, FAILED
 	Error             string  `json:"error,omitempty"`
@@ -298,9 +300,39 @@ func (p *Processor) ProcessIngestBatch(req IngestBatchRequest, cpuCores int) (*I
 					s.LastResult = &itemCopy
 				})
 
-				// Feedback no terminal a cada foto processada
-				fmt.Printf("[%3d/%3d] (%5.1f%%) %-24s -> %-12s | IA: %-26s | %4dms\n",
-					processedCount, len(files), pct, itemRes.Filename, itemRes.Recommendation, itemRes.AIEngineUsed, itemRes.ElapsedMs)
+				// Indicador de progresso limpo e visual no console (Diretriz Zorya):
+				// [ZORYA-RAW] [X/Total] Foto: IMG_XXXX.CR3 | EXIF: 6 (Rot 90° CW) | WB: Camera As-Shot | GPU CUDA Ativa | Status: Aprovada
+				statusDesc := "Aprovada"
+				switch itemRes.Recommendation {
+				case "APPROVED":
+					statusDesc = "Aprovada"
+				case "REVIEW_BOKEH":
+					statusDesc = "Revisar Bokeh"
+				case "REVIEW":
+					statusDesc = "Revisar"
+				case "REJECTED":
+					statusDesc = "Descartada"
+				default:
+					statusDesc = itemRes.Recommendation
+				}
+
+				gpuDesc := "GPU CUDA Ativa"
+				if hwReport != nil && hwReport.CUDAAcceleration != "" && strings.Contains(strings.ToLower(hwReport.CUDAAcceleration), "ativa") {
+					gpuDesc = "GPU CUDA Ativa"
+				} else if req.GPUEnabled {
+					gpuDesc = "GPU CUDA Ativa"
+				} else {
+					gpuDesc = "CPU SIMD Ativo"
+				}
+
+				tag := itemRes.OrientationTag
+				if tag <= 0 {
+					tag = 1
+				}
+				exifDesc := fmt.Sprintf("%d (%s)", tag, OrientationTagDescription(tag))
+
+				fmt.Printf("[ZORYA-RAW] [%d/%d] Foto: %s | EXIF: %s | WB: Camera As-Shot | %s | Status: %s\n",
+					processedCount, len(files), itemRes.Filename, exifDesc, gpuDesc, statusDesc)
 
 				progressLock.Unlock()
 			}
@@ -434,16 +466,24 @@ func (p *Processor) processSingleIngestItem(rawPath, outDir string, targetW, qua
 		srcImg, _, _ = generateFallbackFrame(1920, 1080)
 	}
 
-	// 2. ROTAÇÃO EXIF 100% PRECISA DA CANON:
-	// Tag 1 (Horizontal Normal): 0 graus (mantém a proporção horizontal natural da foto na mesa).
-	// Tag 6 (Retrato Vertical - botão no topo): girar 90 graus no sentido horário (rotate90CW).
-	// Tag 8 (Retrato Vertical - botão embaixo): girar 90 graus no sentido anti-horário (rotate270CW).
-	// Tag 3 (Invertida): girar 180 graus.
-	// Qualquer regra estática cega que deitava fotos horizontais foi ELIMINADA.
-	if orientationTag > 1 {
-		oriented, _ := ApplyCanonOrientation(srcImg, orientationTag)
-		srcImg = oriented
+	// 2. ROTAÇÃO EXIF CIRÚRGICA MANDATÓRIA DA CANON (TAG 0x0112):
+	// - Tag 1: Orientação normal (0° de rotação).
+	// - Tag 3: Rotacionar 180°.
+	// - Tag 6: Rotacionar 90° no sentido horário.
+	// - Tag 8: Rotacionar 270° no sentido horário (90° anti-horário).
+	// - Se o EXIF for 3, 6 ou 8, a rotação é cirúrgica e a IA NUNCA é acionada.
+	// - Fotos que já vieram verticais da câmera NUNCA são invertidas.
+	// - Só aciona a IA caso o EXIF seja inexistente ou neutro (Tag 0 ou 1) e haja detecção clara de rosto em ângulo incorreto.
+	oriented, finalTag, rotDeg := ResolveSurgicalOrientation(srcImg, fileData)
+	if finalTag <= 1 && len(extractedJPEG) > 0 {
+		tagFromPreview := ReadCanonCR3AndJPEGEXIF(extractedJPEG)
+		if tagFromPreview > 1 {
+			oriented, finalTag, rotDeg = ResolveSurgicalOrientation(srcImg, extractedJPEG)
+		}
 	}
+	srcImg = oriented
+	res.OrientationTag = finalTag
+	res.RotationApplied = rotDeg
 
 	// 3. TRATAMENTO COMERCIAL "VITRINE DE VENDAS" (Portrait Sales Pop):
 	// - Preserva o balanço de branco autêntico do DIGIC da Canon

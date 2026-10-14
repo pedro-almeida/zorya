@@ -1,4 +1,4 @@
-﻿// PT: Pipeline Stateless de Decodificação RAW e Conversão para WebP/JPEG
+// PT: Pipeline Stateless de Decodificação RAW e Conversão para WebP/JPEG
 // EN: Stateless RAW Decoding Pipeline and WebP/JPEG Conversion
 // AI: @llm-context Módulo Zorya v1.0.0 / Processador de Imagem Acelerado
 
@@ -171,9 +171,14 @@ func (p *Processor) DecodeStream(r io.Reader, filename string, opts DecodeOption
 		srcImage, width, height = generateFallbackFrame(width, height)
 	}
 
-	// Auto-rotate image according to EXIF orientation if needed
-	if srcImage != nil && orientation > 1 {
-		srcImage = RotateByOrientation(srcImage, orientation)
+	// Auto-rotate image according to surgical EXIF orientation if needed
+	if srcImage != nil {
+		if orientation > 1 {
+			srcImage = RotateByOrientation(srcImage, orientation)
+		} else {
+			oriented, _, _ := ResolveSurgicalOrientation(srcImage, data)
+			srcImage = oriented
+		}
 		width = srcImage.Bounds().Dx()
 		height = srcImage.Bounds().Dy()
 	}
@@ -253,70 +258,7 @@ func extractEmbeddedPreviewJPEG(data []byte) []byte {
 // 6 = Rotate 90° CW (vertical portrait upright)
 // 8 = Rotate 270° CW / 90° CCW
 func ReadEXIFOrientation(data []byte) int {
-	if len(data) < 14 {
-		return 1
-	}
-
-	// 1. Direct TIFF/RAW container check (starts with "II*\x00" or "MM\x00*")
-	if (data[0] == 'I' && data[1] == 'I') || (data[0] == 'M' && data[1] == 'M') {
-		if val := parseTIFFOrientation(data); val >= 1 && val <= 8 {
-			return val
-		}
-	}
-
-	// 2. JPEG stream check with APP1 marker (0xFF, 0xE1)
-	if data[0] == 0xFF && data[1] == 0xD8 {
-		pos := 2
-		for pos+4 <= len(data) {
-			if data[pos] != 0xFF {
-				pos++
-				continue
-			}
-			marker := data[pos+1]
-			// Standalone markers without payload
-			if marker == 0xD8 || marker == 0xD9 || (marker >= 0xD0 && marker <= 0xD7) || marker == 0x01 {
-				pos += 2
-				continue
-			}
-			// End of image or SOS marker (start of scan) - metadata ends here
-			if marker == 0xDA || marker == 0xD9 {
-				break
-			}
-			if pos+4 > len(data) {
-				break
-			}
-			markerLen := int(data[pos+2])<<8 | int(data[pos+3])
-			if markerLen < 2 || pos+2+markerLen > len(data) {
-				break
-			}
-
-			// APP1 marker (0xE1)
-			if marker == 0xE1 {
-				app1Data := data[pos+4 : pos+2+markerLen]
-				// Check for "Exif\x00\x00" prefix (6 bytes)
-				if len(app1Data) >= 14 && string(app1Data[:6]) == "Exif\x00\x00" {
-					if val := parseTIFFOrientation(app1Data[6:]); val >= 1 && val <= 8 {
-						return val
-					}
-				}
-			}
-			pos += 2 + markerLen
-		}
-	}
-
-	// 3. Fallback scan: Search for "Exif\x00\x00" within initial header bytes
-	limit := len(data)
-	if limit > 256*1024 {
-		limit = 256 * 1024
-	}
-	exifIdx := bytes.Index(data[:limit], []byte{'E', 'x', 'i', 'f', 0x00, 0x00})
-	if exifIdx != -1 && exifIdx+6+14 <= len(data) {
-		if val := parseTIFFOrientation(data[exifIdx+6:]); val >= 1 && val <= 8 {
-			return val
-		}
-	}
-
-	return 1
+	return ReadCanonCR3AndJPEGEXIF(data)
 }
 
 // parseTIFFOrientation reads IFD0 and Exif SubIFD searching for Orientation tag 0x0112.

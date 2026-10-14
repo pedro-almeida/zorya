@@ -509,3 +509,117 @@ func TestGPUStage1BatchItem(t *testing.T) {
 		t.Fatalf("expected height 450, got %d", b.Dy())
 	}
 }
+
+func TestTealWallAndSkinHighlightPreservation(t *testing.T) {
+	// Create an image simulating IMG_7050 / IMG_6894:
+	// - Dark teal / green-petroleum wall (R: 20, G: 80, B: 85)
+	// - Subject face with highlight (R: 235, G: 205, B: 185)
+	w, h := 100, 100
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+
+	// Left half: dark teal wall
+	for y := 0; y < h; y++ {
+		for x := 0; x < 50; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: 20, G: 80, B: 85, A: 255})
+		}
+	}
+	// Right half: subject skin highlights
+	for y := 0; y < h; y++ {
+		for x := 50; x < w; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: 235, G: 205, B: 185, A: 255})
+		}
+	}
+
+	// 1. Check WB clamp: gains must be clamped within [0.92, 1.08]
+	gainR, gainG, gainB := ComputeAutoWBGains(img)
+	if gainR < 0.92 || gainR > 1.08 {
+		t.Fatalf("expected gainR to be clamped in [0.92, 1.08], got %f", gainR)
+	}
+	if gainG < 0.92 || gainG > 1.08 {
+		t.Fatalf("expected gainG to be clamped in [0.92, 1.08], got %f", gainG)
+	}
+	if gainB < 0.92 || gainB > 1.08 {
+		t.Fatalf("expected gainB to be clamped in [0.92, 1.08], got %f", gainB)
+	}
+
+	// 2. Process image with Portrait Sales Pop
+	developed := ApplyPortraitSalesPop(img)
+	devRGBA, ok := developed.(*image.RGBA)
+	if !ok {
+		t.Fatalf("expected *image.RGBA output")
+	}
+
+	// 3. Test Teal wall pixel (x=25, y=50):
+	// Must remain teal (B > R and G > R). It must NOT turn into yellow (R: 255, G: 255, B: 0)
+	tealPixel := devRGBA.RGBAAt(25, 50)
+	if tealPixel.R >= tealPixel.B || tealPixel.R >= tealPixel.G {
+		t.Fatalf("teal wall degraded: R (%d) became >= B (%d) or G (%d). Yellowing/solarization detected!",
+			tealPixel.R, tealPixel.B, tealPixel.G)
+	}
+	if tealPixel.R > 60 {
+		t.Fatalf("teal wall red channel spiked abnormally high: %d (expected <= 60)", tealPixel.R)
+	}
+
+	// 4. Test Skin highlight pixel (x=75, y=50):
+	// Skin highlights must retain tone gradation and natural warm skin color (R > G > B)
+	skinPixel := devRGBA.RGBAAt(75, 50)
+	if skinPixel.R < skinPixel.G || skinPixel.G < skinPixel.B {
+		t.Fatalf("skin color distorted: expected R > G > B, got R=%d, G=%d, B=%d",
+			skinPixel.R, skinPixel.G, skinPixel.B)
+	}
+}
+
+func TestSurgicalEXIFOrientationRules(t *testing.T) {
+	// 1. Tag 6 (90° CW)
+	tiff6 := []byte{
+		'I', 'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,
+		0x01, 0x00, 0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00,
+		0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	}
+	img60x40 := image.NewRGBA(image.Rect(0, 0, 60, 40))
+	oriented6, tag6, deg6 := ResolveSurgicalOrientation(img60x40, tiff6)
+	if tag6 != 6 || deg6 != 90 {
+		t.Fatalf("expected tag 6 and deg 90, got tag=%d deg=%d", tag6, deg6)
+	}
+	if oriented6.Bounds().Dx() != 40 || oriented6.Bounds().Dy() != 60 {
+		t.Fatalf("expected 40x60 after 90 CW, got %dx%d", oriented6.Bounds().Dx(), oriented6.Bounds().Dy())
+	}
+
+	// 2. Tag 8 (270° CW / 90° CCW)
+	tiff8 := []byte{
+		'I', 'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,
+		0x01, 0x00, 0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00,
+		0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	}
+	oriented8, tag8, deg8 := ResolveSurgicalOrientation(img60x40, tiff8)
+	if tag8 != 8 || deg8 != 270 {
+		t.Fatalf("expected tag 8 and deg 270, got tag=%d deg=%d", tag8, deg8)
+	}
+	if oriented8.Bounds().Dx() != 40 || oriented8.Bounds().Dy() != 60 {
+		t.Fatalf("expected 40x60 after 270 CW, got %dx%d", oriented8.Bounds().Dx(), oriented8.Bounds().Dy())
+	}
+
+	// 3. Tag 3 (180°)
+	tiff3 := []byte{
+		'I', 'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,
+		0x01, 0x00, 0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00,
+		0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	}
+	oriented3, tag3, deg3 := ResolveSurgicalOrientation(img60x40, tiff3)
+	if tag3 != 3 || deg3 != 180 {
+		t.Fatalf("expected tag 3 and deg 180, got tag=%d deg=%d", tag3, deg3)
+	}
+	if oriented3.Bounds().Dx() != 60 || oriented3.Bounds().Dy() != 40 {
+		t.Fatalf("expected 60x40 after 180 deg rotation, got %dx%d", oriented3.Bounds().Dx(), oriented3.Bounds().Dy())
+	}
+
+	// 4. Vertical photo from camera (height > width) with neutral EXIF must NEVER be inverted/rotated
+	imgVertical := image.NewRGBA(image.Rect(0, 0, 40, 60))
+	orientedVert, _, degVert := ResolveSurgicalOrientation(imgVertical, nil)
+	if degVert != 0 {
+		t.Fatalf("vertical photo was erroneously rotated: deg=%d", degVert)
+	}
+	if orientedVert.Bounds().Dx() != 40 || orientedVert.Bounds().Dy() != 60 {
+		t.Fatalf("vertical photo dimensions changed unexpectedly: %dx%d", orientedVert.Bounds().Dx(), orientedVert.Bounds().Dy())
+	}
+}

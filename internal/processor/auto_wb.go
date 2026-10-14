@@ -1,5 +1,5 @@
-// PT: Tratamento Comercial "Portrait Sales Pop", Curva S, Proteção de Pele e Unsharp Mask
-// EN: Commercial "Portrait Sales Pop" Grade: S-Curve, DIGIC Skin Protection and Unsharp Mask
+// PT: Tratamento Comercial "Portrait Sales Pop", Curva S em Luminância, Proteção de Pele e Unsharp Mask
+// EN: Commercial "Portrait Sales Pop" Grade: Luminance S-Curve, DIGIC Skin Protection and Unsharp Mask
 // AI: @llm-context Módulo Zorya v1.0.0 / Estágio 1 Tratamento Comercial de Vitrine de Vendas
 
 package processor
@@ -11,28 +11,25 @@ import (
 )
 
 var (
-	sCurveLUT   [256]uint8
-	sCurveOnce  sync.Once
+	sCurveLUT  [256]uint8
+	sCurveOnce sync.Once
 )
 
 // initSCurveLUT gera uma Curva Tonal em S (S-Curve) comercial:
 // - Pretos profundos e aveludados (0-48) na barba e camisa preta
 // - Abertura e pop nos médios (48-180) para dar presença e luminosidade
-// - Transição suave de ombro (soft shoulder roll-off) acima de 200 nas altas luzes
+// - Transição suave de ombro (soft shoulder roll-off) acima de 200 nas altas luzes sem estourar
 func initSCurveLUT() {
 	for i := 0; i < 256; i++ {
 		x := float64(i) / 255.0
 
-		// Função sigmoide de contraste suave em S
-		// Centralizada em 0.45 com inclinação de alto impacto comercial
 		var val float64
 		if x < 0.20 {
 			// Aprofundamento sutil de sombras e pretos (barba e camisa)
 			val = x * 0.94
 		} else if x < 0.75 {
-			// Abertura de médios com contraste suave
+			// Abertura de médios com contraste suave (Hermite)
 			normX := (x - 0.20) / 0.55
-			// Curva hermite suave
 			hermite := normX * normX * (3.0 - 2.0*normX)
 			val = 0.188 + hermite*(0.76-0.188)
 		} else {
@@ -51,8 +48,26 @@ func initSCurveLUT() {
 	}
 }
 
-// ApplyPortraitSalesPop aplica o tratamento comercial completo de Vitrine de Vendas:
-// ComputeAutoWBGains calcula ganhos para balanço de branco neutro
+// clampUint8 protege toda conversão aritmética de ponto flutuante contra overflow/underflow uint8.
+func clampUint8(v float64) uint8 {
+	return uint8(math.Min(255.0, math.Max(0.0, v+0.5)))
+}
+
+// ClampWBGain garante que qualquer ganho multiplicativo de WB fique estritamente no intervalo [0.92, 1.08].
+func ClampWBGain(gain float64) float64 {
+	if gain < 0.92 {
+		return 0.92
+	}
+	if gain > 1.08 {
+		return 1.08
+	}
+	return gain
+}
+
+// ComputeAutoWBGains calcula o balanço de branco seguro preservando integralmente o As-Shot da câmera.
+// Algoritmos destrutivos como "Gray World" cego foram desativados para impedir a descaracterização
+// de paredes de fundo (ex: teal/verde-petróleo escuro) ou dominantes artísticas intencionais.
+// Caso ocorra ajuste fino de balanço de branco, os ganhos multiplicativos são estritamente limitados a [0.92, 1.08].
 func ComputeAutoWBGains(src image.Image) (float64, float64, float64) {
 	bounds := src.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
@@ -85,7 +100,7 @@ func ComputeAutoWBGains(src image.Image) (float64, float64, float64) {
 			}
 
 			luma := 0.299*float64(r) + 0.587*float64(g) + 0.114*float64(b)
-			if luma < 10.0 || luma > 248.0 {
+			if luma < 15.0 || luma > 240.0 {
 				continue
 			}
 
@@ -111,21 +126,51 @@ func ComputeAutoWBGains(src image.Image) (float64, float64, float64) {
 	rawGainR := meanG / meanR
 	rawGainB := meanG / meanB
 
-	gainR := 1.0 + 0.85*(rawGainR-1.0)
-	gainB := 1.0 + 0.85*(rawGainB-1.0)
+	// Ajuste ultra-suave com clamp obrigatório no intervalo estrito e seguro [0.92, 1.08]
+	gainR := 1.0 + 0.40*(rawGainR-1.0)
+	gainB := 1.0 + 0.40*(rawGainB-1.0)
 
-	gainR = math.Max(0.70, math.Min(1.45, gainR))
-	gainB = math.Max(0.70, math.Min(1.45, gainB))
+	gainR = ClampWBGain(gainR)
+	gainB = ClampWBGain(gainB)
 
 	return gainR, 1.0, gainB
 }
 
-// ApplyPortraitSalesPop aplica o tratamento comercial completo de Vitrine de Vendas:
-// 1. Preservação estrita do Balanço de Branco autêntico do processador DIGIC da Canon.
-// 2. Detecção precisa de máscara de pele humana (vermelho/dourado) com ganho de exposição local (+0.5 EV).
-// 3. Proteção total de pretos (barba e camisa preta densos) e preservação do azul da parede de fundo.
-// 4. Aplicação de Curva Tonal em S (S-Curve).
-// 5. Vibrância seletiva (+14%) nos livros e folhagens sem saturar ou alaranjar a pele.
+// rgbToHueAndSat converte valores RGB normalizados [0..255] em matiz [0..360°) e saturação [0..1].
+func rgbToHueAndSat(r, g, b float64) (float64, float64) {
+	maxC := math.Max(r, math.Max(g, b))
+	minC := math.Min(r, math.Min(g, b))
+	delta := maxC - minC
+
+	if maxC < 0.001 || delta < 1e-4 {
+		return 0.0, 0.0
+	}
+
+	sat := delta / maxC
+
+	var h float64
+	if maxC == r {
+		h = (g - b) / delta
+		h = math.Mod(h, 6.0)
+	} else if maxC == g {
+		h = (b-r)/delta + 2.0
+	} else {
+		h = (r-g)/delta + 4.0
+	}
+	h *= 60.0
+	if h < 0 {
+		h += 360.0
+	}
+
+	return h, sat
+}
+
+// ApplyPortraitSalesPop aplica o tratamento fotográfico comercial de alto padrão para venda:
+// 1. Preservação integral do balanço de branco da câmera (As-Shot WB da Canon SL3 / DIGIC 8).
+// 2. Processamento de contraste e curva em espaço de Luminância Y (YCbCr) para eliminar 100% o hue-shift.
+// 3. Estabilidade absoluta dos canais cromáticos (Cb/Cr), impedindo que verde-petróleo/teal vire amarelo.
+// 4. Saturação inteligente (Vibrance) com proteção estrita de tons de pele (matiz entre 15° e 45°).
+// 5. Toda aritmética protegida por float64 intermediário e clamp estrito math.Min(255, math.Max(0, v + 0.5)).
 func ApplyPortraitSalesPop(src image.Image) image.Image {
 	sCurveOnce.Do(initSCurveLUT)
 
@@ -137,9 +182,9 @@ func ApplyPortraitSalesPop(src image.Image) image.Image {
 	rgba, isRGBA := src.(*image.RGBA)
 
 	gainR, gainG, gainB := ComputeAutoWBGains(src)
-
-	// Fator de ganho de exposição local para o sujeito: +0.48 EV (~1.395x)
-	const subjectGain = 1.395
+	gainR = ClampWBGain(gainR)
+	gainG = ClampWBGain(gainG)
+	gainB = ClampWBGain(gainB)
 
 	for y := 0; y < h; y++ {
 		srcY := bounds.Min.Y + y
@@ -163,78 +208,71 @@ func ApplyPortraitSalesPop(src image.Image) image.Image {
 				a = uint8(ac >> 8)
 			}
 
+			// 1. Aplicação segura de ganhos de balanço de branco As-Shot [0.92, 1.08]
 			rf := float64(r) * gainR
 			gf := float64(g) * gainG
 			bf := float64(b) * gainB
 
-			// Luminância perceptual
-			luma := 0.299*rf + 0.587*gf + 0.114*bf
+			// 2. Conversão exata para o espaço de cor YCbCr (ITU-R BT.601)
+			yLuma := 0.299000*rf + 0.587000*gf + 0.114000*bf
+			cb := -0.168736*rf - 0.331264*gf + 0.500000*bf
+			cr := 0.500000*rf - 0.418688*gf - 0.081312*bf
 
-			// 1. Detecção da Máscara de Pele Humana com Proteção de Parede Azul e Pretos
-			skinWeight := calculateSkinWeight(rf, gf, bf, luma)
+			// 3. Detecção de matiz e saturação para proteção de tons de pele humana (15° a 45°)
+			hue, sat := rgbToHueAndSat(rf, gf, bf)
 
-			if skinWeight > 0.005 {
-				// Ganho de exposição suave no sujeito (+0.4 EV a +0.6 EV)
-				gain := 1.0 + skinWeight*(subjectGain-1.0)
-
-				rf *= gain
-				gf *= gain
-				bf *= gain
-
-				if rf > 255 {
-					rf = 255
-				}
-				if gf > 255 {
-					gf = 255
-				}
-				if bf > 255 {
-					bf = 255
+			// Peso de pele humana: matiz quente (15° a 45°) com R > G e G > B
+			skinWeight := 0.0
+			if hue >= 12.0 && hue <= 48.0 && rf > gf && gf >= bf {
+				if hue >= 18.0 && hue <= 42.0 {
+					skinWeight = 1.0
+				} else if hue < 18.0 {
+					skinWeight = (hue - 12.0) / 6.0
+				} else {
+					skinWeight = (48.0 - hue) / 6.0
 				}
 			}
 
-			// 2. Curva Tonal em S (S-Curve)
-			rSCurve := float64(sCurveLUT[uint8(rf)])
-			gSCurve := float64(sCurveLUT[uint8(gf)])
-			bSCurve := float64(sCurveLUT[uint8(bf)])
-
-			// 3. Vibrância Seletiva (+14%): realça livros coloridos e fundos sem alaranjar a pele
-			maxC := math.Max(rSCurve, math.Max(gSCurve, bSCurve))
-			minC := math.Min(rSCurve, math.Min(gSCurve, bSCurve))
-			chroma := maxC - minC
-
-			if chroma > 4.0 && skinWeight < 0.60 {
-				// Cores com saturação baixa/média fora da máscara principal de pele
-				// Ganho de vibrância inversamente proporcional à saturação existente
-				sat := chroma / (maxC + 0.001)
-				vibranceFactor := 1.0 + 0.14*(1.0-sat)*(1.0-skinWeight)
-
-				avgL := (rSCurve + gSCurve + bSCurve) / 3.0
-				rSCurve = avgL + (rSCurve-avgL)*vibranceFactor
-				gSCurve = avgL + (gSCurve-avgL)*vibranceFactor
-				bSCurve = avgL + (bSCurve-avgL)*vibranceFactor
+			// Previne clarear pretos profundos (barba/roupa escura) ou estourar altas luzes
+			if yLuma < 30.0 || yLuma > 235.0 {
+				skinWeight = 0.0
 			}
 
-			// Clamp final
-			if rSCurve < 0 {
-				rSCurve = 0
-			} else if rSCurve > 255 {
-				rSCurve = 255
-			}
-			if gSCurve < 0 {
-				gSCurve = 0
-			} else if gSCurve > 255 {
-				gSCurve = 255
-			}
-			if bSCurve < 0 {
-				bSCurve = 0
-			} else if bSCurve > 255 {
-				bSCurve = 255
+			// 4. Aplicação de contraste (Curva Tonal em S) estritamente no canal Y (Luminância)
+			// Leve realce de exposição facial em Y sem alterar cromaticidade
+			yAdjusted := yLuma
+			if skinWeight > 0.01 {
+				// Roll-off suave nas altas luzes para evitar estouro
+				highlightRollOff := math.Max(0.0, math.Min(1.0, (230.0-yLuma)/45.0))
+				shadowRollOff := math.Max(0.0, math.Min(1.0, (yLuma-30.0)/30.0))
+				yAdjusted += skinWeight * 5.0 * highlightRollOff * shadowRollOff
 			}
 
+			yIdx := int(math.Min(255.0, math.Max(0.0, yAdjusted+0.5)))
+			ySCurve := float64(sCurveLUT[yIdx])
+
+			// 5. Saturação Inteligente (Vibrance):
+			// Dá leve ganho em cores pouco saturadas sem saturar tons de pele (tons entre 15° e 45°)
+			vibranceFactor := 1.0
+			if skinWeight < 0.65 && sat > 0.04 && sat < 0.85 {
+				boost := 0.12 * (1.0 - sat) * (1.0 - skinWeight)
+				vibranceFactor = 1.0 + boost
+			}
+
+			// Cb e Cr conservados estáveis, sofrendo apenas o escalonamento proporcional de vibrância
+			cbAdjusted := cb * vibranceFactor
+			crAdjusted := cr * vibranceFactor
+
+			// 6. Conversão inversa de volta para RGB a partir de YCbCr
+			rOut := ySCurve + 1.402000*crAdjusted
+			gOut := ySCurve - 0.344136*cbAdjusted - 0.714136*crAdjusted
+			bOut := ySCurve + 1.772000*cbAdjusted
+
+			// 7. Clamp estrito math.Min(255, math.Max(0, v + 0.5))
 			dstIdx := dstRow + x*4
-			dst.Pix[dstIdx] = uint8(rSCurve)
-			dst.Pix[dstIdx+1] = uint8(gSCurve)
-			dst.Pix[dstIdx+2] = uint8(bSCurve)
+			dst.Pix[dstIdx] = clampUint8(rOut)
+			dst.Pix[dstIdx+1] = clampUint8(gOut)
+			dst.Pix[dstIdx+2] = clampUint8(bOut)
 			dst.Pix[dstIdx+3] = a
 		}
 	}
@@ -242,61 +280,8 @@ func ApplyPortraitSalesPop(src image.Image) image.Image {
 	return dst
 }
 
-// calculateSkinWeight identifica matizes avermelhados/dourados de pele humana
-// com proteção estrita para:
-// - Parede Azul: se o canal azul dominar (B > R ou B > G), retorna 0.0.
-// - Pretos Profundos: se luma < 35 (barba preta, terno, camisa preta), não clareia.
-// - Altas Luzes Extrema: luma > 230 tem atenuação de ganho.
-func calculateSkinWeight(r, g, b, luma float64) float64 {
-	// Proteção Absoluta contra Parede Azul
-	if b > r+5.0 || b > g+5.0 {
-		return 0.0
-	}
-
-	// Proteção Absoluta de Pretos (Barba e Camisa Preta continuam aveludados)
-	if luma < 30.0 {
-		return 0.0
-	}
-
-	// Faixa cromática de pele: R > G e G > B
-	if r <= g || g <= b {
-		return 0.0
-	}
-
-	rgDiff := r - g
-	rbDiff := r - b
-
-	if rgDiff < 10.0 || rbDiff < 15.0 || r < 55.0 {
-		return 0.0
-	}
-
-	// Razão de matiz dourado/vermelho
-	sum := r + g + b + 0.001
-	rRatio := r / sum
-	bRatio := b / sum
-
-	if rRatio < 0.38 || rRatio > 0.68 || bRatio > 0.28 {
-		return 0.0
-	}
-
-	// Transição suave (feathering) nas sombras para preservar detalhes de barba
-	shadowWeight := 1.0
-	if luma < 60.0 {
-		shadowWeight = (luma - 30.0) / 30.0
-	}
-
-	// Transição suave nas altas luzes para evitar estouro
-	highlightWeight := 1.0
-	if luma > 220.0 {
-		highlightWeight = math.Max(0.0, (255.0-luma)/35.0)
-	}
-
-	confidence := math.Min(1.0, (rgDiff/40.0)*(rbDiff/55.0))
-	return confidence * shadowWeight * highlightWeight
-}
-
-// ApplyUnsharpMask aplica nitidez sutil 3x3 de vitrine fotográfica comercial.
-// Realça detalhes de olhos, cílios, cabelo e textura sem introduzir ruído ou halos.
+// ApplyUnsharpMask aplica nitidez comercial 3x3 estritamente no canal de Luminância Y,
+// realçando olhos, cílios e textura da pele com zero aberração cromática ou halos coloridos.
 func ApplyUnsharpMask(src image.Image, amount float64) image.Image {
 	if amount <= 0 {
 		return src
@@ -315,11 +300,7 @@ func ApplyUnsharpMask(src image.Image, amount float64) image.Image {
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
 	rgba, isRGBA := src.(*image.RGBA)
 
-	// Kernel 3x3 Laplacian sutil com ganho amount
-	// [ 0,  -k,  0]
-	// [-k, 1+4k,-k]
-	// [ 0,  -k,  0]
-	k := amount * 0.24
+	k := amount * 0.22
 
 	getRGB := func(x, y int) (float64, float64, float64, uint8) {
 		if isRGBA {
@@ -342,9 +323,9 @@ func ApplyUnsharpMask(src image.Image, amount float64) image.Image {
 			// Bordas: copia direto
 			if x == 0 || x == w-1 || y == 0 || y == h-1 {
 				dstIdx := dstRow + x*4
-				dst.Pix[dstIdx] = uint8(rC)
-				dst.Pix[dstIdx+1] = uint8(gC)
-				dst.Pix[dstIdx+2] = uint8(bC)
+				dst.Pix[dstIdx] = clampUint8(rC)
+				dst.Pix[dstIdx+1] = clampUint8(gC)
+				dst.Pix[dstIdx+2] = clampUint8(bC)
 				dst.Pix[dstIdx+3] = a
 				continue
 			}
@@ -354,30 +335,23 @@ func ApplyUnsharpMask(src image.Image, amount float64) image.Image {
 			rLeft, gLeft, bLeft, _ := getRGB(srcX-1, srcY)
 			rRight, gRight, bRight, _ := getRGB(srcX+1, srcY)
 
-			rOut := rC + k*(4.0*rC-rUp-rDown-rLeft-rRight)
-			gOut := gC + k*(4.0*gC-gUp-gDown-gLeft-gRight)
-			bOut := bC + k*(4.0*bC-bUp-bDown-bLeft-bRight)
+			// Nitidez calculada em Luminância Y para proteger os canais de cromaticidade
+			yC := 0.299*rC + 0.587*gC + 0.114*bC
+			yUp := 0.299*rUp + 0.587*gUp + 0.114*bUp
+			yDown := 0.299*rDown + 0.587*gDown + 0.114*bDown
+			yLeft := 0.299*rLeft + 0.587*gLeft + 0.114*bLeft
+			yRight := 0.299*rRight + 0.587*gRight + 0.114*bRight
 
-			if rOut < 0 {
-				rOut = 0
-			} else if rOut > 255 {
-				rOut = 255
-			}
-			if gOut < 0 {
-				gOut = 0
-			} else if gOut > 255 {
-				gOut = 255
-			}
-			if bOut < 0 {
-				bOut = 0
-			} else if bOut > 255 {
-				bOut = 255
-			}
+			deltaY := k * (4.0*yC - yUp - yDown - yLeft - yRight)
+
+			rOut := rC + deltaY
+			gOut := gC + deltaY
+			bOut := bC + deltaY
 
 			dstIdx := dstRow + x*4
-			dst.Pix[dstIdx] = uint8(rOut)
-			dst.Pix[dstIdx+1] = uint8(gOut)
-			dst.Pix[dstIdx+2] = uint8(bOut)
+			dst.Pix[dstIdx] = clampUint8(rOut)
+			dst.Pix[dstIdx+1] = clampUint8(gOut)
+			dst.Pix[dstIdx+2] = clampUint8(bOut)
 			dst.Pix[dstIdx+3] = a
 		}
 	}
