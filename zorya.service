@@ -1,0 +1,20 @@
+[Unit]
+Description=Zorya Usina Computacional Node (Tailscale OpenAI Daemon)
+After=network.target tailscaled.service
+Wants=tailscaled.service
+
+[Service]
+Type=simple
+User=%I
+WorkingDirectory=/opt/zorya
+ExecStart=/usr/bin/python3 /opt/zorya/zorya_node.py
+Restart=always
+RestartSec=5s
+Environment=PYTHONUNBUFFERED=1
+
+# Hardening basico
+NoNewPrivileges=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
