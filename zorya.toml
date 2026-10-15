@@ -1,0 +1,18 @@
+# Zorya v2.1.0 Configuration / Configuração do Zorya v2.1.0
+
+[network]
+headscale_url = "https://headscale.espectroipe.com.br"
+headscale_auth_key = "hskey-replace-with-output-from-install-vps-sh"
+node_name = "usina-zorya"
+allowed_ip = "143.95.223.218"
+listen_port = 8085
+wireguard_port = 51820
+
+[inference]
+ollama_url = "http://127.0.0.1:11434"
+default_model = "qwen2.5-coder:7b-instruct-q4_K_M"
+dedicated_vram_mb = 4096
+gpu_device_index = 0
+
+[craft]
+enabled = ["lightcraft", "photocraft", "vectorcraft", "soundcraft"]

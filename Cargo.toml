@@ -1,33 +1,72 @@
+# Zorya v2.1.0 Sovereign Rust Manifest / Manifesto Rust Soberano do Zorya v2.1.0
 [package]
 name = "zorya"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
-authors = ["Pedro Luís Fotografia <pedro@tenorio.fot.br>"]
-description = "Unified high-performance audio-visual daemon and MCP server integrating LightCraft, PhotoCraft, FilmCraft, EffectCraft and SoundCraft"
+authors = ["Pedro Luís Tenório <pedro@espectroipe.com.br>"]
+description = "Sovereign Rust AI & Multimedia Coprocessor Daemon (Axum + boringtun + Headscale + ArtCraft + MCP SSE)"
+license = "MIT OR Apache-2.0"
 
 [features]
-default = ["photo", "video", "audio"]
-photo = []
-video = []
-audio = []
+# Default standalone build with ArtCraft adapters / Compilação padrão autônoma com adaptadores ArtCraft
+default = ["systray"]
+artcraft-linked = []
+systray = ["dep:tray-icon"]
 
 [dependencies]
-tokio = { version = "1.40", default-features = false, features = ["rt-multi-thread", "macros", "net", "sync", "fs", "io-util", "time"] }
-axum = { version = "0.7", features = ["macros"] }
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "trace"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "tiff"] }
-rayon = "1.10"
+# Async runtime and HTTP server / Runtime assíncrono e servidor HTTP
+tokio = { version = "1.40", features = ["full"] }
+axum = { version = "0.7", features = ["macros", "multipart"] }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "limit"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
+bytes = "1.7"
+
+# HTTP client for Ollama SSE proxy and Headscale registration / Cliente HTTP para proxy SSE do Ollama e registro no Headscale
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
+
+# Serialization and configuration / Serialização e configuração
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-walkdir = "2.5"
+toml = "0.8"
+base64 = "0.22"
+
+# Userspace WireGuard tunnel (Cloudflare boringtun) & cryptography / Túnel WireGuard em userspace e criptografia
+boringtun = "0.6"
+x25519-dalek = { version = "=2.0.0-rc.3", features = ["static_secrets"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+# Hardware & System Telemetry / Telemetria de Hardware e Sistema
+sysinfo = "0.31"
+
+# Multimedia & Parallelism / Multimídia e Paralelismo
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "tiff"] }
+rayon = "1.10"
+
+# System Tray Icon / Ícone da Bandeja do Sistema
+tray-icon = { version = "0.17", optional = true }
+
+# Logging & Error Handling / Logs e Tratamento de Erros
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 anyhow = "1.0"
-crossbeam-channel = "0.5"
+thiserror = "1.0"
+
+# ArtCraft Suite Path Dependencies (Storytold Repositories) / Dependências de Caminho da Suíte ArtCraft (desativadas no modo autônomo)
+# lightcraft-raw = { path = "../lightcraft/crates/raw", optional = true }
+# lightcraft-codecs = { path = "../lightcraft/crates/codecs", optional = true }
+# lightcraft-raster = { path = "../lightcraft/crates/raster", optional = true }
+# photocraft-algo = { path = "../photocraft/crates/algo", optional = true }
+# photocraft-ops = { path = "../photocraft/crates/ops", optional = true }
+# vectorcraft-doc = { path = "../vectorcraft/crates/doc", optional = true }
+# vectorcraft-svg = { path = "../vectorcraft/crates/svg", optional = true }
+# soundcraft-audio-io = { path = "../soundcraft/crates/audio-io", optional = true }
+# soundcraft-dsp = { path = "../soundcraft/crates/dsp", optional = true }
 
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+strip = true

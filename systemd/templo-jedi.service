@@ -1,0 +1,16 @@
+[Unit]
+Description=Templo Jedi — Autonomous Self-Audit and Self-Healing Service (Mriya Ecosystem)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/mriya
+ExecStart=/var/www/mcp-server/venv/bin/python /var/www/mriya/mriya/scripts/templo_jedi.py
+StandardOutput=append:/var/www/mriya/mriya/logs/templo_jedi.log
+StandardError=append:/var/www/mriya/mriya/logs/templo_jedi.log
+
+[Install]
+WantedBy=multi-user.target

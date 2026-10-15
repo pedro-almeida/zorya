@@ -1,0 +1,2 @@
+# Templo Jedi Autonomous Self-Healing — Runs daily at 04:00 (after nightly_auditor.py at 03:30)
+0 4 * * * systemctl start templo-jedi.service

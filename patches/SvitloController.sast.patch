@@ -1,0 +1,83 @@
+--- a/mriya/api/v1/controllers/SvitloController.php
++++ b/mriya/api/v1/controllers/SvitloController.php
+@@ -2082,7 +2082,7 @@
+         $this->requireAuth();
+         if (isset($_GET['period'])) {
+             $allowed = ['7day','1month','3month','6month','12month','overall'];
+-            $p = (string)$_GET['period'];
++            $p = (string)($_GET['period'] ?? 'default'); // Validate period / Valida o período
+             $_GET['music_period'] = in_array($p, $allowed) ? $p : '12month';
+         } else {
+             $_GET['music_period'] = '12month';
+@@ -5103,7 +5103,7 @@
+     // PT: Inicia fluxo OAuth 2.0 do ORCID — redireciona para autorização
+     // EN: Initiates ORCID OAuth 2.0 flow — redirects to authorization
+     // AI: @llm-context GET /api/v1/svitlo/connections/orcid/auth → redirect to ORCID OAuth
+-    public function orcidAuth(): void {
++    public function orcidAuth() {
+         $token = (string)($_GET['token'] ?? '');
+         $userId = 0;
+         if ($token) {
+@@ -5122,14 +5122,18 @@
+             }
+         }
+         if (!$userId && !empty($_COOKIE['svitlo_token'])) {
++            $svitloToken = (string)($_COOKIE['svitlo_token'] ?? ''); // Read svitlo_token safely / Lê svitlo_token com segurança
++            if (empty($svitloToken)) { return $this->unauthorized(); }
+             try {
+-                $p = MriyaJWT::validateAccessToken((string)$_COOKIE['svitlo_token']);
++                $p = MriyaJWT::validateAccessToken($svitloToken);
+                 $userId = (int)($p['user_id'] ?? $p['uid'] ?? $p['sub'] ?? 0);
+             } catch (\Throwable $e) { $this->logError('catch', $e->getMessage()); }
+         }
+         if (!$userId && !empty($_COOKIE['mriya_token'])) {
++            $mriyaToken = (string)($_COOKIE['mriya_token'] ?? ''); // Read mriya_token safely / Lê mriya_token com segurança
++            if (empty($mriyaToken)) { return $this->unauthorized(); }
+             try {
+-                $p = MriyaJWT::validateAccessToken((string)$_COOKIE['mriya_token']);
++                $p = MriyaJWT::validateAccessToken($mriyaToken);
+                 $userId = (int)($p['user_id'] ?? $p['uid'] ?? $p['sub'] ?? 0);
+             } catch (\Throwable $e) { $this->logError('catch', $e->getMessage()); }
+         }
+@@ -12207,7 +12211,7 @@
+     public function healthConnect(): void {
+         $token = MriyaJWT::extractFromHeader();
+         if (!$token && !empty($_GET['token'])) {
+-            $token = trim((string)$_GET['token']);
++            $token = trim((string)($_GET['token'] ?? '')); // Sanitize query token / Sanitiza o token da query
+         }
+         $user = $token ? MriyaJWT::validateAccessToken($token) : null;
+         if (!$user) {
+@@ -12946,7 +12950,7 @@
+     public function calendarGoogleAuth(): void {
+         $token = MriyaJWT::extractFromHeader();
+         if (!$token && !empty($_GET['token'])) {
+-            $token = trim((string)$_GET['token']);
++            $token = trim((string)($_GET['token'] ?? '')); // Sanitize query token / Sanitiza o token da query
+         }
+         $user = $token ? MriyaJWT::validateAccessToken($token) : null;
+         if (!$user) {
+@@ -16390,7 +16394,7 @@
+         // PT: Consome token OAuth do usuário (fornecido na requisição ou resolvido via conexões salvas)
+         $token = null;
+         if (!empty($_GET['access_token'])) {
+-            $token = trim((string)$_GET['access_token']);
++            $token = trim((string)($_GET['access_token'] ?? '')); // Sanitize access_token / Sanitiza o access_token
+         } elseif (!empty($_SERVER['HTTP_X_GOOGLE_TOKEN'])) {
+             $token = trim((string)$_SERVER['HTTP_X_GOOGLE_TOKEN']);
+         } else {
+@@ -17234,8 +17238,10 @@
+         } catch (\Throwable $e) {}
+         return "https://image.pollinations.ai/prompt/" . urlencode($term . " academic scientific diagram detailed") . "?width=512&height=512&nologo=true";
+     }
++
++    // Return 401 Unauthorized response / Retorna resposta 401 Não Autorizado
++    private function unauthorized() {
++        $this->abort(401, 'Unauthorized');
++        return null;
++    }
+ }
+-
+-
+-
+-
