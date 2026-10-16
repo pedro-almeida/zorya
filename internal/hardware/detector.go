@@ -1,4 +1,4 @@
-﻿// PT: Detector de Hardware, Memória e Malha Tailscale (Zorya Engine)
+// PT: Detector de Hardware, Memória e Malha Tailscale (Zorya Engine)
 // EN: Hardware, Memory and Tailscale Mesh Detector (Zorya Engine)
 // AI: @llm-context Módulo Zorya v1.0.0 / Diagnóstico de Hardware e Rede
 
@@ -281,4 +281,62 @@ func detectGPU(enabled bool, vramLimit float64) GPUInfo {
 
 func round1(val float64) float64 {
 	return float64(int(val*10.0)) / 10.0
+}
+
+// HardwareStatus provides simplified GPU and memory telemetry for AI status endpoints.
+type HardwareStatus struct {
+	GPUName     string  `json:"gpu_name"`
+	VRAMTotalMB float64 `json:"vram_total_mb"`
+	VRAMUsedMB  float64 `json:"vram_used_mb"`
+	GPUTempC    float64 `json:"gpu_temp_c"`
+}
+
+// DetectHardware returns current GPU telemetry for the coprocessor node.
+func DetectHardware() HardwareStatus {
+	gpu := detectGPU(true, 4.0)
+	totalMB := 4096.0
+	usedMB := totalMB * (gpu.UsagePercent / 100.0)
+
+	// Try nvidia-smi for precise total and used memory
+	cmd := exec.Command("nvidia-smi", "--query-gpu=name,memory.total,memory.used,temperature.gpu", "--format=csv,noheader,nounits")
+	sysproc.PrepareCmd(cmd)
+	if out, err := cmd.Output(); err == nil {
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		if len(lines) > 0 && lines[0] != "" {
+			parts := strings.Split(lines[0], ",")
+			name := gpu.Type
+			temp := gpu.TemperatureC
+			if len(parts) >= 1 {
+				name = strings.TrimSpace(parts[0])
+			}
+			if len(parts) >= 2 {
+				if tMB, errP := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64); errP == nil {
+					totalMB = tMB
+				}
+			}
+			if len(parts) >= 3 {
+				if uMB, errP := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64); errP == nil {
+					usedMB = uMB
+				}
+			}
+			if len(parts) >= 4 {
+				if tC, errP := strconv.ParseFloat(strings.TrimSpace(parts[3]), 64); errP == nil {
+					temp = tC
+				}
+			}
+			return HardwareStatus{
+				GPUName:     name,
+				VRAMTotalMB: totalMB,
+				VRAMUsedMB:  usedMB,
+				GPUTempC:    temp,
+			}
+		}
+	}
+
+	return HardwareStatus{
+		GPUName:     gpu.Type,
+		VRAMTotalMB: totalMB,
+		VRAMUsedMB:  usedMB,
+		GPUTempC:    gpu.TemperatureC,
+	}
 }

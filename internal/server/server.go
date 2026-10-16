@@ -300,6 +300,19 @@ func (d *Daemon) mountRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/svitlo/generate", d.wrapCORS(d.handleSvitloGenerate))
 	mux.HandleFunc("/api/v1/anki/generate-media", d.wrapCORS(d.handleAnkiGenerateMedia))
 
+	// 4. TAILSCALE, OLLAMA PROXY E ARTCRAFT SUITE v1.1.0
+	mux.HandleFunc("/api/v1/tailscale/status", d.wrapCORS(api.HandleTailscaleStatus))
+	mux.HandleFunc("/api/v1/ai/status", d.wrapCORS(api.HandleAIStatus))
+	mux.HandleFunc("/v1/chat/completions", d.wrapCORS(api.HandleChatCompletionsProxy))
+	mux.HandleFunc("/api/v1/pdf/extract", d.wrapCORS(api.HandlePdfExtract))
+	mux.HandleFunc("/api/v1/vector/diagram", d.wrapCORS(api.HandleVectorDiagram))
+	mux.HandleFunc("/api/v1/audio/master", d.wrapCORS(api.HandleAudioMaster))
+	mux.HandleFunc("/api/v1/video/render", d.wrapCORS(api.HandleVideoRender))
+	mux.HandleFunc("/api/v1/doc/generate", d.wrapCORS(api.HandleDocGenerate))
+	mux.HandleFunc("/api/v1/deck/generate", d.wrapCORS(api.HandleDeckGenerate))
+	mux.HandleFunc("/api/v1/design/export", d.wrapCORS(api.HandleDesignExport))
+	mux.HandleFunc("/api/v1/register", d.wrapCORS(api.HandleRegisterOnVPS(d.cfg)))
+
 	// Registrar a pasta local 'thumbnails' para servir os WebPs e mídias do Anki:
 	_ = os.MkdirAll("thumbnails", 0755)
 	_ = os.MkdirAll("C:\\dev\\zorya\\thumbnails", 0755)
