@@ -15,7 +15,7 @@ use axum::{
 };
 use serde_json::json;
 use tokio::sync::{broadcast, RwLock};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 
 use crate::agent::{handle_agent_execute, ZoryaAgent};
 use crate::cluster::{handle_cluster_capabilities, handle_cluster_handshake, ClusterCoordinator};
@@ -48,16 +48,52 @@ pub struct AppState {
     pub mcp_tx: broadcast::Sender<String>,
 }
 
+// Middleware para suporte ao W3C Private Network Access (PNA) exigido pelo Chrome/Edge
+// Injeta o cabeçalho Access-Control-Allow-Private-Network: true em preflights OPTIONS e respostas normais
+async fn private_network_access_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let mut response = next.run(req).await;
+    response.headers_mut().insert(
+        header::HeaderName::from_static("access-control-allow-private-network"),
+        header::HeaderValue::from_static("true"),
+    );
+    response
+}
+
 // Create unified Axum router with all mandatory endpoints / Cria roteador Axum unificado com todos os endpoints obrigatórios
 pub fn create_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers(Any);
+        .allow_origin(tower_http::cors::AllowOrigin::predicate(|origin: &header::HeaderValue, _parts| {
+            if let Ok(s) = origin.to_str() {
+                s.ends_with("espectroipe.com.br")
+                    || s.ends_with("tenorio.fot.br")
+                    || s.contains("localhost")
+                    || s.contains("127.0.0.1")
+                    || s.starts_with("https://")
+                    || s.starts_with("http://")
+            } else {
+                false
+            }
+        }))
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+            Method::PATCH,
+            Method::HEAD,
+        ])
+        .allow_headers(tower_http::cors::AllowHeaders::mirror_request())
+        .allow_credentials(true)
+        .expose_headers([header::HeaderName::from_static("access-control-allow-private-network")]);
 
     Router::new()
-        // Health & System Info
+        // Health & System Info (Compatibilidade Frontend Svitlo & Private Network Access)
         .route("/health", get(health_handler))
+        .route("/api/status", get(health_handler))
         .route("/api/v1/health", get(health_handler))
         .route("/api/v1/system/info", get(system_info_handler))
         // ZORYA-001: Runtime de Inferência Nativo GGUF (OpenAI-compatible)
@@ -95,22 +131,14 @@ pub fn create_router(state: AppState) -> Router {
         // Limite de até 128 MB para uploads multipart de mídia
         .layer(DefaultBodyLimit::max(128 * 1024 * 1024))
         .layer(cors)
+        .layer(axum::middleware::from_fn(private_network_access_middleware))
         .with_state(state)
 }
 
-// GET /health -> {"status":"ok","node":"usina-zorya","version":"3.0.0"}
+// GET /health e GET /api/status -> {"status":"ok","online":true,"node":"usina-zorya","version":"3.0.0","port":8085,...}
 async fn health_handler(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
 ) -> Response {
-    if !state.network.is_ip_authorized(addr.ip()) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "Unauthorized peer IP / IP de peer não autorizado" })),
-        )
-            .into_response();
-    }
-
     let mut telemetry = state.telemetry.write().await;
     let payload = telemetry.collect_health();
     Json(payload).into_response()

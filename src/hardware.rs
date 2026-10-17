@@ -4,8 +4,20 @@
 // AI: @llm-invariant Perfil Nitro (GTX 1650 4GB -> CUDA, Q4_K_M 7B, ctx 8192) e Perfil VPS (2 cores, 4GB RAM -> CPU-only, Q4_K_M 3B, ctx 2048)
 
 use std::process::Command;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 use serde::{Deserialize, Serialize};
 use sysinfo::System;
+
+/// Cria std::process::Command suprimindo janelas de prompt no Windows (CREATE_NO_WINDOW)
+#[inline]
+fn new_command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000);
+    cmd
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ComputeBackend {
@@ -250,7 +262,7 @@ impl HardwareProfile {
     fn probe_igpu() -> Option<String> {
         #[cfg(target_os = "windows")]
         {
-            if let Ok(out) = Command::new("wmic")
+            if let Ok(out) = new_command("wmic")
                 .args(["path", "win32_VideoController", "get", "Name"])
                 .output()
             {
@@ -268,7 +280,7 @@ impl HardwareProfile {
         }
         #[cfg(target_os = "linux")]
         {
-            if let Ok(out) = Command::new("lspci").output() {
+            if let Ok(out) = new_command("lspci").output() {
                 let text = String::from_utf8_lossy(&out.stdout);
                 for line in text.lines() {
                     if (line.contains("VGA") || line.contains("Display"))
@@ -283,7 +295,7 @@ impl HardwareProfile {
     }
 
     fn probe_nvidia_cuda() -> (Option<String>, u64, u64) {
-        if let Ok(out) = Command::new("nvidia-smi")
+        if let Ok(out) = new_command("nvidia-smi")
             .args([
                 "--query-gpu=name,memory.total,memory.free",
                 "--format=csv,noheader,nounits",
@@ -307,7 +319,7 @@ impl HardwareProfile {
     }
 
     fn probe_amd_rocm_vulkan() -> Option<(String, u64)> {
-        if let Ok(out) = Command::new("rocm-smi").args(["--showproductname"]).output() {
+        if let Ok(out) = new_command("rocm-smi").args(["--showproductname"]).output() {
             if out.status.success() {
                 let text = String::from_utf8_lossy(&out.stdout);
                 if !text.trim().is_empty() {

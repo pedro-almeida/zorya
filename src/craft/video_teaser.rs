@@ -6,6 +6,8 @@
 use axum::{extract::Json, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TeaserSlide {
@@ -57,6 +59,8 @@ pub async fn handle_video_teaser(Json(req): Json<VideoTeaserRequest>) -> Result<
     let (filter_graph, total_dur) = build_ken_burns_filter(&req.slides, res);
 
     let mut cmd = Command::new("ffmpeg");
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000);
     cmd.arg("-y");
     for s in &req.slides {
         cmd.arg("-loop").arg("1").arg("-t").arg(format!("{}", s.duration_sec)).arg("-i").arg(&s.image_path);

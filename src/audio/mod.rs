@@ -71,7 +71,13 @@ pub fn process_audio_clean(req: &AudioCleanRequest) -> anyhow::Result<AudioJobRe
         target_lufs
     );
 
-    let ffmpeg_status = std::process::Command::new("ffmpeg")
+    let mut cmd = std::process::Command::new("ffmpeg");
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    let ffmpeg_status = cmd
         .args([
             "-y",
             "-i",

@@ -4,6 +4,9 @@
 
 use std::path::Path;
 use std::process::Command;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 use crate::video::VideoLessonScript;
 
 pub fn compose_lesson_video(
@@ -12,7 +15,11 @@ pub fn compose_lesson_video(
     subtitles_path: &Path,
     output_path: &Path,
 ) -> anyhow::Result<()> {
-    let status = Command::new("ffmpeg")
+    let mut cmd = Command::new("ffmpeg");
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000);
+
+    let status = cmd
         .args([
             "-y",
             "-f", "lavfi",

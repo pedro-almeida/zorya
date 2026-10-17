@@ -1,7 +1,7 @@
-# Zorya v2.1.0 Sovereign Rust Manifest / Manifesto Rust Soberano do Zorya v2.1.0
+# Zorya v3.0.0 Sovereign Rust Manifest / Manifesto Rust Soberano do Zorya v3.0.0
 [package]
 name = "zorya"
-version = "2.1.0"
+version = "3.0.0"
 edition = "2021"
 authors = ["Pedro Luís Tenório <pedro@espectroipe.com.br>"]
 description = "Sovereign Rust AI & Multimedia Coprocessor Daemon (Axum + boringtun + Headscale + ArtCraft + MCP SSE)"
@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 
 [features]
 # Default standalone build with ArtCraft adapters / Compilação padrão autônoma com adaptadores ArtCraft
-default = ["systray"]
+default = []
 artcraft-linked = []
 systray = ["dep:tray-icon"]
 cuda = []
@@ -50,7 +50,8 @@ sysinfo = "0.31"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "tiff"] }
 rayon = "1.10"
 
-# System Tray Icon / Ícone da Bandeja do Sistema
+[target.'cfg(target_os = "windows")'.dependencies]
+# System Tray Icon / Ícone da Bandeja do Sistema (Apenas Windows)
 tray-icon = { version = "0.17", optional = true }
 
 # Logging & Error Handling / Logs e Tratamento de Erros

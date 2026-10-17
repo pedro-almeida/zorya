@@ -3,12 +3,14 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 use sysinfo::{Disks, System};
 
-// Compact health response required for GET /health / Resposta compacta de saúde exigida para GET /health
+// Compact health response required for GET /health & GET /api/status
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthResponse {
     pub status: String,
+    pub online: bool,
     pub node: String,
     pub version: String,
+    pub port: u16,
     pub cpu_usage: f32,
     pub ram_mb: u64,
     pub gpu_vram_mb: u64,
@@ -68,8 +70,10 @@ impl TelemetryCollector {
 
         HealthResponse {
             status: "ok".to_string(),
-            node: self.node_name.clone(),
-            version: "2.1.0".to_string(),
+            online: true,
+            node: if self.node_name.is_empty() { "usina-zorya".to_string() } else { self.node_name.clone() },
+            version: "3.0.0".to_string(),
+            port: 8085,
             cpu_usage,
             ram_mb: if ram_mb > 0 { ram_mb } else { 4096 },
             gpu_vram_mb: vram_total_mb,
@@ -101,8 +105,8 @@ impl TelemetryCollector {
 
         DetailedSystemInfo {
             status: "ok".to_string(),
-            node: self.node_name.clone(),
-            version: "2.1.0".to_string(),
+            node: if self.node_name.is_empty() { "usina-zorya".to_string() } else { self.node_name.clone() },
+            version: "3.0.0".to_string(),
             os_name: System::name().unwrap_or_else(|| std::env::consts::OS.to_string()),
             os_version: System::os_version().unwrap_or_else(|| "unknown".to_string()),
             host_name: System::host_name().unwrap_or_else(|| self.node_name.clone()),
