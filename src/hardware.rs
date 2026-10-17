@@ -13,6 +13,7 @@ use sysinfo::System;
 /// Cria std::process::Command suprimindo janelas de prompt no Windows (CREATE_NO_WINDOW)
 #[inline]
 fn new_command(program: &str) -> Command {
+    #[allow(unused_mut)]
     let mut cmd = Command::new(program);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(0x08000000);

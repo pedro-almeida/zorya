@@ -8,7 +8,6 @@ description = "Sovereign Rust AI & Multimedia Coprocessor Daemon (Axum + boringt
 license = "MIT OR Apache-2.0"
 
 [features]
-# Default standalone build with ArtCraft adapters / Compilação padrão autônoma com adaptadores ArtCraft
 default = []
 artcraft-linked = []
 systray = ["dep:tray-icon"]
@@ -17,7 +16,6 @@ vulkan = []
 opencl = []
 cpu-only = []
 llama-native = []
-
 
 [dependencies]
 # Async runtime and HTTP server / Runtime assíncrono e servidor HTTP
@@ -29,7 +27,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
 bytes = "1.7"
 
-# HTTP client for Ollama SSE proxy and Headscale registration / Cliente HTTP para proxy SSE do Ollama e registro no Headscale
+# HTTP client / Cliente HTTP
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
 
 # Serialization and configuration / Serialização e configuração
@@ -38,7 +36,7 @@ serde_json = "1.0"
 toml = "0.8"
 base64 = "0.22"
 
-# Userspace WireGuard tunnel (Cloudflare boringtun) & cryptography / Túnel WireGuard em userspace e criptografia
+# Userspace WireGuard tunnel & cryptography / Túnel WireGuard e criptografia
 boringtun = "0.6"
 x25519-dalek = { version = "=2.0.0-rc.3", features = ["static_secrets"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
@@ -50,26 +48,15 @@ sysinfo = "0.31"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "tiff"] }
 rayon = "1.10"
 
-[target.'cfg(target_os = "windows")'.dependencies]
-# System Tray Icon / Ícone da Bandeja do Sistema (Apenas Windows)
-tray-icon = { version = "0.17", optional = true }
-
-# Logging & Error Handling / Logs e Tratamento de Erros
+# Logging & Error Handling (Obrigatório em todas as plataformas / All platforms)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 anyhow = "1.0"
 thiserror = "1.0"
 
-# ArtCraft Suite Path Dependencies (Storytold Repositories) / Dependências de Caminho da Suíte ArtCraft (desativadas no modo autônomo)
-# lightcraft-raw = { path = "../lightcraft/crates/raw", optional = true }
-# lightcraft-codecs = { path = "../lightcraft/crates/codecs", optional = true }
-# lightcraft-raster = { path = "../lightcraft/crates/raster", optional = true }
-# photocraft-algo = { path = "../photocraft/crates/algo", optional = true }
-# photocraft-ops = { path = "../photocraft/crates/ops", optional = true }
-# vectorcraft-doc = { path = "../vectorcraft/crates/doc", optional = true }
-# vectorcraft-svg = { path = "../vectorcraft/crates/svg", optional = true }
-# soundcraft-audio-io = { path = "../soundcraft/crates/audio-io", optional = true }
-# soundcraft-dsp = { path = "../soundcraft/crates/dsp", optional = true }
+[target.'cfg(target_os = "windows")'.dependencies]
+# System Tray Icon / Ícone da Bandeja do Sistema (Apenas Windows)
+tray-icon = { version = "0.17", optional = true }
 
 [profile.release]
 opt-level = 3
