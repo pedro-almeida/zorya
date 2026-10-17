@@ -12,6 +12,12 @@ license = "MIT OR Apache-2.0"
 default = ["systray"]
 artcraft-linked = []
 systray = ["dep:tray-icon"]
+cuda = []
+vulkan = []
+opencl = []
+cpu-only = []
+llama-native = []
+
 
 [dependencies]
 # Async runtime and HTTP server / Runtime assíncrono e servidor HTTP

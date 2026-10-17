@@ -1,4 +1,7 @@
-// Unified Axum HTTP + MCP SSE Server on single port 8085 / Servidor HTTP Axum + MCP SSE unificado na porta única 8085
+// PT: Servidor HTTP Axum + MCP SSE Unificado do Zorya v3.0 (Porta 8085)
+// EN: Zorya v3.0 Unified Axum HTTP + MCP SSE Server (Port 8085)
+// AI: @llm-context Expõe endpoints v3.0: /v1/chat/completions, /v1/models, /v1/models/load, /v1/models/unload, /api/v1/cluster/*, /api/v1/agent/execute, MCP SSE/JSON-RPC e ArtCraft
+// AI: @llm-invariant Roteamento soberano integrado com HardwareProfile, NativeInferenceEngine, NetworkManager e ClusterCoordinator
 
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicUsize;
@@ -10,18 +13,23 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde_json::{json, Value};
+use serde_json::json;
 use tokio::sync::{broadcast, RwLock};
 use tower_http::cors::{Any, CorsLayer};
 
+use crate::agent::{handle_agent_execute, ZoryaAgent};
+use crate::cluster::{handle_cluster_capabilities, handle_cluster_handshake, ClusterCoordinator};
 use crate::config::ZoryaConfig;
 use crate::craft::{
     decode_raw_with_lightcraft, master_audio_ebu_r128, render_vector_diagram_svg, RawOutputFormat,
     VectorDiagramSpec,
 };
+use crate::inference::{
+    handle_chat_completions, handle_list_models, handle_load_model, handle_unload_model,
+    NativeInferenceEngine,
+};
 use crate::mcp::{mcp_jsonrpc_handler, mcp_sse_handler};
-use crate::network::WireGuardManager;
-use crate::ollama::proxy_chat_completions;
+use crate::network::NetworkManager;
 use crate::systray::SystrayController;
 use crate::telemetry::TelemetryCollector;
 
@@ -30,7 +38,10 @@ use crate::telemetry::TelemetryCollector;
 pub struct AppState {
     pub config: Arc<ZoryaConfig>,
     pub telemetry: Arc<RwLock<TelemetryCollector>>,
-    pub wg_manager: Arc<WireGuardManager>,
+    pub network: Arc<NetworkManager>,
+    pub inference: Arc<NativeInferenceEngine>,
+    pub cluster: Arc<ClusterCoordinator>,
+    pub agent: Arc<ZoryaAgent>,
     pub active_jobs: Arc<AtomicUsize>,
     pub systray: SystrayController,
     pub http_client: reqwest::Client,
@@ -45,30 +56,54 @@ pub fn create_router(state: AppState) -> Router {
         .allow_headers(Any);
 
     Router::new()
-        // Mandatory endpoints / Endpoints obrigatórios
+        // Health & System Info
         .route("/health", get(health_handler))
         .route("/api/v1/health", get(health_handler))
-        .route("/v1/chat/completions", post(chat_completions_handler))
         .route("/api/v1/system/info", get(system_info_handler))
+        // ZORYA-001: Runtime de Inferência Nativo GGUF (OpenAI-compatible)
+        .route("/v1/chat/completions", post(handle_chat_completions))
+        .route("/v1/models", get(handle_list_models))
+        .route("/v1/models/load", post(handle_load_model))
+        .route("/v1/models/unload", post(handle_unload_model))
+        // ZORYA-003: Agente Interno de IA com Tool Calling
+        .route("/api/v1/agent/execute", post(handle_agent_execute))
+        // ZORYA-006: Cluster Federado VPS + Nitro
+        .route("/api/v1/cluster/capabilities", get(handle_cluster_capabilities))
+        .route("/api/v1/cluster/handshake", post(handle_cluster_handshake))
+        // ArtCraft Suite (ZORYA-007 a ZORYA-014)
+        .route("/api/v1/image/denoise", post(crate::craft::denoise::handle_image_denoise))
+        .route("/api/v1/image/cull", post(crate::craft::culling::handle_cull))
+        .route("/api/v1/image/colorspace", post(crate::craft::colorspace::handle_colorspace))
+        .route("/api/v1/audio/master-dsp", post(crate::craft::audio_dsp::handle_audio_master))
+        .route("/api/v1/audio/denoise", post(crate::craft::audio_dsp::handle_audio_denoise))
+        .route("/api/v1/voice/clone", post(crate::craft::voice::handle_voice_clone))
+        .route("/api/v1/voice/tts", post(crate::craft::voice::handle_voice_tts))
+        .route("/api/v1/voice/embeddings", get(crate::craft::voice::handle_list_embeddings))
+        .route("/api/v1/vector/render", post(crate::craft::vector::handle_vector_diagram))
+        .route("/api/v1/pdf/extract", post(crate::craft::pdf::handle_pdf_extract))
+        .route("/api/v1/video/teaser", post(crate::craft::video_teaser::handle_video_teaser))
+        // Svitlo Video Pipeline (ZORYA-016)
+        .route("/api/v1/video/youtube-pipeline", post(crate::video::handle_youtube_pipeline))
+        // Endpoints Legados ArtCraft
         .route("/api/v1/raw/decode", post(raw_decode_handler))
         .route("/api/v1/vector/diagram", post(vector_diagram_handler))
         .route("/api/v1/audio/master", post(audio_master_handler))
-        // Real MCP Server over SSE + JSON-RPC 2.0 / Servidor MCP Real sobre SSE + JSON-RPC 2.0
+        // ZORYA-004: MCP Server sobre SSE + JSON-RPC 2.0
         .route("/mcp/sse", get(mcp_sse_handler))
         .route("/mcp/message", post(mcp_jsonrpc_handler))
         .route("/mcp", post(mcp_jsonrpc_handler))
-        // Allow up to 128 MB multipart uploads for RAW & WAV files / Permite uploads multipart de até 128 MB para arquivos RAW e WAV
+        // Limite de até 128 MB para uploads multipart de mídia
         .layer(DefaultBodyLimit::max(128 * 1024 * 1024))
         .layer(cors)
         .with_state(state)
 }
 
-// GET /health -> {"status":"ok","node":"usina-zorya","version":"2.1.0","cpu_usage":12.3,"ram_mb":4096,"gpu_vram_mb":4096}
+// GET /health -> {"status":"ok","node":"usina-zorya","version":"3.0.0"}
 async fn health_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
 ) -> Response {
-    if !state.wg_manager.is_ip_authorized(addr.ip()) {
+    if !state.network.is_ip_authorized(addr.ip()) {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({ "error": "Unauthorized peer IP / IP de peer não autorizado" })),
@@ -81,37 +116,12 @@ async fn health_handler(
     Json(payload).into_response()
 }
 
-// POST /v1/chat/completions -> OpenAI-compatible proxy to Ollama with SSE streaming / Proxy compatível com OpenAI para o Ollama com streaming SSE
-async fn chat_completions_handler(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    State(state): State<AppState>,
-    Json(payload): Json<Value>,
-) -> Response {
-    if !state.wg_manager.is_ip_authorized(addr.ip()) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "Unauthorized peer IP / IP de peer não autorizado" })),
-        )
-            .into_response();
-    }
-
-    match proxy_chat_completions(state, payload).await {
-        Ok(resp) => resp,
-        Err((status, msg)) => (
-            status,
-            [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
-            msg,
-        )
-            .into_response(),
-    }
-}
-
-// GET /api/v1/system/info -> Full telemetry via sysinfo / Telemetria completa via sysinfo
+// GET /api/v1/system/info -> Full telemetry via sysinfo
 async fn system_info_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
 ) -> Response {
-    if !state.wg_manager.is_ip_authorized(addr.ip()) {
+    if !state.network.is_ip_authorized(addr.ip()) {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({ "error": "Unauthorized peer IP / IP de peer não autorizado" })),

@@ -1,268 +1,182 @@
-// Userspace WireGuard (boringtun) + Headscale Coordinator / WireGuard em userspace (boringtun) + Coordenador Headscale
-// Strictly uses self-hosted Headscale on Mriya VPS (zero Tailscale Inc. servers) / Usa estritamente Headscale self-hosted na VPS Mriya (zero servidores da Tailscale Inc.)
+// PT: Gerenciador de Rede Desacoplado (Tailscale LocalAPI Opcional + Fallback IP Direto)
+// EN: Decoupled Network Manager (Optional Tailscale LocalAPI + Direct IP Fallback)
+// AI: @llm-context Sonda http://localhost:41112/localapi/v0/status; se ativo extrai 100.x.y.z e MagicDNS; caso contrário opera 100% via IP do zorya.toml
+// AI: @llm-invariant Zero dependência obrigatória do Tailscale; reconexão automática em background se o Tailscale iniciar depois do Zorya
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::Arc;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use boringtun::noise::{Tunn, TunnResult};
-use rand_core::OsRng;
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
-use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
-use x25519_dalek::{PublicKey, StaticSecret};
+use serde_json::Value;
+use tokio::sync::RwLock;
 
 use crate::config::NetworkConfig;
+use crate::systray::SystrayController;
 
-// Headscale node registration payload / Payload de registro de nó no Headscale
+pub const TAILSCALE_LOCALAPI_STATUS_URL: &str = "http://localhost:41112/localapi/v0/status";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HeadscaleRegisterRequest {
-    pub node_key: String,
-    pub hostname: String,
-    pub auth_key: String,
-    pub wireguard_pubkey: String,
-    pub listen_port: u16,
+pub struct NetworkStateSnapshot {
+    pub tailscale_active: bool,
+    pub tailscale_ip: Option<String>,
+    pub magic_dns_hostname: Option<String>,
+    pub preferred_bind_ip: String,
+    pub preferred_peer_endpoint: String,
+    pub mode: String, // "tailscale_mesh" ou "direct_ip"
 }
 
-// Headscale peer descriptor / Descritor de peer retornado pelo Headscale
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HeadscalePeerResponse {
-    pub peer_public_key: String,
-    pub endpoint: String,
-    pub assigned_ip: String,
+pub struct NetworkManager {
+    pub config: NetworkConfig,
+    pub state: RwLock<NetworkStateSnapshot>,
+    pub http_client: reqwest::Client,
+    pub systray: SystrayController,
 }
 
-// Manages boringtun WireGuard session and IP firewall / Gerencia sessão WireGuard boringtun e firewall de IP
-pub struct WireGuardManager {
-    config: NetworkConfig,
-    local_private_key: StaticSecret,
-    local_public_key: PublicKey,
-    tunnel: Arc<Mutex<Option<Box<Tunn>>>>,
-}
+impl NetworkManager {
+    pub async fn new(config: NetworkConfig, systray: SystrayController) -> Arc<Self> {
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(900))
+            .build()
+            .unwrap_or_default();
 
-impl WireGuardManager {
-    // Initialize keys and boringtun state / Inicializa chaves X25519 e estado do boringtun
-    pub fn new(config: NetworkConfig) -> anyhow::Result<Self> {
-        let local_private_key = StaticSecret::random_from_rng(OsRng);
-        let local_public_key = PublicKey::from(&local_private_key);
-
-        // Create initial peer public key from deterministic VPS seed until Headscale handshake completes / Cria chave pública inicial até concluir o handshake com o Headscale
-        let peer_seed = StaticSecret::from([0x42u8; 32]);
-        let peer_pub = PublicKey::from(&peer_seed);
-
-        let tunn = Tunn::new(
-            local_private_key.clone(),
-            peer_pub,
-            None,
-            Some(25),
-            0,
-            None,
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to initialize boringtun Tunn / Falha ao inicializar boringtun Tunn: {:?}", e))?;
-
-        Ok(Self {
+        let initial_snapshot = Self::probe_network_state(&http_client, &config).await;
+        let manager = Arc::new(Self {
             config,
-            local_private_key,
-            local_public_key,
-            tunnel: Arc::new(Mutex::new(Some(Box::new(tunn)))),
-        })
+            state: RwLock::new(initial_snapshot),
+            http_client,
+            systray,
+        });
+
+        manager.spawn_auto_reconnect_watchdog();
+        manager
     }
 
-    // Return Base64-encoded WireGuard public key / Retorna chave pública WireGuard codificada em Base64
-    pub fn public_key_base64(&self) -> String {
-        BASE64.encode(self.local_public_key.as_bytes())
+    // PT: Sonda a API local do Tailscale (localhost:41112) ou faz fallback imediato para o IP de zorya.toml
+    // EN: Probes local Tailscale API (localhost:41112) or immediately falls back to zorya.toml IP
+    pub async fn probe_network_state(
+        client: &reqwest::Client,
+        config: &NetworkConfig,
+    ) -> NetworkStateSnapshot {
+        if let Ok(resp) = client.get(TAILSCALE_LOCALAPI_STATUS_URL).send().await {
+            if resp.status().is_success() {
+                if let Ok(json_body) = resp.json::<Value>().await {
+                    let backend_state = json_body
+                        .get("BackendState")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+
+                    let ts_ip = json_body
+                        .get("TailscaleIPs")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| {
+                            arr.iter()
+                                .filter_map(|ip| ip.as_str())
+                                .find(|ip| ip.starts_with("100."))
+                        })
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            json_body
+                                .get("Self")
+                                .and_then(|s| s.get("TailscaleIPs"))
+                                .and_then(|v| v.as_array())
+                                .and_then(|arr| {
+                                    arr.iter()
+                                        .filter_map(|ip| ip.as_str())
+                                        .find(|ip| ip.starts_with("100."))
+                                })
+                                .map(|s| s.to_string())
+                        });
+
+                    let magic_dns = json_body
+                        .get("Self")
+                        .and_then(|s| s.get("DNSName"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim_end_matches('.').to_string());
+
+                    if backend_state == "Running" || ts_ip.is_some() {
+                        let mesh_ip = ts_ip.unwrap_or_else(|| "100.64.0.1".to_string());
+                        let peer_host = config
+                            .tailscale_peer_hostname
+                            .clone()
+                            .unwrap_or_else(|| config.allowed_ip.clone());
+                        return NetworkStateSnapshot {
+                            tailscale_active: true,
+                            tailscale_ip: Some(mesh_ip.clone()),
+                            magic_dns_hostname: magic_dns,
+                            preferred_bind_ip: mesh_ip,
+                            preferred_peer_endpoint: peer_host,
+                            mode: "tailscale_mesh".to_string(),
+                        };
+                    }
+                }
+            }
+        }
+
+        // Fallback 100% funcional sem Tailscale usando o IP de zorya.toml
+        let fallback_ip = config
+            .fallback_ip
+            .clone()
+            .unwrap_or_else(|| "0.0.0.0".to_string());
+        NetworkStateSnapshot {
+            tailscale_active: false,
+            tailscale_ip: None,
+            magic_dns_hostname: None,
+            preferred_bind_ip: fallback_ip,
+            preferred_peer_endpoint: config.allowed_ip.clone(),
+            mode: "direct_ip".to_string(),
+        }
     }
 
-    // Spawn background task for Headscale registration and UDP WireGuard keepalive / Inicia tarefa em background para registro no Headscale e keepalive UDP WireGuard
-    pub fn spawn_background_tunnel(self: &Arc<Self>) {
+    // PT: Monitora a cada 15s e reconecta automaticamente se o Tailscale for iniciado depois do Zorya
+    // EN: Monitors every 15s and automatically reconnects if Tailscale starts after Zorya
+    pub fn spawn_auto_reconnect_watchdog(self: &Arc<Self>) {
         let manager = Arc::clone(self);
         tokio::spawn(async move {
-            if let Err(err) = manager.run_tunnel_loop().await {
-                tracing::warn!(
-                    "WireGuard userspace loop warning / Aviso no loop WireGuard em userspace: {}",
-                    err
-                );
+            let mut interval = tokio::time::interval(Duration::from_secs(15));
+            loop {
+                interval.tick().await;
+                let next_state = Self::probe_network_state(&manager.http_client, &manager.config).await;
+                let mut current = manager.state.write().await;
+                if !current.tailscale_active && next_state.tailscale_active {
+                    tracing::info!(
+                        "Tailscale detectado dinamicamente! Alternando para malha {:?} ({:?})",
+                        next_state.tailscale_ip,
+                        next_state.magic_dns_hostname
+                    );
+                } else if current.tailscale_active && !next_state.tailscale_active {
+                    tracing::warn!(
+                        "Tailscale desconectado. Alternando sem interrupção para IP direto: {}",
+                        next_state.preferred_peer_endpoint
+                    );
+                }
+                *current = next_state;
             }
         });
     }
 
-    // Coordinate with Headscale and maintain boringtun UDP socket / Coordena com o Headscale e mantém socket UDP do boringtun
-    async fn run_tunnel_loop(&self) -> anyhow::Result<()> {
-        let wg_port = self.config.wireguard_port.unwrap_or(51820);
-        let bind_addr = format!("0.0.0.0:{}", wg_port);
-        let socket = match UdpSocket::bind(&bind_addr).await {
-            Ok(s) => s,
-            Err(_) => UdpSocket::bind("0.0.0.0:0").await?,
-        };
-
-        tracing::info!(
-            "boringtun userspace WireGuard bound on {:?} (pubkey: {}) / boringtun WireGuard em userspace ativo em {:?} (chave pública: {})",
-            socket.local_addr()?,
-            self.public_key_base64(),
-            socket.local_addr()?,
-            self.public_key_base64()
-        );
-
-        // Register node with self-hosted Headscale coordinator / Registra nó no coordenador Headscale self-hosted
-        self.register_with_headscale(wg_port).await;
-
-        let peer_endpoint: SocketAddr = format!("{}:51820", self.config.allowed_ip)
-            .parse()
-            .unwrap_or_else(|_| SocketAddr::from(([143, 95, 223, 218], 51820)));
-
-        let mut recv_buf = vec![0u8; 65535];
-        let mut dst_buf = vec![0u8; 65535];
-        let mut keepalive_interval = tokio::time::interval(std::time::Duration::from_secs(25));
-
-        loop {
-            tokio::select! {
-                _ = keepalive_interval.tick() => {
-                    let mut guard = self.tunnel.lock().await;
-                    if let Some(ref mut tunn) = *guard {
-                        match tunn.update_timers(&mut dst_buf) {
-                            TunnResult::WriteToNetwork(packet) => {
-                                let _ = socket.send_to(packet, peer_endpoint).await;
-                            }
-                            TunnResult::Err(e) => {
-                                tracing::debug!("boringtun timer update notice / Aviso de timer boringtun: {:?}", e);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                recv_res = socket.recv_from(&mut recv_buf) => {
-                    if let Ok((len, src_addr)) = recv_res {
-                        let mut guard = self.tunnel.lock().await;
-                        if let Some(ref mut tunn) = *guard {
-                            match tunn.decapsulate(Some(src_addr.ip()), &recv_buf[..len], &mut dst_buf) {
-                                TunnResult::WriteToNetwork(packet) => {
-                                    let _ = socket.send_to(packet, src_addr).await;
-                                }
-                                TunnResult::WriteToTunnelV4(packet, _) | TunnResult::WriteToTunnelV6(packet, _) => {
-                                    tracing::debug!(
-                                        "Decapsulated {} bytes from WireGuard peer {} / Decapsulados {} bytes do peer WireGuard {}",
-                                        packet.len(),
-                                        src_addr,
-                                        packet.len(),
-                                        src_addr
-                                    );
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    pub async fn status_snapshot(&self) -> NetworkStateSnapshot {
+        self.state.read().await.clone()
     }
 
-    // Perform HTTP registration against Headscale server on VPS / Executa registro HTTP contra o servidor Headscale na VPS
-    async fn register_with_headscale(&self, wg_port: u16) {
-        let url = format!(
-            "{}/api/v1/node/register",
-            self.config.headscale_url.trim_end_matches('/')
-        );
-        let payload = HeadscaleRegisterRequest {
-            node_key: self.public_key_base64(),
-            hostname: self.config.node_name.clone(),
-            auth_key: self.config.headscale_auth_key.clone(),
-            wireguard_pubkey: self.public_key_base64(),
-            listen_port: wg_port,
-        };
-
-        let client = match reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-        {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-
-        match client
-            .post(&url)
-            .bearer_auth(&self.config.headscale_auth_key)
-            .json(&payload)
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                if let Ok(peer) = resp.json::<HeadscalePeerResponse>().await {
-                    if let Ok(raw_key) = BASE64.decode(peer.peer_public_key.as_bytes()) {
-                        if let Ok(key_bytes) = <[u8; 32]>::try_from(raw_key.as_slice()) {
-                            let peer_pub = PublicKey::from(key_bytes);
-                            if let Ok(new_tunn) = Tunn::new(
-                                self.local_private_key.clone(),
-                                peer_pub,
-                                None,
-                                Some(25),
-                                1,
-                                None,
-                            ) {
-                                let mut guard = self.tunnel.lock().await;
-                                *guard = Some(Box::new(new_tunn));
-                                tracing::info!(
-                                    "Registered with Headscale ({}), assigned mesh IP {} / Registrado no Headscale ({}), IP mesh atribuído {}",
-                                    self.config.headscale_url,
-                                    peer.assigned_ip,
-                                    self.config.headscale_url,
-                                    peer.assigned_ip
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(resp) => {
-                tracing::info!(
-                    "Headscale endpoint {} responded HTTP {} (standing by for peer handshake) / Endpoint Headscale {} respondeu HTTP {} (aguardando handshake)",
-                    url,
-                    resp.status(),
-                    url,
-                    resp.status()
-                );
-            }
-            Err(e) => {
-                tracing::info!(
-                    "Headscale coordinator unreachable at {} ({}), operating in local + direct VPS mode / Coordenador Headscale inacessível em {} ({}), operando em modo local + VPS direto",
-                    url,
-                    e,
-                    url,
-                    e
-                );
-            }
-        }
-    }
-
-    // Validate whether incoming client IP is authorized (localhost, CGNAT 100.64.0.0/10 Headscale mesh, or allowed VPS IP) / Valida se o IP do cliente é autorizado (localhost, malha Headscale 100.64.0.0/10 ou IP da VPS permitido)
     pub fn is_ip_authorized(&self, ip: IpAddr) -> bool {
-        let canonical = match ip {
-            IpAddr::V6(v6) => v6
-                .to_ipv4_mapped()
-                .map(IpAddr::V4)
-                .unwrap_or(IpAddr::V6(v6)),
-            other => other,
-        };
-
-        if canonical.is_loopback() {
+        if ip.is_loopback() {
             return true;
         }
-
-        if let Ok(allowed_vps) = self.config.allowed_ip.parse::<IpAddr>() {
-            if canonical == allowed_vps {
+        if let Ok(allowed) = self.config.allowed_ip.parse::<IpAddr>() {
+            if ip == allowed {
                 return true;
             }
         }
-
-        if let IpAddr::V4(v4) = canonical {
-            let octets = v4.octets();
-            // Allow Headscale WireGuard mesh CGNAT range 100.64.0.0/10 and private LAN / Permite faixa CGNAT 100.64.0.0/10 do Headscale e LAN local
-            if octets[0] == 100 && (64..=127).contains(&octets[1]) {
-                return true;
+        match ip {
+            IpAddr::V4(v4) => {
+                let octets = v4.octets();
+                // Permite CGNAT Tailscale (100.64.0.0/10) e LAN privada (192.168.x.x / 10.x.x.x / 172.16-31.x.x)
+                let is_tailscale = octets[0] == 100 && (octets[1] & 0b1100_0000) == 64;
+                let is_private_lan = v4.is_private();
+                is_tailscale || is_private_lan
             }
-            if octets[0] == 127 || octets[0] == 10 || (octets[0] == 192 && octets[1] == 168) {
-                return true;
-            }
+            IpAddr::V6(_) => false,
         }
-
-        false
     }
 }
