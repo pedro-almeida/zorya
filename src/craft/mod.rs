@@ -375,6 +375,11 @@ pub fn render_vector_diagram_svg(spec: &VectorDiagramSpec) -> anyhow::Result<Str
     Ok(svg)
 }
 
+/// Alias para renderização de diagrama vetorial SVG pelo VectorCraft
+pub fn render_svg_diagram(spec: &VectorDiagramSpec) -> anyhow::Result<String> {
+    render_vector_diagram_svg(spec)
+}
+
 fn escape_xml(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {

@@ -7,10 +7,10 @@ Wants=tailscaled.service
 Type=simple
 User=%I
 WorkingDirectory=/opt/zorya
-ExecStart=/usr/bin/python3 /opt/zorya/zorya_node.py
+ExecStart=/opt/zorya/target/release/zorya
 Restart=always
 RestartSec=5s
-Environment=PYTHONUNBUFFERED=1
+Environment=RUST_LOG=info
 
 # Hardening basico
 NoNewPrivileges=true

@@ -155,8 +155,8 @@ pub struct NetworkConfig {
 
 fn default_headscale_url() -> String { "https://headscale.espectroipe.com.br".to_string() }
 fn default_hs_auth() -> String { "hskey-default".to_string() }
-fn default_node_name() -> String { "usina-zorya".to_string() }
-fn default_allowed_ip() -> String { "143.95.223.218".to_string() }
+fn default_node_name() -> String { "Usina-Zorya-Nitro".to_string() }
+fn default_allowed_ip() -> String { "0.0.0.0/0".to_string() }
 fn default_ts_api() -> String { "http://127.0.0.1:41112/localapi/v0/status".to_string() }
 fn default_30() -> u64 { 30 }
 
@@ -169,12 +169,12 @@ impl Default for NetworkConfig {
             allowed_ip: default_allowed_ip(),
             listen_port: Some(8085),
             wireguard_port: Some(51820),
-            tailscale_peer_hostname: None,
-            fallback_ip: Some("143.95.223.218".to_string()),
+            tailscale_peer_hostname: Some("100.106.120.35".to_string()),
+            fallback_ip: Some("0.0.0.0".to_string()),
             prefer_tailscale: true,
             tailscale_local_api: default_ts_api(),
             fallback_vps_ip: Some("72.60.144.210".to_string()),
-            fallback_nitro_ip: Some("192.168.1.150".to_string()),
+            fallback_nitro_ip: Some("100.106.120.35".to_string()),
             reconnect_interval_secs: 30,
         }
     }
@@ -220,6 +220,7 @@ fn default_craft_modules() -> Vec<String> {
         "photocraft".to_string(),
         "vectorcraft".to_string(),
         "soundcraft".to_string(),
+        "pdfcraft".to_string(),
     ]
 }
 

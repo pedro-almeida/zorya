@@ -7,15 +7,20 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
 pub enum SystrayState {
+    /// Cinza: Offline / Desconectado.
+    Offline = 0,
     /// Verde: Pronto, modelo aquecido e cluster saudável.
-    Idle,
-    /// Azul: Executando inferência local GGUF ou DSP ArtCraft.
-    InferenceActive,
+    Idle = 1,
+    /// Azul ("IA Ativa"): Executando inferência local GGUF ou DSP ArtCraft.
+    InferenceActive = 2,
+    /// Ciano ("Rede"): Sincronizando malha de rede / cluster / tráfego Tailscale.
+    NetworkActive = 3,
     /// Âmbar: Operando em fallback (par do cluster offline ou usando API externa).
-    DegradedFallback,
+    DegradedFallback = 4,
     /// Vermelho: Alerta crítico (todas as chaves de API esgotadas ou erro de VRAM).
-    ExhaustedError,
+    ExhaustedError = 5,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,7 +71,7 @@ impl SystrayController {
     }
 
     pub fn begin_network_work(&self) -> SystrayGuard {
-        self.transition(SystrayState::InferenceActive, "Sincronizando malha de rede / cluster");
+        self.transition(SystrayState::NetworkActive, "Sincronizando malha de rede / cluster");
         SystrayGuard {
             controller: self.clone(),
             restore_state: SystrayState::Idle,

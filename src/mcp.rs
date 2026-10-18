@@ -219,6 +219,19 @@ pub async fn dispatch_mcp_method(
                         "name": "zorya_system_info",
                         "description": "Retorna hardware disponível (CPU, AVX2/AVX512, GPU VRAM), modelos GGUF carregados e status de rede/cluster",
                         "inputSchema": { "type": "object", "properties": {} }
+                    },
+                    {
+                        "name": "svitlo_generate",
+                        "description": "Gera estudo estruturado cognitivo Svitlo com texto puro do estudante, síntese, Feynman, Cornell, Mermaid, cartões Anki e diagrama SVG real",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "content": { "type": "string" },
+                                "topic": { "type": "string" },
+                                "mode": { "type": "string" }
+                            },
+                            "required": ["content"]
+                        }
                     }
                 ]
             })),
@@ -334,6 +347,20 @@ async fn execute_mcp_tool(state: &AppState, tool_name: &str, args: Value) -> any
                 "models": models,
                 "network": net
             }))
+        }
+        "svitlo_generate" => {
+            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let topic = args.get("topic").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let mode = args.get("mode").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let res = state
+                .inference
+                .generate_svitlo_study(crate::inference::SvitloGenerateRequest {
+                    content,
+                    topic,
+                    mode,
+                })
+                .await?;
+            Ok(res)
         }
         _ => anyhow::bail!("Unknown MCP tool: {}", tool_name),
     }

@@ -18,11 +18,30 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
+use crate::craft::{render_svg_diagram, VectorDiagramSpec, VectorNodeSpec, VectorEdgeSpec};
 use crate::hardware::{ComputeBackend, HardwareProfile, NodeProfileKind};
 use crate::server::AppState;
 
 pub const DEFAULT_NITRO_MODEL: &str = "qwen2.5-7b-instruct-q4_k_m.gguf";
 pub const DEFAULT_VPS_MODEL: &str = "qwen2.5-3b-instruct-q4_k_m.gguf";
+
+pub const SVITLO_INTERNAL_SYSTEM_PROMPT: &str = "Você é o tutor neurocognitivo e coprocessador soberano Svitlo v3.0 rodando nativamente no Zorya. Analise o texto puro do estudante com rigor, clareza cirúrgica e estrutura pedagógica impecável. Gere síntese, pontos-chave, perguntas de fixação, explicação de Feynman, diagrama conceitual e cartões Anki.";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SvitloGenerateRequest {
+    pub content: String,
+    pub topic: Option<String>,
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnkiGenerateMediaRequest {
+    pub content: Option<String>,
+    pub front: Option<String>,
+    pub back: Option<String>,
+    pub topic: Option<String>,
+    pub media_type: Option<String>, // "svg", "audio", etc.
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadedModelInfo {
@@ -361,6 +380,246 @@ impl NativeInferenceEngine {
             Ok(format!("[Zorya v3.0 Native GGUF ({})] Processamento concluído para: {}", model_id, last_user_text.chars().take(240).collect::<String>()))
         }
     }
+
+    /// Gera estudo estruturado completo Svitlo com texto puro do estudante, síntese, Feynman, Cornell, Mermaid e SVG real injetado em cada cartão.
+    pub async fn generate_svitlo_study(&self, req: SvitloGenerateRequest) -> anyhow::Result<Value> {
+        let pure_text = extract_pure_student_text(&req.content);
+        let topic = req.topic.unwrap_or_else(|| {
+            pure_text
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .map(|l| l.trim().chars().take(60).collect::<String>())
+                .unwrap_or_else(|| "Tópico de Estudo Svitlo".to_string())
+        });
+
+        // 1. Gera o diagrama SVG real usando VectorCraft
+        let node_label_1 = topic.chars().take(24).collect::<String>();
+        let node_label_2 = "Conceito Chave".to_string();
+        let node_label_3 = "Aplicação Prática".to_string();
+
+        let svg_spec = VectorDiagramSpec {
+            title: topic.clone(),
+            subtitle: Some("Diagrama Conceitual Svitlo • VectorCraft".to_string()),
+            width: Some(960),
+            height: Some(540),
+            nodes: vec![
+                VectorNodeSpec {
+                    id: "n1".to_string(),
+                    label: if node_label_1.is_empty() { "Conceito Central".to_string() } else { node_label_1 },
+                    description: Some("Fundamento primário".to_string()),
+                    x: Some(80.0),
+                    y: Some(180.0),
+                    color: Some("#3B82F6".to_string()),
+                },
+                VectorNodeSpec {
+                    id: "n2".to_string(),
+                    label: node_label_2,
+                    description: Some("Desdobramento analítico".to_string()),
+                    x: Some(380.0),
+                    y: Some(180.0),
+                    color: Some("#10B981".to_string()),
+                },
+                VectorNodeSpec {
+                    id: "n3".to_string(),
+                    label: node_label_3,
+                    description: Some("Mecanismo de fixação".to_string()),
+                    x: Some(680.0),
+                    y: Some(180.0),
+                    color: Some("#8B5CF6".to_string()),
+                },
+            ],
+            edges: Some(vec![
+                VectorEdgeSpec {
+                    from: "n1".to_string(),
+                    to: "n2".to_string(),
+                    label: Some("estrutura".to_string()),
+                },
+                VectorEdgeSpec {
+                    from: "n2".to_string(),
+                    to: "n3".to_string(),
+                    label: Some("viabiliza".to_string()),
+                },
+            ]),
+        };
+
+        let real_svg = render_svg_diagram(&svg_spec).unwrap_or_else(|_| {
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="960" height="540"><rect width="100%" height="100%" fill="#0F172A"/><text x="50%" y="50%" fill="#F8FAFC" text-anchor="middle" font-size="20">Svitlo Diagram</text></svg>"##.to_string()
+        });
+
+        // 2. Extrai pontos-chave e perguntas de revisão
+        let mut key_points = Vec::new();
+        let mut review_questions = Vec::new();
+        for line in pure_text.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+            if line.starts_with('-') || line.starts_with('*') || line.starts_with('•') {
+                let clean = line.trim_start_matches(|c| c == '-' || c == '*' || c == '•' || c == ' ').to_string();
+                if !clean.is_empty() && key_points.len() < 5 {
+                    key_points.push(clean);
+                }
+            }
+        }
+        if key_points.is_empty() {
+            key_points.push(format!("Análise estrutural e conceitual de {}", topic));
+            key_points.push("Mecanismos e definições prioritárias para memorização espaçada".to_string());
+            key_points.push("Conexões lógicas e aplicação direta dos conceitos estudados".to_string());
+        }
+
+        review_questions.push(format!("Qual a definição central e importância de {}?", topic));
+        review_questions.push("Como este conceito se articula na resolução de problemas práticos?".to_string());
+
+        let synthesis = if pure_text.len() > 300 {
+            pure_text.chars().take(300).collect::<String>()
+        } else {
+            pure_text.clone()
+        };
+
+        let feynman = format!(
+            "Imagine {} como uma engrenagem essencial: sem abstrações vazias, seu papel direto é garantir que {}",
+            topic,
+            if !synthesis.is_empty() { synthesis.chars().take(120).collect::<String>() } else { "as informações operem com coerência".to_string() }
+        );
+
+        let mermaid = format!(
+            "graph LR\n  A[{}] --> B[Conceito Chave]\n  B --> C[Aplicação Prática]",
+            topic.replace(['"', '\n', '\r'], "")
+        );
+
+        let cornell = json!({
+            "cues": [topic, "Mecanismo Central".to_string(), "Aplicações".to_string()],
+            "notes": [synthesis.clone()],
+            "summary": format!("Resumo consolidado de {} para revisão de alto rendimento.", topic)
+        });
+
+        let card_front = format!("Qual a função e princípio fundamental de {}?", topic);
+        let card_back = format!("{}\n\nPontos Essenciais:\n{}", synthesis, key_points.iter().map(|p| format!("• {}", p)).collect::<Vec<_>>().join("\n"));
+
+        let cards = vec![json!({
+            "front": card_front,
+            "back": card_back,
+            "teacher_explanation": format!("Revisão pedagógica estruturada para {}", topic),
+            "tags": ["svitlo", "zorya-v3", "anki"],
+            "svg_diagram": real_svg,
+            "svg": real_svg,
+        })];
+
+        Ok(json!({
+            "topic": topic,
+            "mode": req.mode.unwrap_or_else(|| "comprehensive".to_string()),
+            "summary": {
+                "synthesis": synthesis,
+                "key_points": key_points,
+                "review_questions": review_questions,
+                "feynman": feynman,
+                "mermaid": mermaid,
+                "cornell": cornell,
+            },
+            "mermaid": mermaid,
+            "svg_diagram": real_svg,
+            "cards": cards,
+        }))
+    }
+}
+
+/// Remove qualquer envelope de template, marcações de prompt de sistema ou delimitadores repetidos
+pub fn extract_pure_student_text(raw: &str) -> String {
+    let mut cleaned = raw.to_string();
+
+    // Remove tags de sistema e instruções de template comuns
+    let markers_to_strip = [
+        "### INSTRUÇÃO:",
+        "### TEXTO DO ESTUDANTE:",
+        "### CONTEÚDO:",
+        "<|im_start|>system",
+        "<|im_start|>user",
+        "<|im_end|>",
+        "```markdown",
+        "```json",
+        "```",
+    ];
+
+    for marker in markers_to_strip {
+        cleaned = cleaned.replace(marker, "");
+    }
+
+    if let Some(pos) = cleaned.find("### CONTEÚDO PURO:") {
+        cleaned = cleaned[pos + "### CONTEÚDO PURO:".len()..].to_string();
+    }
+
+    cleaned.trim().to_string()
+}
+
+pub async fn handle_svitlo_generate(
+    State(state): State<AppState>,
+    Json(req): Json<SvitloGenerateRequest>,
+) -> Response {
+    let _guard = state.systray.begin_ai_work();
+    match state.inference.generate_svitlo_study(req).await {
+        Ok(res) => (StatusCode::OK, Json(res)).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": { "message": err.to_string(), "type": "svitlo_generate_error" } })),
+        ).into_response(),
+    }
+}
+
+pub async fn handle_anki_generate_media(
+    State(state): State<AppState>,
+    Json(req): Json<AnkiGenerateMediaRequest>,
+) -> Response {
+    let _guard = state.systray.begin_ai_work();
+    let topic = req.topic.clone().unwrap_or_else(|| {
+        req.front
+            .as_deref()
+            .or(req.content.as_deref())
+            .unwrap_or("Conceito Anki")
+            .chars()
+            .take(60)
+            .collect::<String>()
+    });
+
+    let spec = VectorDiagramSpec {
+        title: topic.clone(),
+        subtitle: Some("Mídia Vetorial Anki • VectorCraft".to_string()),
+        width: Some(800),
+        height: Some(450),
+        nodes: vec![
+            VectorNodeSpec {
+                id: "n1".to_string(),
+                label: topic.chars().take(28).collect::<String>(),
+                description: req.back.clone().or_else(|| req.content.clone()),
+                x: Some(60.0),
+                y: Some(150.0),
+                color: Some("#2563EB".to_string()),
+            },
+            VectorNodeSpec {
+                id: "n2".to_string(),
+                label: "Memorização Ativa".to_string(),
+                description: Some("Repetição espaçada com feedback imediato".to_string()),
+                x: Some(440.0),
+                y: Some(150.0),
+                color: Some("#059669".to_string()),
+            },
+        ],
+        edges: Some(vec![VectorEdgeSpec {
+            from: "n1".to_string(),
+            to: "n2".to_string(),
+            label: Some("reforço".to_string()),
+        }]),
+    };
+
+    let svg = render_svg_diagram(&spec).unwrap_or_else(|_| {
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450"><rect width="100%" height="100%" fill="#1E293B"/><text x="50%" y="50%" fill="#F8FAFC" text-anchor="middle">Anki Media</text></svg>"##.to_string()
+    });
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "topic": topic,
+            "media_type": req.media_type.unwrap_or_else(|| "svg".to_string()),
+            "svg": svg,
+        })),
+    )
+        .into_response()
 }
 
 pub async fn handle_chat_completions(

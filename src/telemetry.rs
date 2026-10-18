@@ -45,6 +45,7 @@ pub struct TelemetryCollector {
     sys: System,
     node_name: String,
     default_vram_mb: u64,
+    gpu_name: Option<String>,
 }
 
 impl TelemetryCollector {
@@ -56,7 +57,14 @@ impl TelemetryCollector {
             sys,
             node_name,
             default_vram_mb,
+            gpu_name: None,
         }
+    }
+
+    pub fn with_hw_profile(mut self, gpu_name: Option<String>, vram_mb: u64) -> Self {
+        self.gpu_name = gpu_name;
+        self.default_vram_mb = vram_mb;
+        self
     }
 
     // Collect compact metrics for GET /health / Coleta métricas compactas para GET /health
@@ -66,7 +74,7 @@ impl TelemetryCollector {
 
         let cpu_usage = (self.sys.global_cpu_usage() * 10.0).round() / 10.0;
         let ram_mb = self.sys.total_memory() / (1024 * 1024);
-        let (_, vram_total_mb, _) = Self::probe_nvidia_vram(self.default_vram_mb);
+        let (_, vram_total_mb, _) = Self::probe_nvidia_vram(self.default_vram_mb, self.gpu_name.as_deref());
 
         HealthResponse {
             status: "ok".to_string(),
@@ -101,7 +109,7 @@ impl TelemetryCollector {
             .map(|c| c.brand().to_string())
             .unwrap_or_else(|| "x86_64 Processor".to_string());
 
-        let (gpu_model, vram_total_mb, vram_free_mb) = Self::probe_nvidia_vram(self.default_vram_mb);
+        let (gpu_model, vram_total_mb, vram_free_mb) = Self::probe_nvidia_vram(self.default_vram_mb, self.gpu_name.as_deref());
 
         DetailedSystemInfo {
             status: "ok".to_string(),
@@ -126,8 +134,8 @@ impl TelemetryCollector {
         }
     }
 
-    // Query nvidia-smi without console window or fall back to GTX 1650 4096 MB profile / Consulta nvidia-smi sem abrir janela ou usa o perfil padrão GTX 1650 4096 MB
-    fn probe_nvidia_vram(default_vram_mb: u64) -> (String, u64, u64) {
+    // Query nvidia-smi without console window or fall back to hw_profile or CPU-Only
+    pub fn probe_nvidia_vram(default_vram_mb: u64, profile_gpu_name: Option<&str>) -> (String, u64, u64) {
         let mut cmd = Command::new("nvidia-smi");
         cmd.args([
             "--query-gpu=name,memory.total,memory.free",
@@ -156,10 +164,16 @@ impl TelemetryCollector {
             }
         }
 
+        if let Some(name) = profile_gpu_name {
+            if !name.trim().is_empty() && default_vram_mb > 0 {
+                return (name.to_string(), default_vram_mb, default_vram_mb);
+            }
+        }
+
         (
-            "NVIDIA GeForce GTX 1650 (4GB Dedicated VRAM)".to_string(),
-            default_vram_mb,
-            default_vram_mb,
+            "CPU-Only (No Dedicated GPU Detected)".to_string(),
+            0,
+            0,
         )
     }
 }

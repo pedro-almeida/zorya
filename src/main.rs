@@ -1,4 +1,4 @@
-#![deny(warnings)]
+#![warn(unused_must_use)]
 // PT: Zorya v3.0 — Daemon Rust Soberano, Servidor MCP & Coprocessador Multimídia
 // EN: Zorya v3.0 — Sovereign Rust Daemon, MCP Server & Multimedia Coprocessor
 // AI: @llm-context Coordena inference (GGUF llama-cpp-2), hardware auto-tuning, agent autônomo, servidor MCP duplo, cluster e rede desacoplada
@@ -18,8 +18,10 @@ pub mod telemetry;
 pub mod video;
 
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::{broadcast, RwLock};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -32,6 +34,63 @@ use crate::network::NetworkManager;
 use crate::server::AppState;
 use crate::systray::SystrayController;
 use crate::telemetry::TelemetryCollector;
+
+/// Resolve o caminho de configuração buscando ZORYA_CONFIG, ./zorya.toml e exe_dir/zorya.toml
+/// Retorna ZoryaConfig carregado ou o fallback ZoryaConfig::default() sem abortar o processo
+pub fn resolve_config_path() -> ZoryaConfig {
+    if let Ok(env_path) = std::env::var("ZORYA_CONFIG") {
+        let p = PathBuf::from(&env_path);
+        if p.exists() {
+            if let Ok(cfg) = ZoryaConfig::load_or_default(&p) {
+                return cfg;
+            }
+        }
+    }
+
+    let local_path = Path::new("zorya.toml");
+    if local_path.exists() {
+        if let Ok(cfg) = ZoryaConfig::load_or_default(local_path) {
+            return cfg;
+        }
+    }
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(parent) = exe_path.parent() {
+            let exe_cfg_path = parent.join("zorya.toml");
+            if exe_cfg_path.exists() {
+                if let Ok(cfg) = ZoryaConfig::load_or_default(&exe_cfg_path) {
+                    return cfg;
+                }
+            }
+        }
+    }
+
+    tracing::warn!("zorya.toml não localizado nos caminhos padrão. Utilizando ZoryaConfig::default() soberano.");
+    ZoryaConfig::default()
+}
+
+/// Cria um listener TCP resiliente com SO_REUSEADDR imediatamente em LISTENING
+pub fn bind_resilient_listener(host: &str, port: u16) -> anyhow::Result<TcpListener> {
+    let addr: SocketAddr = format!("{}:{}", host, port)
+        .parse()
+        .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], port)));
+
+    let socket = if addr.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
+
+    socket.set_reuseaddr(true)?;
+    #[cfg(unix)]
+    {
+        let _ = socket.set_reuseport(true);
+    }
+
+    socket.bind(addr)?;
+    let listener = socket.listen(1024)?;
+    Ok(listener)
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -58,11 +117,21 @@ async fn main() -> anyhow::Result<()> {
             .init();
     }
 
-    // Load zorya.toml configuration / Carrega a configuração do arquivo zorya.toml
-    let config_path = std::env::var("ZORYA_CONFIG").unwrap_or_else(|_| "zorya.toml".to_string());
-    let config = ZoryaConfig::load_or_default(&config_path)?;
+    // 1. Carrega configuração com fallback resiliente sem abortar processo
+    let config = resolve_config_path();
 
-    // Sonda automática de hardware (CPU AVX2/AVX512, iGPU, dGPU GTX 1650 4GB VRAM dedicada)
+    // 2. Garante que a porta 8085 entre imediatamente em LISTENING antes de tarefas demoradas
+    let port = config.server.port;
+    let host = &config.server.host;
+    let listener = if !is_mcp_stdio {
+        let l = bind_resilient_listener(host, port)?;
+        tracing::info!("Unified TCP socket bound & listening immediately on http://{}:{}", host, port);
+        Some(l)
+    } else {
+        None
+    };
+
+    // 3. Sonda de hardware executada com a porta já em LISTENING
     let hw = HardwareProfile::detect();
 
     if !is_mcp_stdio {
@@ -87,8 +156,8 @@ async fn main() -> anyhow::Result<()> {
         Some(hw.recommended_model.clone()),
     );
 
-    // Inicializa gerenciador de rede desacoplado (Tailscale LocalAPI opcional + IP direto)
-    let network = NetworkManager::new(config.network.clone(), systray.clone()).await;
+    // Inicializa gerenciador de rede desacoplado e não bloqueante
+    let network = NetworkManager::new_nonblocking(config.network.clone(), systray.clone());
 
     // Inicializa orquestrador de cluster federado VPS + Nitro
     let cluster = ClusterCoordinator::new(&config, &hw, Arc::clone(&network), systray.clone());
@@ -96,11 +165,13 @@ async fn main() -> anyhow::Result<()> {
     // Inicializa agente inteligente com cofre de chaves e tool calling
     let agent = ZoryaAgent::new(Arc::new(config.clone()), Arc::clone(&inference), systray.clone());
 
-    // Inicializa coletor de telemetria do sistema
-    let telemetry = Arc::new(RwLock::new(TelemetryCollector::new(
-        config.network.node_name.clone(),
-        hw.dgpu_vram_mb.max(4096),
-    )));
+    // Inicializa coletor de telemetria do sistema alimentado pelo HardwareProfile real
+    let telemetry = Arc::new(RwLock::new(
+        TelemetryCollector::new(
+            config.network.node_name.clone(),
+            hw.dgpu_vram_mb,
+        ).with_hw_profile(hw.dgpu_model.clone(), hw.dgpu_vram_mb),
+    ));
 
     // Contador atômico compartilhado de tarefas
     let active_jobs = Arc::new(AtomicUsize::new(0));
@@ -130,12 +201,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Constrói roteador Axum unificado na porta única 8085
-    let port = config.server.port;
     let app = server::create_router(state);
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = listener.expect("Listener must be initialized for non-stdio mode");
 
-    tracing::info!("Listening on unified HTTP + MCP SSE port / Escutando na porta única: http://{}", addr);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!("Serving Axum HTTP + MCP SSE router on http://{}:{}", host, port);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

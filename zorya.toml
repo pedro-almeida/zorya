@@ -24,11 +24,15 @@ vps_ctx_size = 2048
 batch_size = 512
 
 [network]
+node_name = "Usina-Zorya-Nitro"
+allowed_ip = "0.0.0.0/0"
+listen_port = 8085
+tailscale_peer_hostname = "100.106.120.35"
 # Zero dependência obrigatória de Tailscale: usa localapi se ativo, senão usa IP direto
 prefer_tailscale = true
 tailscale_local_api = "http://127.0.0.1:41112/localapi/v0/status"
 fallback_vps_ip = "72.60.144.210"
-fallback_nitro_ip = "192.168.1.150"
+fallback_nitro_ip = "100.106.120.35"
 reconnect_interval_secs = 30
 
 [cluster]
@@ -45,7 +49,8 @@ groq_fast_model = "openai/gpt-oss-20b"
 groq_multilingual_model = "qwen/qwen3.8-27b"
 groq_whisper_model = "whisper-large-v3"
 
-[artcraft]
+[craft]
+enabled = ["lightcraft", "photocraft", "vectorcraft", "soundcraft", "pdfcraft"]
 denoise_default_method = "bilateral" # "bilateral", "wiener", "unsharp" - ZERO IA
 audio_target_lufs = -14.0
 audio_max_true_peak_db = -1.0

@@ -15,4 +15,6 @@ uploads/
 thumbnails/
 .jedi_credentials_cache.json
 .jedi_models_cache.json
+credentials.json
+*credentials*.json
 __pycache__/

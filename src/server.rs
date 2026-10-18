@@ -25,8 +25,8 @@ use crate::craft::{
     VectorDiagramSpec,
 };
 use crate::inference::{
-    handle_chat_completions, handle_list_models, handle_load_model, handle_unload_model,
-    NativeInferenceEngine,
+    handle_anki_generate_media, handle_chat_completions, handle_list_models, handle_load_model,
+    handle_svitlo_generate, handle_unload_model, NativeInferenceEngine,
 };
 use crate::mcp::{mcp_jsonrpc_handler, mcp_sse_handler};
 use crate::network::NetworkManager;
@@ -101,6 +101,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/v1/models", get(handle_list_models))
         .route("/v1/models/load", post(handle_load_model))
         .route("/v1/models/unload", post(handle_unload_model))
+        // Svitlo & Anki Cognitive Study Pipeline
+        .route("/api/v1/svitlo/generate", post(handle_svitlo_generate))
+        .route("/api/v1/anki/generate-media", post(handle_anki_generate_media))
         // ZORYA-003: Agente Interno de IA com Tool Calling
         .route("/api/v1/agent/execute", post(handle_agent_execute))
         // ZORYA-006: Cluster Federado VPS + Nitro

@@ -34,13 +34,29 @@ pub struct NetworkManager {
 }
 
 impl NetworkManager {
-    pub async fn new(config: NetworkConfig, systray: SystrayController) -> Arc<Self> {
+    /// Inicializa o gerenciador de rede de modo 100% não bloqueante (One-Shot / Instantâneo).
+    /// O estado inicial é configurado como Loopback sem aguardar chamada HTTP da API do Tailscale,
+    /// deixando qualquer sonda de conectividade exclusivamente para a tarefa de background.
+    pub fn new_nonblocking(config: NetworkConfig, systray: SystrayController) -> Arc<Self> {
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_millis(900))
             .build()
             .unwrap_or_default();
 
-        let initial_snapshot = Self::probe_network_state(&http_client, &config).await;
+        let fallback_ip = config
+            .fallback_ip
+            .clone()
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+
+        let initial_snapshot = NetworkStateSnapshot {
+            tailscale_active: false,
+            tailscale_ip: None,
+            magic_dns_hostname: None,
+            preferred_bind_ip: fallback_ip,
+            preferred_peer_endpoint: config.allowed_ip.clone(),
+            mode: "loopback".to_string(),
+        };
+
         let manager = Arc::new(Self {
             config,
             state: RwLock::new(initial_snapshot),
@@ -48,8 +64,16 @@ impl NetworkManager {
             systray,
         });
 
-        manager.spawn_auto_reconnect_watchdog();
+        manager.spawn_health_check_loop();
         manager
+    }
+
+    pub fn spawn_health_check_loop(self: &Arc<Self>) {
+        self.spawn_auto_reconnect_watchdog();
+    }
+
+    pub async fn new(config: NetworkConfig, systray: SystrayController) -> Arc<Self> {
+        Self::new_nonblocking(config, systray)
     }
 
     // PT: Sonda a API local do Tailscale (localhost:41112) ou faz fallback imediato para o IP de zorya.toml
