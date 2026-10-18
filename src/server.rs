@@ -24,9 +24,10 @@ use crate::craft::{
     decode_raw_with_lightcraft, master_audio_ebu_r128, render_vector_diagram_svg, RawOutputFormat,
     VectorDiagramSpec,
 };
-use crate::inference::{
+pub use crate::inference::{
     handle_anki_generate_media, handle_chat_completions, handle_list_models, handle_load_model,
-    handle_svitlo_generate, handle_unload_model, NativeInferenceEngine,
+    handle_svitlo_generate, handle_unload_model, AnkiGenerateMediaRequest, AnkiMediaRequest,
+    NativeInferenceEngine, SvitloGenerateRequest,
 };
 use crate::mcp::{mcp_jsonrpc_handler, mcp_sse_handler};
 use crate::network::NetworkManager;
@@ -91,6 +92,10 @@ pub fn create_router(state: AppState) -> Router {
         .expose_headers([header::HeaderName::from_static("access-control-allow-private-network")]);
 
     Router::new()
+        // Settings Dashboard & Web UI
+        .route("/", get(handle_settings_dashboard))
+        .route("/settings", get(handle_settings_dashboard))
+        .route("/api/v1/config/save", post(handle_save_config))
         // Health & System Info (Compatibilidade Frontend Svitlo & Private Network Access)
         .route("/health", get(health_handler))
         .route("/api/status", get(health_handler))
@@ -360,3 +365,231 @@ async fn audio_master_handler(
             .into_response(),
     }
 }
+
+// Handler do Painel de Configurações Web HTML/CSS embutido
+pub async fn handle_settings_dashboard(State(state): State<AppState>) -> impl IntoResponse {
+    let cfg = &state.config;
+    let telem = {
+        let mut t = state.telemetry.write().await;
+        t.collect_detailed()
+    };
+    let net_snap = state.network.status_snapshot().await;
+
+    let ts_ip_str = net_snap
+        .tailscale_ip
+        .clone()
+        .or_else(|| cfg.network.tailscale_peer_hostname.clone())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+
+    let html = format!(r#"<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"><title>Usina Zorya v3.0 — Painel de Controle</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {{ --bg: #12100E; --surface: #1E1A16; --border: #3D3226; --gold: #C9A84C; --text: #FAF7F2; --muted: #A89887; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 24px; }}
+  .container {{ max-width: 900px; margin: 0 auto; }}
+  .header {{ display: flex; align-items: center; justify-content: space-between; border-bottom: 2px solid var(--gold); padding-bottom: 16px; margin-bottom: 24px; }}
+  .title {{ font-size: 22px; font-weight: bold; color: var(--gold); }}
+  .card {{ background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; }}
+  .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
+  label {{ display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }}
+  input, select {{ width: 100%; box-sizing: border-box; background: #0E0C0A; border: 1px solid var(--border); color: #fff; padding: 10px; border-radius: 6px; font-size: 14px; }}
+  .btn {{ background: var(--gold); color: #12100E; border: none; padding: 12px 24px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 14px; }}
+  .btn:hover {{ background: #E5C365; }}
+  .status-badge {{ background: #1B382B; color: #4ADE80; padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: bold; }}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div>
+      <div class="title">⚡ USINA ZORYA v3.0</div>
+      <div style="font-size: 12px; color: var(--muted); margin-top: 4px;">Daemon de Coprocessamento Neural Soberano • Porta {port}</div>
+    </div>
+    <div><span class="status-badge">● ONLINE (Tailscale: {ts_ip})</span></div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0; color:var(--gold); font-size:16px;">Telemetria de Hardware</h3>
+    <div class="grid">
+      <div><strong>GPU:</strong> {gpu_name}</div>
+      <div><strong>VRAM:</strong> {vram_used} MB / {vram_total} MB</div>
+      <div><strong>CPU:</strong> {cpu_brand}</div>
+      <div><strong>RAM:</strong> {ram_used} MB / {ram_total} MB</div>
+    </div>
+  </div>
+
+  <form id="configForm" onsubmit="saveConfig(event)">
+    <div class="card">
+      <h3 style="margin-top:0; color:var(--gold); font-size:16px;">Modelos GGUF & Inferência</h3>
+      <div class="grid">
+        <div>
+          <label>Modelo Rápido (Fast)</label>
+          <input name="fast_model" value="{fast_model}">
+        </div>
+        <div>
+          <label>Modelo Profundo (Deep)</label>
+          <input name="deep_model" value="{deep_model}">
+        </div>
+        <div>
+          <label>Camadas na GPU (GPU Layers)</label>
+          <input type="number" name="gpu_layers" value="{gpu_layers}">
+        </div>
+        <div>
+          <label>Contexto (Tokens)</label>
+          <input type="number" name="context_size" value="{ctx_size}">
+        </div>
+        <div>
+          <label>Máximo de Tokens de Saída</label>
+          <input type="number" name="max_tokens" value="{max_tokens}">
+        </div>
+        <div>
+          <label>TTL do Modelo em VRAM (Segundos)</label>
+          <input type="number" name="ttl_seconds" value="{ttl_sec}">
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0; color:var(--gold); font-size:16px;">Rede & Cluster</h3>
+      <div class="grid">
+        <div>
+          <label>Host de Escuta</label>
+          <input name="host" value="{host}">
+        </div>
+        <div>
+          <label>Porta do Servidor</label>
+          <input type="number" name="port" value="{port}">
+        </div>
+        <div>
+          <label>IP Tailscale do Nó</label>
+          <input name="tailscale_peer_hostname" value="{ts_ip}">
+        </div>
+        <div>
+          <label>Nome do Nó</label>
+          <input name="node_name" value="{node_name}">
+        </div>
+      </div>
+    </div>
+
+    <div style="text-align: right;">
+      <button type="submit" class="btn">💾 Salvar Configurações no zorya.toml</button>
+    </div>
+  </form>
+</div>
+<script>
+async function saveConfig(e) {{
+  e.preventDefault();
+  const form = document.getElementById('configForm');
+  const data = Object.fromEntries(new FormData(form).entries());
+  const res = await fetch('/api/v1/config/save', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify(data)
+  }});
+  if (res.ok) alert('Configurações salvas no zorya.toml com sucesso!');
+  else alert('Erro ao salvar configurações.');
+}}
+</script>
+</body>
+</html>"#,
+        port = cfg.server.port,
+        host = cfg.server.host,
+        ts_ip = ts_ip_str,
+        node_name = cfg.network.node_name,
+        gpu_name = telem.gpu_model,
+        vram_used = telem.gpu_vram_total_mb.saturating_sub(telem.gpu_vram_free_mb),
+        vram_total = telem.gpu_vram_total_mb,
+        cpu_brand = telem.cpu_brand,
+        ram_used = telem.ram_used_mb,
+        ram_total = telem.ram_total_mb,
+        fast_model = cfg.models.fast_model,
+        deep_model = cfg.models.deep_model,
+        gpu_layers = cfg.models.gpu_layers,
+        ctx_size = cfg.models.context_size,
+        max_tokens = cfg.models.max_tokens,
+        ttl_sec = cfg.models.ttl_seconds
+    );
+
+    (
+        axum::http::StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
+}
+
+pub async fn handle_save_config(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let mut current_cfg = (*state.config).clone();
+
+    if let Some(fm) = payload.get("fast_model").and_then(|v| v.as_str()) {
+        current_cfg.models.fast_model = fm.to_string();
+    }
+    if let Some(dm) = payload.get("deep_model").and_then(|v| v.as_str()) {
+        current_cfg.models.deep_model = dm.to_string();
+    }
+    if let Some(gl) = payload.get("gpu_layers").and_then(|v| {
+        v.as_u64().map(|n| n as u32).or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    }) {
+        current_cfg.models.gpu_layers = gl;
+    }
+    if let Some(ctx) = payload.get("context_size").and_then(|v| {
+        v.as_u64().map(|n| n as u32).or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    }) {
+        current_cfg.models.context_size = ctx;
+    }
+    if let Some(mt) = payload.get("max_tokens").and_then(|v| {
+        v.as_u64().map(|n| n as u32).or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    }) {
+        current_cfg.models.max_tokens = mt;
+    }
+    if let Some(ttl) = payload.get("ttl_seconds").and_then(|v| {
+        v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    }) {
+        current_cfg.models.ttl_seconds = ttl;
+    }
+    if let Some(host) = payload.get("host").and_then(|v| v.as_str()) {
+        current_cfg.server.host = host.to_string();
+    }
+    if let Some(port) = payload.get("port").and_then(|v| {
+        v.as_u64().map(|n| n as u16).or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    }) {
+        current_cfg.server.port = port;
+    }
+    if let Some(ts_peer) = payload.get("tailscale_peer_hostname").and_then(|v| v.as_str()) {
+        current_cfg.network.tailscale_peer_hostname = Some(ts_peer.to_string());
+    }
+    if let Some(node_name) = payload.get("node_name").and_then(|v| v.as_str()) {
+        current_cfg.network.node_name = node_name.to_string();
+    }
+
+    match current_cfg.save_default() {
+        Ok(_) => {
+            tracing::info!("Configurações salvas no zorya.toml com sucesso via Dashboard Web");
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "status": "success",
+                    "message": "Configurações salvas no zorya.toml com sucesso / Settings saved successfully"
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("Erro ao salvar zorya.toml: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "message": format!("Erro ao salvar arquivo de configuração: {}", e)
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+

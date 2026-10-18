@@ -43,6 +43,9 @@ pub struct AnkiGenerateMediaRequest {
     pub media_type: Option<String>, // "svg", "audio", etc.
 }
 
+pub type AnkiMediaRequest = AnkiGenerateMediaRequest;
+
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadedModelInfo {
     pub id: String,
@@ -446,9 +449,153 @@ impl NativeInferenceEngine {
             r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="960" height="540"><rect width="100%" height="100%" fill="#0F172A"/><text x="50%" y="50%" fill="#F8FAFC" text-anchor="middle" font-size="20">Svitlo Diagram</text></svg>"##.to_string()
         });
 
-        // 2. Extrai pontos-chave e perguntas de revisão
+        // 2. Tenta inferência dinâmica via LLM nativo com separação estrita de instrução e conteúdo puro
+        let system_instruction = "Você é o tutor cognitivo Svitlo v3.0 integrado ao Zorya. Analise exclusivamente o texto puro fornecido pelo estudante. Retorne OBRIGATORIAMENTE um JSON válido com a seguinte estrutura sem formatações adicionais:\n{\n  \"synthesis\": \"síntese detalhada em parágrafos do texto\",\n  \"key_points\": [\"ponto 1\", \"ponto 2\", \"ponto 3\"],\n  \"review_questions\": [\"pergunta 1\", \"pergunta 2\"],\n  \"feynman\": \"explicação feynman em linguagem simples e analogias diretas\",\n  \"cornell\": {\n    \"cues\": [\"ponto chave 1\", \"ponto chave 2\"],\n    \"notes\": [\"nota analítica detalhada\"],\n    \"summary\": \"resumo da seção cornell\"\n  },\n  \"mermaid\": \"graph TD\\n  A[Conceito] --> B[Desdobramento]\",\n  \"cards\": [\n    {\n      \"front\": \"pergunta do cartão\",\n      \"back\": \"resposta do cartão\",\n      \"teacher_explanation\": \"explicação adicional do professor\"\n    }\n  ]\n}";
+
+        let user_prompt = format!("### TÓPICO:\n{}\n\n### TEXTO PURO DO ESTUDANTE:\n{}", topic, pure_text);
+
+        let chat_req = ChatCompletionRequest {
+            model: Some(self.default_model.clone()),
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: json!(system_instruction),
+                    tool_calls: None,
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: json!(user_prompt),
+                    tool_calls: None,
+                },
+            ],
+            temperature: Some(0.3),
+            top_p: Some(0.9),
+            max_tokens: Some(2048),
+            stream: Some(false),
+            tools: None,
+            response_format: None,
+        };
+
+        let mut parsed_json: Option<Value> = None;
+        if let Ok(llm_resp) = self.chat_completions(chat_req).await {
+            if let Some(content_str) = llm_resp["choices"][0]["message"]["content"].as_str() {
+                // Tenta extrair JSON do texto retornado pela LLM
+                let trimmed = content_str.trim();
+                let json_slice = if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
+                    if start < end {
+                        &trimmed[start..=end]
+                    } else {
+                        trimmed
+                    }
+                } else {
+                    trimmed
+                };
+                if let Ok(val) = serde_json::from_str::<Value>(json_slice) {
+                    if val.is_object() && (val.get("synthesis").is_some() || val.get("summary").is_some()) {
+                        parsed_json = Some(val);
+                    }
+                }
+            }
+        }
+
+        // Se a LLM produziu JSON estruturado, utiliza o conteúdo gerado
+        if let Some(llm_val) = parsed_json {
+            let synthesis = llm_val.get("synthesis")
+                .or_else(|| llm_val.pointer("/summary/synthesis"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(&pure_text)
+                .to_string();
+
+            let key_points = llm_val.get("key_points")
+                .or_else(|| llm_val.pointer("/summary/key_points"))
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect::<Vec<_>>())
+                .unwrap_or_else(|| {
+                    pure_text.lines()
+                        .map(|l| l.trim())
+                        .filter(|l| !l.is_empty() && (l.starts_with('-') || l.starts_with('*') || l.starts_with('•')))
+                        .map(|l| l.trim_start_matches(|c| c == '-' || c == '*' || c == '•' || c == ' ').to_string())
+                        .take(5)
+                        .collect()
+                });
+
+            let review_questions = llm_val.get("review_questions")
+                .or_else(|| llm_val.pointer("/summary/review_questions"))
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect::<Vec<_>>())
+                .unwrap_or_else(|| vec![
+                    format!("Qual o conceito fundamental de {} abordado no texto?", topic),
+                    format!("Como aplicar as conclusões de {} na prática?", topic),
+                ]);
+
+            let feynman = llm_val.get("feynman")
+                .or_else(|| llm_val.pointer("/summary/feynman"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{}: {}", topic, synthesis));
+
+            let mermaid = llm_val.get("mermaid")
+                .or_else(|| llm_val.pointer("/summary/mermaid"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("graph LR\n  A[{}] --> B[Conceito Chave]\n  B --> C[Aplicação Prática]", topic.replace(['"', '\n', '\r'], "")));
+
+            let cornell = llm_val.get("cornell")
+                .or_else(|| llm_val.pointer("/summary/cornell"))
+                .cloned()
+                .unwrap_or_else(|| json!({
+                    "cues": [topic.clone(), "Fundamento Central".to_string()],
+                    "notes": [synthesis.clone()],
+                    "summary": format!("Resumo de {} estruturado pelo Svitlo.", topic)
+                }));
+
+            let mut cards = Vec::new();
+            if let Some(cards_arr) = llm_val.get("cards").and_then(|v| v.as_array()) {
+                for c in cards_arr {
+                    let front = c.get("front").and_then(|v| v.as_str()).unwrap_or("Conceito Chave").to_string();
+                    let back = c.get("back").and_then(|v| v.as_str()).unwrap_or(&synthesis).to_string();
+                    let teacher = c.get("teacher_explanation").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    cards.push(json!({
+                        "front": front,
+                        "back": back,
+                        "teacher_explanation": teacher,
+                        "tags": ["svitlo", "zorya-v3", "anki"],
+                        "svg_diagram": real_svg,
+                        "svg": real_svg,
+                    }));
+                }
+            }
+
+            if cards.is_empty() {
+                cards.push(json!({
+                    "front": format!("Qual o princípio fundamental de {}?", topic),
+                    "back": format!("{}\n\nPontos Essenciais:\n{}", synthesis, key_points.iter().map(|p| format!("• {}", p)).collect::<Vec<_>>().join("\n")),
+                    "teacher_explanation": format!("Revisão pedagógica estruturada para {}", topic),
+                    "tags": ["svitlo", "zorya-v3", "anki"],
+                    "svg_diagram": real_svg,
+                    "svg": real_svg,
+                }));
+            }
+
+            return Ok(json!({
+                "topic": topic,
+                "mode": req.mode.unwrap_or_else(|| "comprehensive".to_string()),
+                "summary": {
+                    "synthesis": synthesis,
+                    "key_points": key_points,
+                    "review_questions": review_questions,
+                    "feynman": feynman,
+                    "mermaid": mermaid,
+                    "cornell": cornell,
+                },
+                "mermaid": mermaid,
+                "svg_diagram": real_svg,
+                "cards": cards,
+            }));
+        }
+
+        // 3. Fallback determinístico caso o modelo esteja indisponível, extraindo diretamente do texto do aluno sem templates estáticos fictícios
         let mut key_points = Vec::new();
-        let mut review_questions = Vec::new();
         for line in pure_text.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
             if line.starts_with('-') || line.starts_with('*') || line.starts_with('•') {
                 let clean = line.trim_start_matches(|c| c == '-' || c == '*' || c == '•' || c == ' ').to_string();
@@ -458,13 +605,14 @@ impl NativeInferenceEngine {
             }
         }
         if key_points.is_empty() {
-            key_points.push(format!("Análise estrutural e conceitual de {}", topic));
-            key_points.push("Mecanismos e definições prioritárias para memorização espaçada".to_string());
-            key_points.push("Conexões lógicas e aplicação direta dos conceitos estudados".to_string());
+            let sentences: Vec<&str> = pure_text.split(|c| c == '.' || c == '\n').map(|s| s.trim()).filter(|s| !s.is_empty() && s.len() > 15).collect();
+            for s in sentences.into_iter().take(4) {
+                key_points.push(s.to_string());
+            }
         }
-
-        review_questions.push(format!("Qual a definição central e importância de {}?", topic));
-        review_questions.push("Como este conceito se articula na resolução de problemas práticos?".to_string());
+        if key_points.is_empty() {
+            key_points.push(pure_text.chars().take(120).collect());
+        }
 
         let synthesis = if pure_text.len() > 300 {
             pure_text.chars().take(300).collect::<String>()
@@ -472,10 +620,15 @@ impl NativeInferenceEngine {
             pure_text.clone()
         };
 
+        let review_questions = vec![
+            format!("Qual a definição central e importância de {} com base no texto?", topic),
+            format!("Como o conteúdo apresentado sobre {} se articula na resolução de problemas?", topic),
+        ];
+
         let feynman = format!(
-            "Imagine {} como uma engrenagem essencial: sem abstrações vazias, seu papel direto é garantir que {}",
+            "Explicando {}: {}",
             topic,
-            if !synthesis.is_empty() { synthesis.chars().take(120).collect::<String>() } else { "as informações operem com coerência".to_string() }
+            if !synthesis.is_empty() { synthesis.chars().take(200).collect::<String>() } else { pure_text.chars().take(200).collect::<String>() }
         );
 
         let mermaid = format!(
@@ -484,12 +637,12 @@ impl NativeInferenceEngine {
         );
 
         let cornell = json!({
-            "cues": [topic, "Mecanismo Central".to_string(), "Aplicações".to_string()],
+            "cues": [topic, "Conceito Central".to_string()],
             "notes": [synthesis.clone()],
-            "summary": format!("Resumo consolidado de {} para revisão de alto rendimento.", topic)
+            "summary": format!("Resumo de fixação para {}.", topic)
         });
 
-        let card_front = format!("Qual a função e princípio fundamental de {}?", topic);
+        let card_front = format!("Qual o princípio fundamental de {}?", topic);
         let card_back = format!("{}\n\nPontos Essenciais:\n{}", synthesis, key_points.iter().map(|p| format!("• {}", p)).collect::<Vec<_>>().join("\n"));
 
         let cards = vec![json!({
@@ -566,10 +719,11 @@ pub async fn handle_anki_generate_media(
     Json(req): Json<AnkiGenerateMediaRequest>,
 ) -> Response {
     let _guard = state.systray.begin_ai_work();
+    let pure_content = req.content.as_deref().map(extract_pure_student_text);
     let topic = req.topic.clone().unwrap_or_else(|| {
         req.front
             .as_deref()
-            .or(req.content.as_deref())
+            .or(pure_content.as_deref())
             .unwrap_or("Conceito Anki")
             .chars()
             .take(60)
@@ -585,7 +739,7 @@ pub async fn handle_anki_generate_media(
             VectorNodeSpec {
                 id: "n1".to_string(),
                 label: topic.chars().take(28).collect::<String>(),
-                description: req.back.clone().or_else(|| req.content.clone()),
+                description: req.back.clone().or_else(|| pure_content.clone()),
                 x: Some(60.0),
                 y: Some(150.0),
                 color: Some("#2563EB".to_string()),

@@ -106,6 +106,20 @@ pub struct ModelsConfig {
     pub vps_ctx_size: u32,
     #[serde(default = "default_batch")]
     pub batch_size: u32,
+
+    // Web Settings Dashboard compatibility fields
+    #[serde(default = "default_fast_model")]
+    pub fast_model: String,
+    #[serde(default = "default_deep_model")]
+    pub deep_model: String,
+    #[serde(default = "default_gpu_layers")]
+    pub gpu_layers: u32,
+    #[serde(default = "default_nitro_ctx")]
+    pub context_size: u32,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_ttl_seconds")]
+    pub ttl_seconds: u64,
 }
 
 fn default_models_dir() -> String { "models".to_string() }
@@ -114,6 +128,11 @@ fn default_vps_model() -> String { "qwen2.5-3b-instruct-q4_k_m.gguf".to_string()
 fn default_nitro_ctx() -> u32 { 8192 }
 fn default_vps_ctx() -> u32 { 2048 }
 fn default_batch() -> u32 { 512 }
+fn default_fast_model() -> String { "qwen2.5-3b-instruct-q4_k_m.gguf".to_string() }
+fn default_deep_model() -> String { "qwen2.5-7b-instruct-q4_k_m.gguf".to_string() }
+fn default_gpu_layers() -> u32 { 33 }
+fn default_max_tokens() -> u32 { 2048 }
+fn default_ttl_seconds() -> u64 { 3600 }
 
 impl Default for ModelsConfig {
     fn default() -> Self {
@@ -124,6 +143,12 @@ impl Default for ModelsConfig {
             nitro_ctx_size: default_nitro_ctx(),
             vps_ctx_size: default_vps_ctx(),
             batch_size: default_batch(),
+            fast_model: default_fast_model(),
+            deep_model: default_deep_model(),
+            gpu_layers: default_gpu_layers(),
+            context_size: default_nitro_ctx(),
+            max_tokens: default_max_tokens(),
+            ttl_seconds: default_ttl_seconds(),
         }
     }
 }
@@ -318,5 +343,20 @@ impl ZoryaConfig {
             .enabled
             .iter()
             .any(|m| m.eq_ignore_ascii_case(module))
+    }
+
+    pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> anyhow::Result<()> {
+        let serialized = toml::to_string_pretty(self)?;
+        fs::write(path, serialized)?;
+        Ok(())
+    }
+
+    pub fn save_default(&self) -> anyhow::Result<()> {
+        if let Ok(env_path) = std::env::var("ZORYA_CONFIG") {
+            let p = std::path::PathBuf::from(&env_path);
+            return self.save_to_file(p);
+        }
+        let local_path = Path::new("zorya.toml");
+        self.save_to_file(local_path)
     }
 }

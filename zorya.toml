@@ -45,7 +45,7 @@ offload_light_tasks_to_vps = true
 vps_credentials_path = "/var/www/mcp-server/credentials/credentials.json"
 validation_cache_ttl_hours = 24
 groq_primary_model = "openai/gpt-oss-120b"
-groq_fast_model = "openai/gpt-oss-20b"
+groq_fast_model = "qwen2.5:7b"
 groq_multilingual_model = "qwen/qwen3.8-27b"
 groq_whisper_model = "whisper-large-v3"
 
