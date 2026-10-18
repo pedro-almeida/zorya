@@ -261,8 +261,13 @@ impl Default for CraftConfig {
     }
 }
 
+fn default_groq_primary() -> String { "openai/gpt-oss-120b".to_string() }
+fn default_groq_fast() -> String { "openai/gpt-oss-20b".to_string() }
+fn default_groq_multi() -> String { "qwen/qwen3.8-27b".to_string() }
+fn default_gemini_model() -> String { "gemini-2.5-flash".to_string() }
+
 // Credentials configuration
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialsConfig {
     #[serde(default)]
     pub groq_keys: Vec<String>,
@@ -272,10 +277,32 @@ pub struct CredentialsConfig {
     pub openai_keys: Vec<String>,
     pub vps_credentials_path: Option<String>,
     pub validation_cache_ttl_hours: Option<u64>,
-    pub groq_primary_model: Option<String>,
-    pub groq_fast_model: Option<String>,
-    pub groq_multilingual_model: Option<String>,
+    #[serde(default = "default_groq_primary")]
+    pub groq_primary_model: String,
+    #[serde(default = "default_groq_fast")]
+    pub groq_fast_model: String,
+    #[serde(default = "default_groq_multi")]
+    pub groq_multilingual_model: String,
     pub groq_whisper_model: Option<String>,
+    #[serde(default = "default_gemini_model")]
+    pub gemini_model: String,
+}
+
+impl Default for CredentialsConfig {
+    fn default() -> Self {
+        Self {
+            groq_keys: Vec::new(),
+            gemini_keys: Vec::new(),
+            openai_keys: Vec::new(),
+            vps_credentials_path: None,
+            validation_cache_ttl_hours: Some(24),
+            groq_primary_model: default_groq_primary(),
+            groq_fast_model: default_groq_fast(),
+            groq_multilingual_model: default_groq_multi(),
+            groq_whisper_model: Some("whisper-large-v3".to_string()),
+            gemini_model: default_gemini_model(),
+        }
+    }
 }
 
 // Cluster configuration

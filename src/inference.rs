@@ -534,11 +534,11 @@ impl NativeInferenceEngine {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}: {}", topic, synthesis));
 
-            let mermaid = llm_val.get("mermaid")
+            let raw_mermaid = llm_val.get("mermaid")
                 .or_else(|| llm_val.pointer("/summary/mermaid"))
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("graph LR\n  A[{}] --> B[Conceito Chave]\n  B --> C[Aplicação Prática]", topic.replace(['"', '\n', '\r'], "")));
+                .unwrap_or("");
+            let safe_mermaid = Self::sanitize_mermaid_v11(raw_mermaid, &topic);
 
             let cornell = llm_val.get("cornell")
                 .or_else(|| llm_val.pointer("/summary/cornell"))
@@ -551,29 +551,48 @@ impl NativeInferenceEngine {
 
             let mut cards = Vec::new();
             if let Some(cards_arr) = llm_val.get("cards").and_then(|v| v.as_array()) {
-                for c in cards_arr {
+                for (idx, c) in cards_arr.iter().enumerate() {
                     let front = c.get("front").and_then(|v| v.as_str()).unwrap_or("Conceito Chave").to_string();
                     let back = c.get("back").and_then(|v| v.as_str()).unwrap_or(&synthesis).to_string();
                     let teacher = c.get("teacher_explanation").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let existing_svg = c.get("visual_svg")
+                        .or_else(|| c.get("svg_diagram"))
+                        .or_else(|| c.get("svg"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let card_svg = if existing_svg.contains("<svg") && existing_svg.len() > 120 {
+                        existing_svg.to_string()
+                    } else {
+                        Self::build_card_vectorcraft_svg(&topic, &front, &back, idx)
+                    };
+                    let data_url = Self::svg_to_data_url(&card_svg);
                     cards.push(json!({
                         "front": front,
                         "back": back,
                         "teacher_explanation": teacher,
                         "tags": ["svitlo", "zorya-v3", "anki"],
-                        "svg_diagram": real_svg,
-                        "svg": real_svg,
+                        "visual_svg": card_svg,
+                        "svg_diagram": card_svg,
+                        "svg": card_svg,
+                        "image_data_url": data_url,
                     }));
                 }
             }
 
             if cards.is_empty() {
+                let fb_front = format!("Qual o princípio fundamental de {}?", topic);
+                let fb_back = format!("{}\n\nPontos Essenciais:\n{}", synthesis, key_points.iter().map(|p| format!("• {}", p)).collect::<Vec<_>>().join("\n"));
+                let card_svg = Self::build_card_vectorcraft_svg(&topic, &fb_front, &fb_back, 0);
+                let data_url = Self::svg_to_data_url(&card_svg);
                 cards.push(json!({
-                    "front": format!("Qual o princípio fundamental de {}?", topic),
-                    "back": format!("{}\n\nPontos Essenciais:\n{}", synthesis, key_points.iter().map(|p| format!("• {}", p)).collect::<Vec<_>>().join("\n")),
+                    "front": fb_front,
+                    "back": fb_back,
                     "teacher_explanation": format!("Revisão pedagógica estruturada para {}", topic),
                     "tags": ["svitlo", "zorya-v3", "anki"],
-                    "svg_diagram": real_svg,
-                    "svg": real_svg,
+                    "visual_svg": card_svg,
+                    "svg_diagram": card_svg,
+                    "svg": card_svg,
+                    "image_data_url": data_url,
                 }));
             }
 
@@ -585,10 +604,10 @@ impl NativeInferenceEngine {
                     "key_points": key_points,
                     "review_questions": review_questions,
                     "feynman": feynman,
-                    "mermaid": mermaid,
+                    "mermaid": safe_mermaid.clone(),
                     "cornell": cornell,
                 },
-                "mermaid": mermaid,
+                "mermaid": safe_mermaid,
                 "svg_diagram": real_svg,
                 "cards": cards,
             }));
@@ -631,10 +650,7 @@ impl NativeInferenceEngine {
             if !synthesis.is_empty() { synthesis.chars().take(200).collect::<String>() } else { pure_text.chars().take(200).collect::<String>() }
         );
 
-        let mermaid = format!(
-            "graph LR\n  A[{}] --> B[Conceito Chave]\n  B --> C[Aplicação Prática]",
-            topic.replace(['"', '\n', '\r'], "")
-        );
+        let fallback_mermaid = Self::sanitize_mermaid_v11("", &topic);
 
         let cornell = json!({
             "cues": [topic, "Conceito Central".to_string()],
@@ -644,14 +660,18 @@ impl NativeInferenceEngine {
 
         let card_front = format!("Qual o princípio fundamental de {}?", topic);
         let card_back = format!("{}\n\nPontos Essenciais:\n{}", synthesis, key_points.iter().map(|p| format!("• {}", p)).collect::<Vec<_>>().join("\n"));
+        let fb_card_svg = Self::build_card_vectorcraft_svg(&topic, &card_front, &card_back, 0);
+        let fb_data_url = Self::svg_to_data_url(&fb_card_svg);
 
         let cards = vec![json!({
             "front": card_front,
             "back": card_back,
             "teacher_explanation": format!("Revisão pedagógica estruturada para {}", topic),
             "tags": ["svitlo", "zorya-v3", "anki"],
-            "svg_diagram": real_svg,
-            "svg": real_svg,
+            "visual_svg": fb_card_svg,
+            "svg_diagram": fb_card_svg,
+            "svg": fb_card_svg,
+            "image_data_url": fb_data_url,
         })];
 
         Ok(json!({
@@ -662,13 +682,178 @@ impl NativeInferenceEngine {
                 "key_points": key_points,
                 "review_questions": review_questions,
                 "feynman": feynman,
-                "mermaid": mermaid,
+                "mermaid": fallback_mermaid.clone(),
                 "cornell": cornell,
             },
-            "mermaid": mermaid,
+            "mermaid": fallback_mermaid,
             "svg_diagram": real_svg,
             "cards": cards,
         }))
+    }
+
+    /// Sanitiza diagramas Mermaid para a gramática estrita do Mermaid v11.17.2,
+    /// garantindo que todos os rótulos de nós estejam entre aspas duplas.
+    pub fn sanitize_mermaid_v11(raw: &str, fallback_topic: &str) -> String {
+        let safe_topic: String = fallback_topic
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                    c
+                } else {
+                    ' '
+                }
+            })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(40)
+            .collect();
+        let topic_label = if safe_topic.is_empty() {
+            "Conceito Central".to_string()
+        } else {
+            safe_topic
+        };
+
+        let trimmed = raw
+            .trim()
+            .trim_start_matches("```mermaid")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+
+        if trimmed.is_empty()
+            || (!trimmed.starts_with("graph ") && !trimmed.starts_with("flowchart "))
+        {
+            return format!(
+                "graph TD\n  A[\"{}\"] --> B[\"Fundamentos Teoricos\"]\n  A --> C[\"Mecanismos Centrais\"]\n  A --> D[\"Aplicacao Pratica\"]",
+                topic_label
+            );
+        }
+
+        let mut sanitized_lines = Vec::new();
+        for (idx, line) in trimmed.lines().enumerate() {
+            let l = line.trim();
+            if l.is_empty() {
+                continue;
+            }
+            if idx == 0 {
+                sanitized_lines.push(l.to_string());
+                continue;
+            }
+            let mut out = String::with_capacity(l.len() + 8);
+            let chars: Vec<char> = l.chars().collect();
+            let mut i = 0;
+            while i < chars.len() {
+                if chars[i] == '[' {
+                    out.push('[');
+                    i += 1;
+                    let mut inner = String::new();
+                    while i < chars.len() && chars[i] != ']' {
+                        inner.push(chars[i]);
+                        i += 1;
+                    }
+                    let clean_inner: String = inner
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .chars()
+                        .map(|c| {
+                            if matches!(c, '"' | '[' | ']' | '{' | '}' | '(' | ')' | ';' | '|' | '<' | '>') {
+                                ' '
+                            } else {
+                                c
+                            }
+                        })
+                        .collect::<String>()
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    out.push('"');
+                    out.push_str(if clean_inner.is_empty() {
+                        "Conceito"
+                    } else {
+                        &clean_inner
+                    });
+                    out.push('"');
+                    if i < chars.len() && chars[i] == ']' {
+                        out.push(']');
+                        i += 1;
+                    }
+                } else {
+                    out.push(chars[i]);
+                    i += 1;
+                }
+            }
+            sanitized_lines.push(out);
+        }
+
+        sanitized_lines.join("\n")
+    }
+
+    pub fn svg_to_data_url(svg: &str) -> String {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        format!("data:image/svg+xml;base64,{}", STANDARD.encode(svg.as_bytes()))
+    }
+
+    /// Constrói um diagrama vetorial SVG rico via VectorCraft para ilustrar o card
+    pub fn build_card_vectorcraft_svg(topic: &str, front: &str, back: &str, idx: usize) -> String {
+        let short_topic: String = topic.chars().take(42).collect();
+        let short_front: String = front.chars().take(52).collect();
+        let short_back: String = back.chars().take(68).collect();
+
+        let spec = VectorDiagramSpec {
+            title: format!("{} — Card #{}", short_topic, idx + 1),
+            subtitle: Some("VectorCraft Card Diagram".to_string()),
+            width: Some(800),
+            height: Some(450),
+            nodes: vec![
+                VectorNodeSpec {
+                    id: "T".to_string(),
+                    label: short_topic,
+                    description: Some("Tópico Central".to_string()),
+                    x: Some(40.0),
+                    y: Some(150.0),
+                    color: Some("#2563EB".to_string()),
+                },
+                VectorNodeSpec {
+                    id: "Q".to_string(),
+                    label: short_front,
+                    description: Some("Pergunta / Gatilho".to_string()),
+                    x: Some(290.0),
+                    y: Some(150.0),
+                    color: Some("#10B981".to_string()),
+                },
+                VectorNodeSpec {
+                    id: "A".to_string(),
+                    label: short_back,
+                    description: Some("Conceito / Resposta".to_string()),
+                    x: Some(540.0),
+                    y: Some(150.0),
+                    color: Some("#8B5CF6".to_string()),
+                },
+            ],
+            edges: Some(vec![
+                VectorEdgeSpec {
+                    from: "T".to_string(),
+                    to: "Q".to_string(),
+                    label: Some("gatilho".to_string()),
+                },
+                VectorEdgeSpec {
+                    from: "Q".to_string(),
+                    to: "A".to_string(),
+                    label: Some("reforço".to_string()),
+                },
+            ]),
+        };
+
+        render_svg_diagram(&spec).unwrap_or_else(|_| {
+            format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450"><rect width="100%" height="100%" fill="#1E293B"/><text x="50%" y="50%" fill="#F8FAFC" text-anchor="middle">Card #{}</text></svg>"##,
+                idx + 1
+            )
+        })
     }
 }
 
