@@ -719,6 +719,112 @@ impl NativeInferenceEngine {
             .join(" ")
     }
 
+    /// Busca imagem científica real na Wikipedia (EN/PT) ou Wikimedia Commons, com fallback para IA Generativa (Flux Scientific)
+    pub async fn resolve_card_wikimedia_or_ai_image(
+        &self,
+        topic: &str,
+        front: &str,
+        image_query: &str,
+        ai_prompt: &str,
+        idx: usize,
+    ) -> (String, String, String) {
+        let query = if !image_query.trim().is_empty() {
+            image_query.trim()
+        } else {
+            topic.trim()
+        };
+
+        // 1. Tenta Wikipedia REST API (EN e PT)
+        for lang in ["en", "pt"] {
+            let slug = query.replace(' ', "_");
+            let wiki_url = format!("https://{}.wikipedia.org/api/rest_v1/page/summary/{}", lang, slug);
+            if let Ok(resp) = self
+                .http_client
+                .get(&wiki_url)
+                .header("User-Agent", "SvitloZorya/3.0 (mailto:pedro@espectroipe.com.br)")
+                .timeout(Duration::from_secs(4))
+                .send()
+                .await
+            {
+                if resp.status().is_success() {
+                    if let Ok(json_val) = resp.json::<Value>().await {
+                        let thumb = json_val
+                            .pointer("/thumbnail/source")
+                            .or_else(|| json_val.pointer("/originalimage/source"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if !thumb.is_empty() {
+                            if let Some(data_uri) = self.download_image_as_data_uri(thumb).await {
+                                return (data_uri, thumb.to_string(), format!("Wikipedia ({})", lang.to_uppercase()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Fallback: Geração de Ilustração Científica Detalhada por IA (Pollinations Flux)
+        let prompt_clean: String = if !ai_prompt.trim().is_empty() {
+            ai_prompt.trim().chars().take(180).collect()
+        } else {
+            format!("Detailed scientific textbook diagram of {}: {}", topic, front)
+                .chars()
+                .take(180)
+                .collect()
+        };
+        let encoded_prompt: String = prompt_clean
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '%' })
+            .collect();
+        let _ = encoded_prompt;
+        let url_encoded = prompt_clean
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("%20");
+        let ai_url = format!(
+            "https://image.pollinations.ai/prompt/{}%20scientific%20anatomical%20diagram%20clean?width=640&height=360&nologo=true&model=flux&seed={}",
+            url_encoded,
+            202610 + idx
+        );
+        if let Some(data_uri) = self.download_image_as_data_uri(&ai_url).await {
+            return (data_uri, ai_url, "IA Generativa (Flux Scientific)".to_string());
+        }
+
+        (String::new(), String::new(), String::new())
+    }
+
+    async fn download_image_as_data_uri(&self, url: &str) -> Option<String> {
+        let resp = self
+            .http_client
+            .get(url)
+            .header("User-Agent", "SvitloZorya/3.0 (mailto:pedro@espectroipe.com.br)")
+            .timeout(Duration::from_secs(6))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let ctype = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("image/jpeg")
+            .split(';')
+            .next()
+            .unwrap_or("image/jpeg")
+            .trim()
+            .to_lowercase();
+        if !ctype.starts_with("image/") {
+            return None;
+        }
+        let bytes = resp.bytes().await.ok()?;
+        if bytes.len() < 512 {
+            return None;
+        }
+        Some(format!("data:{};base64,{}", ctype, BASE64_STD.encode(&bytes)))
+    }
+
     /// Gera estudo estruturado completo Svitlo com triagem OpenAlex, síntese profunda, Feynman, Cornell, Mermaid v11.17.2 e VectorCraft SVG em cada card.
     pub async fn generate_svitlo_study(&self, req: SvitloGenerateRequest) -> anyhow::Result<Value> {
         let pure_text = extract_pure_student_text(&req.content);
@@ -752,17 +858,18 @@ impl NativeInferenceEngine {
             String::new()
         };
 
-        let system_instruction = "Você é o Agon — Professor Universitário Titular e Cientista Cognitivo do Svitlo v3.0.
+        let system_instruction = "Você é o Agon — Professor Universitário Titular e Cientista Cognitivo do Svitlo v3.0 na Usina Zorya.
 PROIBIÇÕES ESTRITAS:
-- NUNCA repita o enunciado ou cabeçalhos como 'TEMA ACADÊMICO:' ou 'EVIDÊNCIAS E ABSTRACTS'.
-- NUNCA gere resumos curtos ou genéricos.
+- NUNCA repita o enunciado ou cabeçalhos como 'TEMA ACADÊMICO:'.
+- NUNCA gere 'teacher_audio_script' igual ou parecido com 'feynman'.
 OBRIGAÇÕES DE CONTEÚDO:
-1. 'synthesis': Escreva uma aula magistral densa, didática e aprofundada (mínimo de 4 parágrafos completos, separados por \\n\\n) explicando definição, bases neurobiológicas/teóricas, mecanismos causais, quadro clínico/prático e relação com a literatura científica fornecida.
-2. 'feynman': Explique o tema usando a Técnica de Feynman (mínimo de 150 palavras), utilizando uma analogia concreta e descomplicando cada mecanismo técnico sem perder o rigor.
-3. 'key_points': Liste de 5 a 7 pontos-chave completos, densos e informativos.
-4. 'review_questions': Elabore de 3 a 5 perguntas de revisão socrática que exijam raciocínio analítico.
-5. 'mermaid': Gere um fluxograma Mermaid válido no formato graph TD usando aspas duplas em todos os nós, ex: graph TD\\n  A[\"Conceito\"] --> B[\"Mecanismo\"]
-6. 'cards': Gere de 5 a 8 flashcards de alta retenção com 'front' (pergunta clara e específica), 'back' (resposta técnica completa) e 'teacher_explanation' (explicação falada do professor).
+1. 'synthesis': Aula magistral densa, didática e aprofundada (mínimo de 4 parágrafos completos separados por \\n\\n).
+2. 'teacher_audio_script': Preleção universitária falada pelo professor titular comentando a fisiologia/mecanismo técnico, as referências científicas do OpenAlex e como o tema é cobrado na prática clínica e em provas (mínimo de 130 palavras).
+3. 'feynman': Analogia intuitiva do cotidiano (Técnica de Feynman pura, ex: cidade de estradas, circuito hidráulico), totalmente diferente de 'teacher_audio_script' (mínimo de 130 palavras).
+4. 'key_points': 5 a 7 pontos-chave completos.
+5. 'review_questions': 4 a 5 perguntas de revisão socrática.
+6. 'mermaid': Fluxograma Mermaid v11 válido no formato graph TD com rótulos entre aspas duplas.
+7. 'cards': 5 a 6 flashcards contendo 'front', 'back', 'teacher_explanation', 'image_query' (termo científico curto em inglês para busca na Wikimedia Commons) e 'ai_image_prompt' (descrição em inglês para ilustração científica por IA).
 Retorne EXCLUSIVAMENTE um objeto JSON válido.";
 
         let user_prompt = format!(
@@ -871,6 +978,26 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido.";
                         )
                     });
 
+                let mut teacher_audio_script = llm_val
+                    .get("teacher_audio_script")
+                    .or_else(|| llm_val.pointer("/summary/teacher_audio_script"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+
+                if teacher_audio_script.len() < 60 || teacher_audio_script == feynman {
+                    let ref_comment = triaged_papers
+                        .first()
+                        .map(|p| format!(" Conforme demonstrado por {} ({}), a evidência empírica confirma esse mecanismo.", p.authors, p.year))
+                        .unwrap_or_default();
+                    teacher_audio_script = format!(
+                        "Preste muita atenção na arquitetura técnica e clínica de {}: precisamos conectar diretamente os mecanismos estruturais aos seus efeitos funcionais. {}.{} Em avaliações e na prática clínica, observe sempre a diferença entre adaptações agudas e consolidações estruturais duradouras.",
+                        clean_topic,
+                        key_points.iter().take(2).cloned().collect::<Vec<_>>().join(" "),
+                        ref_comment
+                    );
+                }
+
                 let raw_mermaid = llm_val
                     .get("mermaid")
                     .or_else(|| llm_val.pointer("/summary/mermaid"))
@@ -922,6 +1049,22 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido.";
                         let card_svg = build_card_vectorcraft_svg(&clean_topic, &front, &back, idx);
                         let card_data_url = format!("data:image/svg+xml;base64,{}", BASE64_STD.encode(card_svg.as_bytes()));
 
+                        let img_query = c.get("image_query").and_then(|v| v.as_str()).unwrap_or(&clean_topic);
+                        let ai_prompt = c.get("ai_image_prompt").and_then(|v| v.as_str()).unwrap_or(&front);
+                        let (rich_data_uri, rich_url, rich_source) = self
+                            .resolve_card_wikimedia_or_ai_image(&clean_topic, &front, img_query, ai_prompt, idx)
+                            .await;
+                        let final_data_url = if !rich_data_uri.is_empty() {
+                            rich_data_uri
+                        } else {
+                            card_data_url
+                        };
+                        let final_source = if !rich_source.is_empty() {
+                            rich_source
+                        } else {
+                            "VectorCraft SVG".to_string()
+                        };
+
                         let citation_val = c.get("citation").cloned().or_else(|| {
                             triaged_papers.get(idx % triaged_papers.len().max(1)).map(|p| {
                                 json!({
@@ -941,7 +1084,9 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido.";
                             "visual_svg": card_svg,
                             "svg_diagram": card_svg,
                             "svg": card_svg,
-                            "image_data_url": card_data_url,
+                            "image_url": rich_url,
+                            "image_data_url": final_data_url,
+                            "image_source": final_source,
                             "tags": ["svitlo", "zorya-v3", "anki"],
                             "citation": citation_val
                         }));
@@ -964,13 +1109,14 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido.";
                     "summary": {
                         "topic": clean_topic,
                         "synthesis": synthesis,
-                        "teacher_audio_script": feynman,
+                        "teacher_audio_script": teacher_audio_script,
                         "key_points": key_points,
                         "review_questions": review_questions,
                         "feynman": feynman,
                         "mermaid": safe_mermaid,
                         "cornell": cornell,
                     },
+                    "teacher_audio_script": teacher_audio_script,
                     "feynman": feynman,
                     "mermaid": safe_mermaid,
                     "svg_diagram": master_svg,
