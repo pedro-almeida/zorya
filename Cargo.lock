@@ -3518,6 +3518,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tray-icon",
+ "windows-sys 0.59.0",
  "x25519-dalek",
 ]
 

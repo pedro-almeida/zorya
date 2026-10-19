@@ -35,6 +35,24 @@ use crate::server::AppState;
 use crate::systray::SystrayController;
 use crate::telemetry::TelemetryCollector;
 
+#[cfg(target_os = "windows")]
+fn hide_console_window_on_windows(is_mcp_stdio: bool, force_console: bool) {
+    if is_mcp_stdio || force_console {
+        return;
+    }
+    unsafe {
+        use windows_sys::Win32::System::Console::GetConsoleWindow;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+        let hwnd = GetConsoleWindow();
+        if !hwnd.is_null() {
+            ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hide_console_window_on_windows(_is_mcp_stdio: bool, _force_console: bool) {}
+
 /// Resolve o caminho de configuração buscando ZORYA_CONFIG, ./zorya.toml e exe_dir/zorya.toml
 /// Retorna ZoryaConfig carregado ou o fallback ZoryaConfig::default() sem abortar o processo
 pub fn resolve_config_path() -> ZoryaConfig {
@@ -69,6 +87,10 @@ pub fn resolve_config_path() -> ZoryaConfig {
     ZoryaConfig::default()
 }
 
+pub fn main_config_snapshot() -> ZoryaConfig {
+    resolve_config_path()
+}
+
 /// Cria um listener TCP resiliente com SO_REUSEADDR imediatamente em LISTENING
 pub fn bind_resilient_listener(host: &str, port: u16) -> anyhow::Result<TcpListener> {
     let addr: SocketAddr = format!("{}:{}", host, port)
@@ -95,7 +117,9 @@ pub fn bind_resilient_listener(host: &str, port: u16) -> anyhow::Result<TcpListe
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let is_mcp_stdio = args.len() > 1 && (args[1] == "mcp" || args[1] == "--mcp");
+    let is_mcp_stdio = args.iter().any(|a| a == "mcp" || a == "--mcp");
+    let force_console = args.iter().any(|a| a == "--console" || a == "--foreground");
+    hide_console_window_on_windows(is_mcp_stdio, force_console);
 
     // Initialize structured logging / Inicializa o sistema de logs estruturados
     // No modo stdio, direciona logs para stderr para preservar stdout limpo para JSON-RPC 2.0

@@ -1,12 +1,10 @@
-// PT: Runtime de Inferência Nativo Zorya v3.0 (llama-cpp-2 / GGUF in-process)
-// EN: Zorya v3.0 Native Inference Runtime (llama-cpp-2 / in-process GGUF)
-// AI: @llm-context Absorve Ollama e llama-server; expõe API OpenAI-compatible (/v1/chat/completions, /v1/models, /v1/models/load, /v1/models/unload)
-// AI: @llm-invariant Nitro usa qwen2.5-7b-instruct-q4_k_m.gguf (ctx 8192, CUDA 4GB VRAM); VPS usa qwen2.5-3b-instruct-q4_k_m.gguf (ctx 2048, CPU)
+// PT: Runtime de Inferência Nativo Zorya v3.0 + Triagem Científica OpenAlex + Cascata GGUF/Groq/Gemini + VectorCraft SVG
+// EN: Zorya v3.0 Native Inference Runtime + OpenAlex Scientific Triage + GGUF/Groq/Gemini Cascade + VectorCraft SVG
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::State,
@@ -14,18 +12,19 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
-use crate::craft::{render_svg_diagram, VectorDiagramSpec, VectorNodeSpec, VectorEdgeSpec};
+use crate::craft::{render_svg_diagram, VectorDiagramSpec, VectorEdgeSpec, VectorNodeSpec};
 use crate::hardware::{ComputeBackend, HardwareProfile, NodeProfileKind};
 use crate::server::AppState;
 
 pub const DEFAULT_NITRO_MODEL: &str = "qwen2.5-7b-instruct-q4_k_m.gguf";
 pub const DEFAULT_VPS_MODEL: &str = "qwen2.5-3b-instruct-q4_k_m.gguf";
 
-pub const SVITLO_INTERNAL_SYSTEM_PROMPT: &str = "Você é o tutor neurocognitivo e coprocessador soberano Svitlo v3.0 rodando nativamente no Zorya. Analise o texto puro do estudante com rigor, clareza cirúrgica e estrutura pedagógica impecável. Gere síntese, pontos-chave, perguntas de fixação, explicação de Feynman, diagrama conceitual e cartões Anki.";
+pub const SVITLO_INTERNAL_SYSTEM_PROMPT: &str = "Você é o Professor Universitário e Cientista Cognitivo do Svitlo v3.0 rodando na Usina Zorya. Sua missão é produzir uma síntese acadêmica magistral, profunda e rigorosa baseada nas evidências científicas do OpenAlex, aplicando o Método Cornell, a Técnica de Feynman e flashcards de retenção ativa.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SvitloGenerateRequest {
@@ -40,11 +39,22 @@ pub struct AnkiGenerateMediaRequest {
     pub front: Option<String>,
     pub back: Option<String>,
     pub topic: Option<String>,
-    pub media_type: Option<String>, // "svg", "audio", etc.
+    pub media_type: Option<String>,
 }
 
 pub type AnkiMediaRequest = AnkiGenerateMediaRequest;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAlexPaper {
+    pub title: String,
+    pub authors: String,
+    pub year: u32,
+    pub doi: String,
+    pub url: String,
+    pub abstract_text: String,
+    pub cited_by_count: u64,
+    pub relevance_score: i64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadedModelInfo {
@@ -151,10 +161,15 @@ pub struct NativeInferenceEngine {
     pub default_model: String,
     pub loaded_models: RwLock<HashMap<String, LoadedModelInfo>>,
     pub active_model: RwLock<Option<String>>,
+    pub http_client: reqwest::Client,
 }
 
 impl NativeInferenceEngine {
-    pub fn new(models_dir: impl AsRef<Path>, hardware: HardwareProfile, configured_model: Option<String>) -> Arc<Self> {
+    pub fn new(
+        models_dir: impl AsRef<Path>,
+        hardware: HardwareProfile,
+        configured_model: Option<String>,
+    ) -> Arc<Self> {
         let kv_config = KvCacheBatchConfig::from_hardware(&hardware);
         let default_model = configured_model.unwrap_or_else(|| match hardware.profile_kind {
             NodeProfileKind::NitroGtx1650 => DEFAULT_NITRO_MODEL.to_string(),
@@ -168,6 +183,11 @@ impl NativeInferenceEngine {
             }
         });
 
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(35))
+            .build()
+            .unwrap_or_default();
+
         Arc::new(Self {
             models_dir: models_dir.as_ref().to_path_buf(),
             hardware,
@@ -175,13 +195,14 @@ impl NativeInferenceEngine {
             default_model,
             loaded_models: RwLock::new(HashMap::new()),
             active_model: RwLock::new(None),
+            http_client,
         })
     }
 
     pub async fn load_model(&self, req: LoadModelRequest) -> anyhow::Result<LoadedModelInfo> {
         let model_id = req.model.trim().to_string();
         if model_id.is_empty() {
-            anyhow::bail!("Model identifier cannot be empty / Identificador do modelo não pode ser vazio");
+            anyhow::bail!("Identificador do modelo não pode ser vazio");
         }
 
         let resolved_path = req
@@ -193,26 +214,22 @@ impl NativeInferenceEngine {
         let batch_size = req.batch_size.unwrap_or(self.kv_config.batch_size);
         let n_gpu_layers = req.n_gpu_layers.unwrap_or(self.kv_config.n_gpu_layers);
 
-        #[cfg(feature = "llama-native")]
-        {
-            use llama_cpp_2::llama_backend::LlamaBackend;
-            use llama_cpp_2::model::params::LlamaModelParams;
-            use llama_cpp_2::model::LlamaModel;
-
-            let backend = LlamaBackend::init()?;
-            let model_params = LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers);
-            if resolved_path.exists() {
-                let _model = LlamaModel::load_from_file(&backend, &resolved_path, &model_params)?;
-            }
-        }
-
         let estimated_vram_mb = if n_gpu_layers > 0 {
-            if model_id.contains("7b") { 3840 } else if model_id.contains("3b") { 1920 } else { 2560 }
+            if model_id.contains("7b") {
+                3840
+            } else if model_id.contains("3b") {
+                1920
+            } else {
+                2560
+            }
         } else {
             0
         };
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let info = LoadedModelInfo {
             id: model_id.clone(),
             path: resolved_path.to_string_lossy().to_string(),
@@ -227,7 +244,10 @@ impl NativeInferenceEngine {
             loaded_at: now,
         };
 
-        self.loaded_models.write().await.insert(model_id.clone(), info.clone());
+        self.loaded_models
+            .write()
+            .await
+            .insert(model_id.clone(), info.clone());
         *self.active_model.write().await = Some(model_id);
         Ok(info)
     }
@@ -270,7 +290,7 @@ impl NativeInferenceEngine {
                 json!({
                     "id": m,
                     "object": "model",
-                    "owned_by": "zorya-native-llama-cpp-2",
+                    "owned_by": "zorya-native-v3",
                     "loaded": is_loaded,
                     "active": active.as_deref() == Some(m.as_str()),
                     "backend": self.hardware.active_backend.as_str(),
@@ -289,6 +309,74 @@ impl NativeInferenceEngine {
         })
     }
 
+    /// Coleta chaves Groq e Gemini de zorya.toml, variáveis de ambiente e /var/www/mcp-server/credentials/credentials.json
+    fn collect_cloud_keys() -> (Vec<String>, Vec<String>) {
+        let mut groq_keys = Vec::new();
+        let mut gemini_keys = Vec::new();
+
+        if let Ok(k) = std::env::var("GROQ_API_KEY") {
+            if k.trim().len() > 10 {
+                groq_keys.push(k.trim().to_string());
+            }
+        }
+        if let Ok(k) = std::env::var("GEMINI_API_KEY") {
+            if k.trim().len() > 10 {
+                gemini_keys.push(k.trim().to_string());
+            }
+        }
+
+        let cfg = crate::main_config_snapshot();
+        for k in cfg.credentials.groq_keys {
+            if k.trim().len() > 10 && !groq_keys.contains(&k.trim().to_string()) {
+                groq_keys.push(k.trim().to_string());
+            }
+        }
+        for k in cfg.credentials.gemini_keys {
+            if k.trim().len() > 10 && !gemini_keys.contains(&k.trim().to_string()) {
+                gemini_keys.push(k.trim().to_string());
+            }
+        }
+
+        let cred_paths = [
+            "/var/www/mcp-server/credentials/credentials.json",
+            "C:\\dev\\zorya\\credentials.json",
+            "credentials.json",
+        ];
+        for cp in cred_paths {
+            let p = Path::new(cp);
+            if p.exists() {
+                if let Ok(raw) = std::fs::read_to_string(p) {
+                    if let Ok(val) = serde_json::from_str::<Value>(&raw) {
+                        if let Some(g_obj) = val.get("groq").and_then(|v| v.as_object()) {
+                            for (_, v) in g_obj {
+                                if let Some(s) = v.as_str() {
+                                    if s.trim().len() > 10 && !groq_keys.contains(&s.trim().to_string()) {
+                                        groq_keys.push(s.trim().to_string());
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(m_obj) = val.get("gemini").and_then(|v| v.as_object()) {
+                            for (_, v) in m_obj {
+                                if let Some(s) = v.as_str() {
+                                    if s.trim().len() > 10 && !gemini_keys.contains(&s.trim().to_string()) {
+                                        gemini_keys.push(s.trim().to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        (groq_keys, gemini_keys)
+    }
+
+    /// Executa inferência real tentando:
+    /// 1) Motor Local GGUF / llama-server (porta 8081) ou Ollama local (porta 11434)
+    /// 2) Groq Cloud (openai/gpt-oss-120b, qwen/qwen3.8-27b, openai/gpt-oss-20b)
+    /// 3) Google Gemini (gemini-2.5-flash)
     pub async fn chat_completions(&self, req: ChatCompletionRequest) -> anyhow::Result<Value> {
         let start = Instant::now();
         let requested_model = req
@@ -297,162 +385,390 @@ impl NativeInferenceEngine {
             .filter(|m| !m.trim().is_empty())
             .unwrap_or_else(|| self.default_model.clone());
 
-        if !self.loaded_models.read().await.contains_key(&requested_model) {
-            let _ = self
-                .load_model(LoadModelRequest {
-                    model: requested_model.clone(),
-                    model_path: None,
-                    ctx_size: None,
-                    batch_size: None,
-                    n_gpu_layers: None,
-                })
-                .await?;
-        }
-
-        let mut formatted_prompt = String::new();
-        let mut last_user_text = String::new();
+        let mut system_text = String::new();
+        let mut user_text = String::new();
         for msg in &req.messages {
             let content_str = match &msg.content {
                 Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            if msg.role == "user" {
-                last_user_text = content_str.clone();
+            if msg.role.eq_ignore_ascii_case("system") {
+                if !system_text.is_empty() {
+                    system_text.push('\n');
+                }
+                system_text.push_str(&content_str);
+            } else if msg.role.eq_ignore_ascii_case("user") {
+                user_text = content_str;
             }
-            formatted_prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", msg.role, content_str));
         }
-        formatted_prompt.push_str("<|im_start|>assistant\n");
+        if system_text.is_empty() {
+            system_text = SVITLO_INTERNAL_SYSTEM_PROMPT.to_string();
+        }
 
-        let prompt_tokens = (formatted_prompt.len() / 4).max(1) as u32;
-        let max_tokens = req.max_tokens.unwrap_or(1024);
-        let reply_content = self.run_gguf_decode(&requested_model, &formatted_prompt, &last_user_text, max_tokens).await?;
-        let completion_tokens = (reply_content.len() / 4).max(1) as u32;
-        let elapsed_ms = start.elapsed().as_millis() as u64;
+        let max_tokens = req.max_tokens.unwrap_or(3500);
+        let temperature = req.temperature.unwrap_or(0.35);
 
-        Ok(json!({
-            "id": format!("chatcmpl-zorya-{}", start.elapsed().as_nanos()),
-            "object": "chat.completion",
-            "created": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
-            "model": requested_model,
-            "backend": self.hardware.active_backend.as_str(),
-            "latency_ms": elapsed_ms,
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": reply_content,
-                },
-                "finish_reason": "stop"
-            }],
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens
-            }
-        }))
-    }
-
-    async fn run_gguf_decode(
-        &self,
-        model_id: &str,
-        _chatml_prompt: &str,
-        last_user_text: &str,
-        _max_tokens: u32,
-    ) -> anyhow::Result<String> {
-        if last_user_text.contains("cards") || last_user_text.contains("summary") || last_user_text.contains("JSON") {
-            Ok(json!({
-                "topic": "Síntese Cognitiva Zorya v3.0",
-                "summary": {
-                    "synthesis": format!("Síntese processada nativamente via llama-cpp-2 ({}) para: {}", model_id, last_user_text.chars().take(160).collect::<String>()),
-                    "key_points": [
-                        "Processamento local soberano via GGUF sem dependência de Ollama externo",
-                        "Alocação dedicada de VRAM/CPU com KV cache otimizado",
-                        "Estrutura adaptada ao perfil neurocognitivo literal e objetivo"
+        // 1. Tenta runtime local llama-server (porta 8081) ou Ollama compatível (porta 11434)
+        for local_ep in [
+            "http://127.0.0.1:8081/v1/chat/completions",
+            "http://127.0.0.1:11434/v1/chat/completions",
+        ] {
+            if let Ok(resp) = self
+                .http_client
+                .post(local_ep)
+                .timeout(Duration::from_secs(12))
+                .json(&json!({
+                    "model": requested_model,
+                    "messages": [
+                        {"role": "system", "content": system_text},
+                        {"role": "user", "content": user_text}
                     ],
-                    "review_questions": ["Qual o mecanismo central descrito no conteúdo analisado?"],
-                    "feynman": "Explicação direta passo a passo sem metáforas ambíguas."
-                },
-                "cards": [{
-                    "front": "Qual o conceito central abordado no material de estudo?",
-                    "back": last_user_text.chars().take(240).collect::<String>(),
-                    "teacher_explanation": "Revisão estruturada pelo motor nativo Zorya v3.0.",
-                    "tags": ["svitlo", "zorya-v3"]
-                }]
-            }).to_string())
-        } else {
-            Ok(format!("[Zorya v3.0 Native GGUF ({})] Processamento concluído para: {}", model_id, last_user_text.chars().take(240).collect::<String>()))
+                    "temperature": temperature,
+                    "max_tokens": max_tokens
+                }))
+                .send()
+                .await
+            {
+                if resp.status().is_success() {
+                    if let Ok(body) = resp.json::<Value>().await {
+                        if let Some(txt) = body["choices"][0]["message"]["content"].as_str() {
+                            if txt.trim().len() > 80 {
+                                return Ok(body);
+                            }
+                        }
+                    }
+                }
+            }
         }
+
+        // 2. Tenta Cofre de Chaves Groq Cloud (openai/gpt-oss-120b, qwen/qwen3.8-27b, openai/gpt-oss-20b)
+        let (groq_keys, gemini_keys) = Self::collect_cloud_keys();
+        let groq_models = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"];
+        for g_key in groq_keys.iter().take(4) {
+            for g_model in groq_models {
+                if let Ok(resp) = self
+                    .http_client
+                    .post("https://api.groq.com/openai/v1/chat/completions")
+                    .bearer_auth(g_key)
+                    .json(&json!({
+                        "model": g_model,
+                        "messages": [
+                            {"role": "system", "content": system_text},
+                            {"role": "user", "content": user_text}
+                        ],
+                        "temperature": temperature,
+                        "max_tokens": max_tokens
+                    }))
+                    .send()
+                    .await
+                {
+                    if resp.status().is_success() {
+                        if let Ok(body) = resp.json::<Value>().await {
+                            if let Some(txt) = body["choices"][0]["message"]["content"].as_str() {
+                                if txt.trim().len() > 80 {
+                                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                                    return Ok(json!({
+                                        "id": format!("chatcmpl-zorya-groq-{}", elapsed_ms),
+                                        "object": "chat.completion",
+                                        "created": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+                                        "model": format!("zorya-agon/{}", g_model),
+                                        "backend": self.hardware.active_backend.as_str(),
+                                        "latency_ms": elapsed_ms,
+                                        "choices": [{
+                                            "index": 0,
+                                            "message": {
+                                                "role": "assistant",
+                                                "content": txt
+                                            },
+                                            "finish_reason": "stop"
+                                        }]
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Tenta Cofre de Chaves Google Gemini (gemini-2.5-flash)
+        for gem_key in gemini_keys.iter().take(4) {
+            let gem_url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={}",
+                gem_key
+            );
+            if let Ok(resp) = self
+                .http_client
+                .post(&gem_url)
+                .json(&json!({
+                    "systemInstruction": {"parts": [{"text": system_text}]},
+                    "contents": [{"role": "user", "parts": [{"text": user_text}]}],
+                    "generationConfig": {
+                        "temperature": temperature,
+                        "maxOutputTokens": max_tokens
+                    }
+                }))
+                .send()
+                .await
+            {
+                if resp.status().is_success() {
+                    if let Ok(body) = resp.json::<Value>().await {
+                        if let Some(parts) = body["candidates"][0]["content"]["parts"].as_array() {
+                            let combined: String = parts
+                                .iter()
+                                .filter(|p| !p.get("thought").and_then(|t| t.as_bool()).unwrap_or(false))
+                                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                                .collect::<Vec<_>>()
+                                .join("");
+                            if combined.trim().len() > 80 {
+                                let elapsed_ms = start.elapsed().as_millis() as u64;
+                                return Ok(json!({
+                                    "id": format!("chatcmpl-zorya-gemini-{}", elapsed_ms),
+                                    "object": "chat.completion",
+                                    "created": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+                                    "model": "zorya-agon/gemini-2.5-flash",
+                                    "backend": self.hardware.active_backend.as_str(),
+                                    "latency_ms": elapsed_ms,
+                                    "choices": [{
+                                        "index": 0,
+                                        "message": {
+                                            "role": "assistant",
+                                            "content": combined
+                                        },
+                                        "finish_reason": "stop"
+                                    }]
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        anyhow::bail!("Nenhum motor de inferência (GGUF local, Groq ou Gemini) retornou resposta válida.")
     }
 
-    /// Gera estudo estruturado completo Svitlo com texto puro do estudante, síntese, Feynman, Cornell, Mermaid e SVG real injetado em cada cartão.
-    pub async fn generate_svitlo_study(&self, req: SvitloGenerateRequest) -> anyhow::Result<Value> {
-        let pure_text = extract_pure_student_text(&req.content);
-        let topic = req.topic.unwrap_or_else(|| {
-            pure_text
-                .lines()
-                .find(|l| !l.trim().is_empty())
-                .map(|l| l.trim().chars().take(60).collect::<String>())
-                .unwrap_or_else(|| "Tópico de Estudo Svitlo".to_string())
-        });
+    /// Busca e faz a TRIAGEM de artigos científicos no OpenAlex para fundamentar o estudo
+    pub async fn fetch_and_triage_openalex(&self, clean_topic: &str) -> Vec<OpenAlexPaper> {
+        let encoded_query: String = clean_topic
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == ' ' { c } else { ' ' })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("+");
 
-        // 1. Gera o diagrama SVG real usando VectorCraft
-        let node_label_1 = topic.chars().take(24).collect::<String>();
-        let node_label_2 = "Conceito Chave".to_string();
-        let node_label_3 = "Aplicação Prática".to_string();
+        if encoded_query.is_empty() {
+            return Vec::new();
+        }
 
-        let svg_spec = VectorDiagramSpec {
-            title: topic.clone(),
-            subtitle: Some("Diagrama Conceitual Svitlo • VectorCraft".to_string()),
-            width: Some(960),
-            height: Some(540),
-            nodes: vec![
-                VectorNodeSpec {
-                    id: "n1".to_string(),
-                    label: if node_label_1.is_empty() { "Conceito Central".to_string() } else { node_label_1 },
-                    description: Some("Fundamento primário".to_string()),
-                    x: Some(80.0),
-                    y: Some(180.0),
-                    color: Some("#3B82F6".to_string()),
-                },
-                VectorNodeSpec {
-                    id: "n2".to_string(),
-                    label: node_label_2,
-                    description: Some("Desdobramento analítico".to_string()),
-                    x: Some(380.0),
-                    y: Some(180.0),
-                    color: Some("#10B981".to_string()),
-                },
-                VectorNodeSpec {
-                    id: "n3".to_string(),
-                    label: node_label_3,
-                    description: Some("Mecanismo de fixação".to_string()),
-                    x: Some(680.0),
-                    y: Some(180.0),
-                    color: Some("#8B5CF6".to_string()),
-                },
-            ],
-            edges: Some(vec![
-                VectorEdgeSpec {
-                    from: "n1".to_string(),
-                    to: "n2".to_string(),
-                    label: Some("estrutura".to_string()),
-                },
-                VectorEdgeSpec {
-                    from: "n2".to_string(),
-                    to: "n3".to_string(),
-                    label: Some("viabiliza".to_string()),
-                },
-            ]),
+        let url = format!(
+            "https://api.openalex.org/works?search={}&filter=open_access.is_oa:true&per-page=15&select=id,title,abstract_inverted_index,authorships,publication_year,doi,cited_by_count",
+            encoded_query
+        );
+
+        let resp = match self
+            .http_client
+            .get(&url)
+            .header("User-Agent", "SvitloZoryaAgon/3.0 (mailto:pedro@espectroipe.com.br)")
+            .timeout(Duration::from_secs(8))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => r,
+            _ => return Vec::new(),
         };
 
-        let real_svg = render_svg_diagram(&svg_spec).unwrap_or_else(|_| {
-            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="960" height="540"><rect width="100%" height="100%" fill="#0F172A"/><text x="50%" y="50%" fill="#F8FAFC" text-anchor="middle" font-size="20">Svitlo Diagram</text></svg>"##.to_string()
-        });
+        let body: Value = match resp.json().await {
+            Ok(b) => b,
+            Err(_) => return Vec::new(),
+        };
 
-        // 2. Tenta inferência dinâmica via LLM nativo com separação estrita de instrução e conteúdo puro
-        let system_instruction = "Você é o tutor cognitivo Svitlo v3.0 integrado ao Zorya. Analise exclusivamente o texto puro fornecido pelo estudante. Retorne OBRIGATORIAMENTE um JSON válido com a seguinte estrutura sem formatações adicionais:\n{\n  \"synthesis\": \"síntese detalhada em parágrafos do texto\",\n  \"key_points\": [\"ponto 1\", \"ponto 2\", \"ponto 3\"],\n  \"review_questions\": [\"pergunta 1\", \"pergunta 2\"],\n  \"feynman\": \"explicação feynman em linguagem simples e analogias diretas\",\n  \"cornell\": {\n    \"cues\": [\"ponto chave 1\", \"ponto chave 2\"],\n    \"notes\": [\"nota analítica detalhada\"],\n    \"summary\": \"resumo da seção cornell\"\n  },\n  \"mermaid\": \"graph TD\\n  A[Conceito] --> B[Desdobramento]\",\n  \"cards\": [\n    {\n      \"front\": \"pergunta do cartão\",\n      \"back\": \"resposta do cartão\",\n      \"teacher_explanation\": \"explicação adicional do professor\"\n    }\n  ]\n}";
+        let results = match body.get("results").and_then(|v| v.as_array()) {
+            Some(arr) => arr,
+            None => return Vec::new(),
+        };
 
-        let user_prompt = format!("### TÓPICO:\n{}\n\n### TEXTO PURO DO ESTUDANTE:\n{}", topic, pure_text);
+        let topic_keywords: Vec<String> = clean_topic
+            .to_lowercase()
+            .split_whitespace()
+            .filter(|w| w.chars().count() >= 3)
+            .filter(|w| !["sobre", "para", "como", "qual", "quais", "fale", "explique", "estudo"].contains(w))
+            .map(|w| w.to_string())
+            .collect();
+
+        let mut candidates: Vec<OpenAlexPaper> = Vec::new();
+
+        for work in results {
+            let title = work
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if title.is_empty() {
+                continue;
+            }
+
+            let abstract_text = Self::reconstruct_inverted_abstract(work.get("abstract_inverted_index"));
+            if abstract_text.len() < 80 {
+                continue;
+            }
+
+            let title_lower = title.to_lowercase();
+            let abs_lower = abstract_text.to_lowercase();
+
+            // Triagem de relevância semântica: calcula score baseado nos termos nucleares
+            let mut score: i64 = 0;
+            let mut matched_keywords = 0;
+            for kw in &topic_keywords {
+                if title_lower.contains(kw) {
+                    score += 50;
+                    matched_keywords += 1;
+                } else if abs_lower.contains(kw) {
+                    score += 20;
+                    matched_keywords += 1;
+                }
+            }
+
+            if matched_keywords == 0 {
+                continue;
+            }
+            if matched_keywords == topic_keywords.len() && !topic_keywords.is_empty() {
+                score += 40;
+            }
+
+            let cited_by = work
+                .get("cited_by_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            score += ((cited_by as f64 + 1.0).log10() * 12.0) as i64;
+
+            if abstract_text.len() >= 250 {
+                score += 15;
+            }
+
+            let year = work
+                .get("publication_year")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(2024) as u32;
+
+            let doi = work
+                .get("doi")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let id_url = work
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let paper_url = if !doi.is_empty() { doi.clone() } else { id_url };
+
+            let authors: String = work
+                .get("authorships")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .take(3)
+                        .filter_map(|a| a.pointer("/author/display_name").and_then(|n| n.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "Pesquisadores OpenAlex".to_string());
+
+            candidates.push(OpenAlexPaper {
+                title,
+                authors,
+                year,
+                doi: paper_url.clone(),
+                url: paper_url,
+                abstract_text,
+                cited_by_count: cited_by,
+                relevance_score: score,
+            });
+        }
+
+        candidates.sort_by(|a, b| b.relevance_score.cmp(&a.relevance_score));
+        candidates.into_iter().take(4).collect()
+    }
+
+    fn reconstruct_inverted_abstract(inv_opt: Option<&Value>) -> String {
+        let Some(obj) = inv_opt.and_then(|v| v.as_object()) else {
+            return String::new();
+        };
+        let mut positions: Vec<(usize, &str)> = Vec::new();
+        for (word, pos_arr) in obj {
+            if let Some(arr) = pos_arr.as_array() {
+                for p in arr {
+                    if let Some(idx) = p.as_u64() {
+                        positions.push((idx as usize, word.as_str()));
+                    }
+                }
+            }
+        }
+        if positions.is_empty() {
+            return String::new();
+        }
+        positions.sort_by_key(|k| k.0);
+        positions
+            .into_iter()
+            .map(|(_, w)| w)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Gera estudo estruturado completo Svitlo com triagem OpenAlex, síntese profunda, Feynman, Cornell, Mermaid v11.17.2 e VectorCraft SVG em cada card.
+    pub async fn generate_svitlo_study(&self, req: SvitloGenerateRequest) -> anyhow::Result<Value> {
+        let pure_text = extract_pure_student_text(&req.content);
+        let clean_topic = extract_clean_academic_topic(req.topic.as_deref().unwrap_or(&pure_text));
+
+        // 1. Busca e faz a triagem de artigos científicos no OpenAlex
+        let triaged_papers = self.fetch_and_triage_openalex(&clean_topic).await;
+        let openalex_context = if !triaged_papers.is_empty() {
+            let formatted_refs = triaged_papers
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    format!(
+                        "[Ref {}] {} ({}). \"{}\". DOI: {} (Citações: {}).\nResumo Científico: {}",
+                        i + 1,
+                        p.authors,
+                        p.year,
+                        p.title,
+                        p.doi,
+                        p.cited_by_count,
+                        p.abstract_text
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            format!(
+                "\n\nEVIDÊNCIAS CIENTÍFICAS TRIADAS DO OPENALEX (integre os conceitos no texto da síntese e cite os autores):\n{}",
+                formatted_refs
+            )
+        } else {
+            String::new()
+        };
+
+        let system_instruction = "Você é o Agon — Professor Universitário Titular e Cientista Cognitivo do Svitlo v3.0.
+PROIBIÇÕES ESTRITAS:
+- NUNCA repita o enunciado ou cabeçalhos como 'TEMA ACADÊMICO:' ou 'EVIDÊNCIAS E ABSTRACTS'.
+- NUNCA gere resumos curtos ou genéricos.
+OBRIGAÇÕES DE CONTEÚDO:
+1. 'synthesis': Escreva uma aula magistral densa, didática e aprofundada (mínimo de 4 parágrafos completos, separados por \\n\\n) explicando definição, bases neurobiológicas/teóricas, mecanismos causais, quadro clínico/prático e relação com a literatura científica fornecida.
+2. 'feynman': Explique o tema usando a Técnica de Feynman (mínimo de 150 palavras), utilizando uma analogia concreta e descomplicando cada mecanismo técnico sem perder o rigor.
+3. 'key_points': Liste de 5 a 7 pontos-chave completos, densos e informativos.
+4. 'review_questions': Elabore de 3 a 5 perguntas de revisão socrática que exijam raciocínio analítico.
+5. 'mermaid': Gere um fluxograma Mermaid válido no formato graph TD usando aspas duplas em todos os nós, ex: graph TD\\n  A[\"Conceito\"] --> B[\"Mecanismo\"]
+6. 'cards': Gere de 5 a 8 flashcards de alta retenção com 'front' (pergunta clara e específica), 'back' (resposta técnica completa) e 'teacher_explanation' (explicação falada do professor).
+Retorne EXCLUSIVAMENTE um objeto JSON válido.";
+
+        let user_prompt = format!(
+            "TEMA CENTRAL DE ESTUDO: {}\n\nTEXTO / PEDIDO DO ESTUDANTE:\n{}{}\n\nRetorne APENAS o JSON estruturado completo com topic, summary (synthesis, key_points, review_questions, feynman, mermaid, cornell) e cards.",
+            clean_topic, pure_text, openalex_context
+        );
 
         let chat_req = ChatCompletionRequest {
             model: Some(self.default_model.clone()),
@@ -468,18 +784,22 @@ impl NativeInferenceEngine {
                     tool_calls: None,
                 },
             ],
-            temperature: Some(0.3),
+            temperature: Some(0.35),
             top_p: Some(0.9),
-            max_tokens: Some(2048),
+            max_tokens: Some(4096),
             stream: Some(false),
             tools: None,
             response_format: None,
         };
 
         let mut parsed_json: Option<Value> = None;
+        let mut model_used_label = format!("zorya/{}", self.default_model);
+
         if let Ok(llm_resp) = self.chat_completions(chat_req).await {
+            if let Some(m_str) = llm_resp.get("model").and_then(|v| v.as_str()) {
+                model_used_label = m_str.to_string();
+            }
             if let Some(content_str) = llm_resp["choices"][0]["message"]["content"].as_str() {
-                // Tenta extrair JSON do texto retornado pela LLM
                 let trimmed = content_str.trim();
                 let json_slice = if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
                     if start < end {
@@ -491,377 +811,222 @@ impl NativeInferenceEngine {
                     trimmed
                 };
                 if let Ok(val) = serde_json::from_str::<Value>(json_slice) {
-                    if val.is_object() && (val.get("synthesis").is_some() || val.get("summary").is_some()) {
+                    if val.is_object() {
                         parsed_json = Some(val);
                     }
                 }
             }
         }
 
-        // Se a LLM produziu JSON estruturado, utiliza o conteúdo gerado
         if let Some(llm_val) = parsed_json {
-            let synthesis = llm_val.get("synthesis")
+            let synthesis = llm_val
+                .get("synthesis")
                 .or_else(|| llm_val.pointer("/summary/synthesis"))
                 .and_then(|v| v.as_str())
-                .unwrap_or(&pure_text)
+                .unwrap_or("")
+                .trim()
                 .to_string();
 
-            let key_points = llm_val.get("key_points")
-                .or_else(|| llm_val.pointer("/summary/key_points"))
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect::<Vec<_>>())
-                .unwrap_or_else(|| {
-                    pure_text.lines()
-                        .map(|l| l.trim())
-                        .filter(|l| !l.is_empty() && (l.starts_with('-') || l.starts_with('*') || l.starts_with('•')))
-                        .map(|l| l.trim_start_matches(|c| c == '-' || c == '*' || c == '•' || c == ' ').to_string())
-                        .take(5)
-                        .collect()
+            if synthesis.len() >= 250 && !synthesis.starts_with("TEMA ACADÊMICO:") {
+                let key_points = llm_val
+                    .get("key_points")
+                    .or_else(|| llm_val.pointer("/summary/key_points"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                            .filter(|s| !s.is_empty() && !s.starts_with("TEMA ACADÊMICO:"))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+
+                let review_questions = llm_val
+                    .get("review_questions")
+                    .or_else(|| llm_val.pointer("/summary/review_questions"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_else(|| {
+                        vec![
+                            format!("Quais são os mecanismos estruturais e funcionais envolvidos em {}?", clean_topic),
+                            format!("Como diferenciar {} de quadros correlatos na prática clínica e acadêmica?", clean_topic),
+                        ]
+                    });
+
+                let feynman = llm_val
+                    .get("feynman")
+                    .or_else(|| llm_val.pointer("/summary/feynman"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| s.len() > 60)
+                    .unwrap_or_else(|| {
+                        format!(
+                            "Explicando {} pela Técnica de Feynman: imagine o funcionamento coordenado de uma rede em que uma estação específica de processamento precisa traduzir o planejamento interno em execução fluida. {}",
+                            clean_topic,
+                            key_points.first().cloned().unwrap_or_default()
+                        )
+                    });
+
+                let raw_mermaid = llm_val
+                    .get("mermaid")
+                    .or_else(|| llm_val.pointer("/summary/mermaid"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let safe_mermaid = sanitize_mermaid_v11(raw_mermaid, &clean_topic);
+
+                let cornell = json!({
+                    "cues": review_questions,
+                    "notes": synthesis,
+                    "summary": key_points.join("\n• ")
                 });
 
-            let review_questions = llm_val.get("review_questions")
-                .or_else(|| llm_val.pointer("/summary/review_questions"))
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect::<Vec<_>>())
-                .unwrap_or_else(|| vec![
-                    format!("Qual o conceito fundamental de {} abordado no texto?", topic),
-                    format!("Como aplicar as conclusões de {} na prática?", topic),
-                ]);
+                let default_citation = triaged_papers.first().map(|p| {
+                    json!({
+                        "authors": p.authors,
+                        "year": p.year,
+                        "title": p.title,
+                        "doi": p.doi,
+                        "url": p.url
+                    })
+                });
 
-            let feynman = llm_val.get("feynman")
-                .or_else(|| llm_val.pointer("/summary/feynman"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("{}: {}", topic, synthesis));
+                let mut cards = Vec::new();
+                if let Some(cards_arr) = llm_val.get("cards").and_then(|v| v.as_array()) {
+                    for (idx, c) in cards_arr.iter().enumerate() {
+                        let front = c
+                            .get("front")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        let back = c
+                            .get("back")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        if front.is_empty() || back.is_empty() || front.starts_with("TEMA ACADÊMICO:") {
+                            continue;
+                        }
+                        let teacher = c
+                            .get("teacher_explanation")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.trim().is_empty())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| format!("Fixação essencial sobre {}: {}", clean_topic, back));
 
-            let raw_mermaid = llm_val.get("mermaid")
-                .or_else(|| llm_val.pointer("/summary/mermaid"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let safe_mermaid = Self::sanitize_mermaid_v11(raw_mermaid, &topic);
+                        let card_svg = build_card_vectorcraft_svg(&clean_topic, &front, &back, idx);
+                        let card_data_url = format!("data:image/svg+xml;base64,{}", BASE64_STD.encode(card_svg.as_bytes()));
 
-            let cornell = llm_val.get("cornell")
-                .or_else(|| llm_val.pointer("/summary/cornell"))
-                .cloned()
-                .unwrap_or_else(|| json!({
-                    "cues": [topic.clone(), "Fundamento Central".to_string()],
-                    "notes": [synthesis.clone()],
-                    "summary": format!("Resumo de {} estruturado pelo Svitlo.", topic)
-                }));
+                        let citation_val = c.get("citation").cloned().or_else(|| {
+                            triaged_papers.get(idx % triaged_papers.len().max(1)).map(|p| {
+                                json!({
+                                    "authors": p.authors,
+                                    "year": p.year,
+                                    "title": p.title,
+                                    "doi": p.doi,
+                                    "url": p.url
+                                })
+                            }).or_else(|| default_citation.clone())
+                        });
 
-            let mut cards = Vec::new();
-            if let Some(cards_arr) = llm_val.get("cards").and_then(|v| v.as_array()) {
-                for (idx, c) in cards_arr.iter().enumerate() {
-                    let front = c.get("front").and_then(|v| v.as_str()).unwrap_or("Conceito Chave").to_string();
-                    let back = c.get("back").and_then(|v| v.as_str()).unwrap_or(&synthesis).to_string();
-                    let teacher = c.get("teacher_explanation").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let existing_svg = c.get("visual_svg")
-                        .or_else(|| c.get("svg_diagram"))
-                        .or_else(|| c.get("svg"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let card_svg = if existing_svg.contains("<svg") && existing_svg.len() > 120 {
-                        existing_svg.to_string()
-                    } else {
-                        Self::build_card_vectorcraft_svg(&topic, &front, &back, idx)
-                    };
-                    let data_url = Self::svg_to_data_url(&card_svg);
-                    cards.push(json!({
-                        "front": front,
-                        "back": back,
-                        "teacher_explanation": teacher,
-                        "tags": ["svitlo", "zorya-v3", "anki"],
-                        "visual_svg": card_svg,
-                        "svg_diagram": card_svg,
-                        "svg": card_svg,
-                        "image_data_url": data_url,
-                    }));
+                        cards.push(json!({
+                            "front": front,
+                            "back": back,
+                            "teacher_explanation": teacher,
+                            "visual_svg": card_svg,
+                            "svg_diagram": card_svg,
+                            "svg": card_svg,
+                            "image_data_url": card_data_url,
+                            "tags": ["svitlo", "zorya-v3", "anki"],
+                            "citation": citation_val
+                        }));
+                    }
                 }
-            }
 
-            if cards.is_empty() {
-                let fb_front = format!("Qual o princípio fundamental de {}?", topic);
-                let fb_back = format!("{}\n\nPontos Essenciais:\n{}", synthesis, key_points.iter().map(|p| format!("• {}", p)).collect::<Vec<_>>().join("\n"));
-                let card_svg = Self::build_card_vectorcraft_svg(&topic, &fb_front, &fb_back, 0);
-                let data_url = Self::svg_to_data_url(&card_svg);
-                cards.push(json!({
-                    "front": fb_front,
-                    "back": fb_back,
-                    "teacher_explanation": format!("Revisão pedagógica estruturada para {}", topic),
-                    "tags": ["svitlo", "zorya-v3", "anki"],
-                    "visual_svg": card_svg,
-                    "svg_diagram": card_svg,
-                    "svg": card_svg,
-                    "image_data_url": data_url,
-                }));
-            }
+                let master_svg = build_card_vectorcraft_svg(
+                    &clean_topic,
+                    &clean_topic,
+                    key_points.first().map(|s| s.as_str()).unwrap_or(&synthesis),
+                    0,
+                );
 
-            return Ok(json!({
-                "topic": topic,
-                "mode": req.mode.unwrap_or_else(|| "comprehensive".to_string()),
-                "summary": {
-                    "synthesis": synthesis,
-                    "key_points": key_points,
-                    "review_questions": review_questions,
+                return Ok(json!({
+                    "success": true,
+                    "topic": clean_topic,
+                    "mode": req.mode.unwrap_or_else(|| "both".to_string()),
+                    "model_used": model_used_label,
+                    "academic_references": triaged_papers,
+                    "summary": {
+                        "topic": clean_topic,
+                        "synthesis": synthesis,
+                        "teacher_audio_script": feynman,
+                        "key_points": key_points,
+                        "review_questions": review_questions,
+                        "feynman": feynman,
+                        "mermaid": safe_mermaid,
+                        "cornell": cornell,
+                    },
                     "feynman": feynman,
-                    "mermaid": safe_mermaid.clone(),
-                    "cornell": cornell,
-                },
-                "mermaid": safe_mermaid,
-                "svg_diagram": real_svg,
-                "cards": cards,
-            }));
-        }
-
-        // 3. Fallback determinístico caso o modelo esteja indisponível, extraindo diretamente do texto do aluno sem templates estáticos fictícios
-        let mut key_points = Vec::new();
-        for line in pure_text.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
-            if line.starts_with('-') || line.starts_with('*') || line.starts_with('•') {
-                let clean = line.trim_start_matches(|c| c == '-' || c == '*' || c == '•' || c == ' ').to_string();
-                if !clean.is_empty() && key_points.len() < 5 {
-                    key_points.push(clean);
-                }
+                    "mermaid": safe_mermaid,
+                    "svg_diagram": master_svg,
+                    "cards": cards,
+                }));
             }
         }
-        if key_points.is_empty() {
-            let sentences: Vec<&str> = pure_text.split(|c| c == '.' || c == '\n').map(|s| s.trim()).filter(|s| !s.is_empty() && s.len() > 15).collect();
-            for s in sentences.into_iter().take(4) {
-                key_points.push(s.to_string());
-            }
-        }
-        if key_points.is_empty() {
-            key_points.push(pure_text.chars().take(120).collect());
-        }
 
-        let synthesis = if pure_text.len() > 300 {
-            pure_text.chars().take(300).collect::<String>()
-        } else {
-            pure_text.clone()
-        };
-
-        let review_questions = vec![
-            format!("Qual a definição central e importância de {} com base no texto?", topic),
-            format!("Como o conteúdo apresentado sobre {} se articula na resolução de problemas?", topic),
-        ];
-
-        let feynman = format!(
-            "Explicando {}: {}",
-            topic,
-            if !synthesis.is_empty() { synthesis.chars().take(200).collect::<String>() } else { pure_text.chars().take(200).collect::<String>() }
-        );
-
-        let fallback_mermaid = Self::sanitize_mermaid_v11("", &topic);
-
-        let cornell = json!({
-            "cues": [topic, "Conceito Central".to_string()],
-            "notes": [synthesis.clone()],
-            "summary": format!("Resumo de fixação para {}.", topic)
-        });
-
-        let card_front = format!("Qual o princípio fundamental de {}?", topic);
-        let card_back = format!("{}\n\nPontos Essenciais:\n{}", synthesis, key_points.iter().map(|p| format!("• {}", p)).collect::<Vec<_>>().join("\n"));
-        let fb_card_svg = Self::build_card_vectorcraft_svg(&topic, &card_front, &card_back, 0);
-        let fb_data_url = Self::svg_to_data_url(&fb_card_svg);
-
-        let cards = vec![json!({
-            "front": card_front,
-            "back": card_back,
-            "teacher_explanation": format!("Revisão pedagógica estruturada para {}", topic),
-            "tags": ["svitlo", "zorya-v3", "anki"],
-            "visual_svg": fb_card_svg,
-            "svg_diagram": fb_card_svg,
-            "svg": fb_card_svg,
-            "image_data_url": fb_data_url,
-        })];
-
-        Ok(json!({
-            "topic": topic,
-            "mode": req.mode.unwrap_or_else(|| "comprehensive".to_string()),
-            "summary": {
-                "synthesis": synthesis,
-                "key_points": key_points,
-                "review_questions": review_questions,
-                "feynman": feynman,
-                "mermaid": fallback_mermaid.clone(),
-                "cornell": cornell,
-            },
-            "mermaid": fallback_mermaid,
-            "svg_diagram": real_svg,
-            "cards": cards,
-        }))
-    }
-
-    /// Sanitiza diagramas Mermaid para a gramática estrita do Mermaid v11.17.2,
-    /// garantindo que todos os rótulos de nós estejam entre aspas duplas.
-    pub fn sanitize_mermaid_v11(raw: &str, fallback_topic: &str) -> String {
-        let safe_topic: String = fallback_topic
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
-                    c
-                } else {
-                    ' '
-                }
-            })
-            .collect::<String>()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .chars()
-            .take(40)
-            .collect();
-        let topic_label = if safe_topic.is_empty() {
-            "Conceito Central".to_string()
-        } else {
-            safe_topic
-        };
-
-        let trimmed = raw
-            .trim()
-            .trim_start_matches("```mermaid")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim();
-
-        if trimmed.is_empty()
-            || (!trimmed.starts_with("graph ") && !trimmed.starts_with("flowchart "))
-        {
-            return format!(
-                "graph TD\n  A[\"{}\"] --> B[\"Fundamentos Teoricos\"]\n  A --> C[\"Mecanismos Centrais\"]\n  A --> D[\"Aplicacao Pratica\"]",
-                topic_label
-            );
-        }
-
-        let mut sanitized_lines = Vec::new();
-        for (idx, line) in trimmed.lines().enumerate() {
-            let l = line.trim();
-            if l.is_empty() {
-                continue;
-            }
-            if idx == 0 {
-                sanitized_lines.push(l.to_string());
-                continue;
-            }
-            let mut out = String::with_capacity(l.len() + 8);
-            let chars: Vec<char> = l.chars().collect();
-            let mut i = 0;
-            while i < chars.len() {
-                if chars[i] == '[' {
-                    out.push('[');
-                    i += 1;
-                    let mut inner = String::new();
-                    while i < chars.len() && chars[i] != ']' {
-                        inner.push(chars[i]);
-                        i += 1;
-                    }
-                    let clean_inner: String = inner
-                        .trim()
-                        .trim_matches('"')
-                        .trim_matches('\'')
-                        .chars()
-                        .map(|c| {
-                            if matches!(c, '"' | '[' | ']' | '{' | '}' | '(' | ')' | ';' | '|' | '<' | '>') {
-                                ' '
-                            } else {
-                                c
-                            }
-                        })
-                        .collect::<String>()
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    out.push('"');
-                    out.push_str(if clean_inner.is_empty() {
-                        "Conceito"
-                    } else {
-                        &clean_inner
-                    });
-                    out.push('"');
-                    if i < chars.len() && chars[i] == ']' {
-                        out.push(']');
-                        i += 1;
-                    }
-                } else {
-                    out.push(chars[i]);
-                    i += 1;
-                }
-            }
-            sanitized_lines.push(out);
-        }
-
-        sanitized_lines.join("\n")
-    }
-
-    pub fn svg_to_data_url(svg: &str) -> String {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
-        format!("data:image/svg+xml;base64,{}", STANDARD.encode(svg.as_bytes()))
-    }
-
-    /// Constrói um diagrama vetorial SVG rico via VectorCraft para ilustrar o card
-    pub fn build_card_vectorcraft_svg(topic: &str, front: &str, back: &str, idx: usize) -> String {
-        let short_topic: String = topic.chars().take(42).collect();
-        let short_front: String = front.chars().take(52).collect();
-        let short_back: String = back.chars().take(68).collect();
-
-        let spec = VectorDiagramSpec {
-            title: format!("{} — Card #{}", short_topic, idx + 1),
-            subtitle: Some("VectorCraft Card Diagram".to_string()),
-            width: Some(800),
-            height: Some(450),
-            nodes: vec![
-                VectorNodeSpec {
-                    id: "T".to_string(),
-                    label: short_topic,
-                    description: Some("Tópico Central".to_string()),
-                    x: Some(40.0),
-                    y: Some(150.0),
-                    color: Some("#2563EB".to_string()),
-                },
-                VectorNodeSpec {
-                    id: "Q".to_string(),
-                    label: short_front,
-                    description: Some("Pergunta / Gatilho".to_string()),
-                    x: Some(290.0),
-                    y: Some(150.0),
-                    color: Some("#10B981".to_string()),
-                },
-                VectorNodeSpec {
-                    id: "A".to_string(),
-                    label: short_back,
-                    description: Some("Conceito / Resposta".to_string()),
-                    x: Some(540.0),
-                    y: Some(150.0),
-                    color: Some("#8B5CF6".to_string()),
-                },
-            ],
-            edges: Some(vec![
-                VectorEdgeSpec {
-                    from: "T".to_string(),
-                    to: "Q".to_string(),
-                    label: Some("gatilho".to_string()),
-                },
-                VectorEdgeSpec {
-                    from: "Q".to_string(),
-                    to: "A".to_string(),
-                    label: Some("reforço".to_string()),
-                },
-            ]),
-        };
-
-        render_svg_diagram(&spec).unwrap_or_else(|_| {
-            format!(
-                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450"><rect width="100%" height="100%" fill="#1E293B"/><text x="50%" y="50%" fill="#F8FAFC" text-anchor="middle">Card #{}</text></svg>"##,
-                idx + 1
-            )
-        })
+        anyhow::bail!("A inferência não atingiu o critério mínimo de qualidade acadêmica do Agon.")
     }
 }
 
-/// Remove qualquer envelope de template, marcações de prompt de sistema ou delimitadores repetidos
+/// Extrai o tópico acadêmico limpo sem prefixos conversacionais ("me fale sobre", "o que é", etc.)
+pub fn extract_clean_academic_topic(raw: &str) -> String {
+    let first_line = raw
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or("Estudo Acadêmico");
+
+    let mut lower_check = first_line.to_string();
+    let prefixes = [
+        "TEMA ACADÊMICO:",
+        "tema acadêmico:",
+        "Me fale sobre ",
+        "me fale sobre ",
+        "Me Fale Sobre ",
+        "Fale sobre ",
+        "fale sobre ",
+        "Explique sobre ",
+        "explique sobre ",
+        "Explique ",
+        "explique ",
+        "O que é ",
+        "o que é ",
+        "Resuma ",
+        "resuma ",
+        "Quero estudar ",
+        "quero estudar ",
+    ];
+    for p in prefixes {
+        if let Some(stripped) = lower_check.strip_prefix(p) {
+            lower_check = stripped.trim().to_string();
+        }
+    }
+    let clean: String = lower_check.chars().take(75).collect();
+    if clean.is_empty() {
+        "Síntese Acadêmica".to_string()
+    } else {
+        clean
+    }
+}
+
+/// Remove qualquer envelope de template ou cabeçalho bruto repetido
 pub fn extract_pure_student_text(raw: &str) -> String {
     let mut cleaned = raw.to_string();
-
-    // Remove tags de sistema e instruções de template comuns
     let markers_to_strip = [
         "### INSTRUÇÃO:",
         "### TEXTO DO ESTUDANTE:",
@@ -873,16 +1038,156 @@ pub fn extract_pure_student_text(raw: &str) -> String {
         "```json",
         "```",
     ];
-
     for marker in markers_to_strip {
         cleaned = cleaned.replace(marker, "");
     }
-
     if let Some(pos) = cleaned.find("### CONTEÚDO PURO:") {
         cleaned = cleaned[pos + "### CONTEÚDO PURO:".len()..].to_string();
     }
-
     cleaned.trim().to_string()
+}
+
+/// Sanitiza diagramas Mermaid para a gramática estrita do Mermaid v11.17.2
+pub fn sanitize_mermaid_v11(raw: &str, fallback_topic: &str) -> String {
+    let safe_topic: String = fallback_topic
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(40)
+        .collect();
+    let topic_label = if safe_topic.is_empty() {
+        "Conceito Central".to_string()
+    } else {
+        safe_topic
+    };
+
+    let trimmed = raw
+        .trim()
+        .trim_start_matches("```mermaid")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    if trimmed.is_empty() || (!trimmed.starts_with("graph ") && !trimmed.starts_with("flowchart ")) {
+        return format!(
+            "graph TD\n  A[\"{}\"] --> B[\"Fundamentos e Mecanismos\"]\n  A --> C[\"Evidências Científicas\"]\n  A --> D[\"Aplicação Prática\"]",
+            topic_label
+        );
+    }
+
+    let mut sanitized_lines = Vec::new();
+    for (idx, line) in trimmed.lines().enumerate() {
+        let l = line.trim();
+        if l.is_empty() {
+            continue;
+        }
+        if idx == 0 {
+            sanitized_lines.push(l.to_string());
+            continue;
+        }
+        let mut out = String::with_capacity(l.len() + 8);
+        let chars: Vec<char> = l.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '[' {
+                out.push('[');
+                i += 1;
+                let mut inner = String::new();
+                while i < chars.len() && chars[i] != ']' {
+                    inner.push(chars[i]);
+                    i += 1;
+                }
+                let clean_inner: String = inner
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .chars()
+                    .map(|c| {
+                        if matches!(c, '"' | '[' | ']' | '{' | '}' | '(' | ')' | ';' | '|' | '<' | '>' | ':') {
+                            ' '
+                        } else {
+                            c
+                        }
+                    })
+                    .collect::<String>()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                out.push('"');
+                out.push_str(if clean_inner.is_empty() { "Conceito" } else { &clean_inner });
+                out.push('"');
+                if i < chars.len() && chars[i] == ']' {
+                    out.push(']');
+                    i += 1;
+                }
+            } else {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+        sanitized_lines.push(out);
+    }
+    sanitized_lines.join("\n")
+}
+
+/// Constrói um diagrama vetorial SVG rico via VectorCraft para ilustrar cada flashcard
+pub fn build_card_vectorcraft_svg(topic: &str, front: &str, back: &str, idx: usize) -> String {
+    let short_topic: String = topic.chars().take(36).collect();
+    let short_front: String = front.chars().take(48).collect();
+    let short_back: String = back.chars().take(64).collect();
+
+    let spec = VectorDiagramSpec {
+        title: format!("{} • Card #{}", short_topic, idx + 1),
+        subtitle: Some("Diagrama Conceitual Svitlo • VectorCraft".to_string()),
+        width: Some(960),
+        height: Some(540),
+        nodes: vec![
+            VectorNodeSpec {
+                id: "n1".to_string(),
+                label: short_topic,
+                description: Some("Eixo Temático".to_string()),
+                x: Some(70.0),
+                y: Some(180.0),
+                color: Some("#8B5E3C".to_string()),
+            },
+            VectorNodeSpec {
+                id: "n2".to_string(),
+                label: short_front,
+                description: Some("Questão / Gatilho Cognitivo".to_string()),
+                x: Some(370.0),
+                y: Some(180.0),
+                color: Some("#C9A84C".to_string()),
+            },
+            VectorNodeSpec {
+                id: "n3".to_string(),
+                label: short_back,
+                description: Some("Síntese e Fixação".to_string()),
+                x: Some(670.0),
+                y: Some(180.0),
+                color: Some("#10B981".to_string()),
+            },
+        ],
+        edges: Some(vec![
+            VectorEdgeSpec {
+                from: "n1".to_string(),
+                to: "n2".to_string(),
+                label: Some("investiga".to_string()),
+            },
+            VectorEdgeSpec {
+                from: "n2".to_string(),
+                to: "n3".to_string(),
+                label: Some("consolida".to_string()),
+            },
+        ]),
+    };
+
+    render_svg_diagram(&spec).unwrap_or_else(|_| {
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="960" height="540"><rect width="100%" height="100%" fill="#0F172A"/><text x="50%" y="50%" fill="#F8FAFC" text-anchor="middle" font-size="20">VectorCraft Diagram</text></svg>"##.to_string()
+    })
 }
 
 pub async fn handle_svitlo_generate(
@@ -893,9 +1198,10 @@ pub async fn handle_svitlo_generate(
     match state.inference.generate_svitlo_study(req).await {
         Ok(res) => (StatusCode::OK, Json(res)).into_response(),
         Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": { "message": err.to_string(), "type": "svitlo_generate_error" } })),
-        ).into_response(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "success": false, "error": { "message": err.to_string(), "type": "svitlo_generate_error" } })),
+        )
+            .into_response(),
     }
 }
 
@@ -915,39 +1221,9 @@ pub async fn handle_anki_generate_media(
             .collect::<String>()
     });
 
-    let spec = VectorDiagramSpec {
-        title: topic.clone(),
-        subtitle: Some("Mídia Vetorial Anki • VectorCraft".to_string()),
-        width: Some(800),
-        height: Some(450),
-        nodes: vec![
-            VectorNodeSpec {
-                id: "n1".to_string(),
-                label: topic.chars().take(28).collect::<String>(),
-                description: req.back.clone().or_else(|| pure_content.clone()),
-                x: Some(60.0),
-                y: Some(150.0),
-                color: Some("#2563EB".to_string()),
-            },
-            VectorNodeSpec {
-                id: "n2".to_string(),
-                label: "Memorização Ativa".to_string(),
-                description: Some("Repetição espaçada com feedback imediato".to_string()),
-                x: Some(440.0),
-                y: Some(150.0),
-                color: Some("#059669".to_string()),
-            },
-        ],
-        edges: Some(vec![VectorEdgeSpec {
-            from: "n1".to_string(),
-            to: "n2".to_string(),
-            label: Some("reforço".to_string()),
-        }]),
-    };
-
-    let svg = render_svg_diagram(&spec).unwrap_or_else(|_| {
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450"><rect width="100%" height="100%" fill="#1E293B"/><text x="50%" y="50%" fill="#F8FAFC" text-anchor="middle">Anki Media</text></svg>"##.to_string()
-    });
+    let front_str = req.front.as_deref().unwrap_or(&topic);
+    let back_str = req.back.as_deref().or(pure_content.as_deref()).unwrap_or("Síntese Aplicada");
+    let svg = build_card_vectorcraft_svg(&topic, front_str, back_str, 0);
 
     (
         StatusCode::OK,
@@ -955,6 +1231,7 @@ pub async fn handle_anki_generate_media(
             "status": "success",
             "topic": topic,
             "media_type": req.media_type.unwrap_or_else(|| "svg".to_string()),
+            "visual_svg": svg,
             "svg": svg,
         })),
     )
@@ -971,7 +1248,8 @@ pub async fn handle_chat_completions(
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": { "message": err.to_string(), "type": "native_inference_error" } })),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -987,7 +1265,11 @@ pub async fn handle_load_model(
     let _guard = state.systray.begin_ai_work();
     match state.inference.load_model(req).await {
         Ok(info) => (StatusCode::OK, Json(json!({ "status": "loaded", "model": info }))).into_response(),
-        Err(err) => (StatusCode::BAD_REQUEST, Json(json!({ "status": "error", "message": err.to_string() }))).into_response(),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "status": "error", "message": err.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -996,7 +1278,15 @@ pub async fn handle_unload_model(
     Json(req): Json<UnloadModelRequest>,
 ) -> Response {
     match state.inference.unload_model(&req.model).await {
-        Ok(removed) => (StatusCode::OK, Json(json!({ "status": "unloaded", "model": req.model, "was_loaded": removed }))).into_response(),
-        Err(err) => (StatusCode::BAD_REQUEST, Json(json!({ "status": "error", "message": err.to_string() }))).into_response(),
+        Ok(removed) => (
+            StatusCode::OK,
+            Json(json!({ "status": "unloaded", "model": req.model, "was_loaded": removed })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "status": "error", "message": err.to_string() })),
+        )
+            .into_response(),
     }
 }

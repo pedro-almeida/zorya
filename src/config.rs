@@ -261,10 +261,11 @@ impl Default for CraftConfig {
     }
 }
 
-fn default_groq_primary() -> String { "openai/gpt-oss-120b".to_string() }
-fn default_groq_fast() -> String { "openai/gpt-oss-20b".to_string() }
-fn default_groq_multi() -> String { "qwen/qwen3.8-27b".to_string() }
-fn default_gemini_model() -> String { "gemini-2.5-flash".to_string() }
+fn default_groq_primary_opt() -> Option<String> { Some("openai/gpt-oss-120b".to_string()) }
+fn default_groq_fast_opt() -> Option<String> { Some("openai/gpt-oss-20b".to_string()) }
+fn default_groq_multi_opt() -> Option<String> { Some("qwen/qwen3.8-27b".to_string()) }
+fn default_groq_whisper_opt() -> Option<String> { Some("whisper-large-v3".to_string()) }
+fn default_gemini_model_opt() -> Option<String> { Some("gemini-2.5-flash".to_string()) }
 
 // Credentials configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,15 +278,16 @@ pub struct CredentialsConfig {
     pub openai_keys: Vec<String>,
     pub vps_credentials_path: Option<String>,
     pub validation_cache_ttl_hours: Option<u64>,
-    #[serde(default = "default_groq_primary")]
-    pub groq_primary_model: String,
-    #[serde(default = "default_groq_fast")]
-    pub groq_fast_model: String,
-    #[serde(default = "default_groq_multi")]
-    pub groq_multilingual_model: String,
+    #[serde(default = "default_groq_primary_opt")]
+    pub groq_primary_model: Option<String>,
+    #[serde(default = "default_groq_fast_opt")]
+    pub groq_fast_model: Option<String>,
+    #[serde(default = "default_groq_multi_opt")]
+    pub groq_multilingual_model: Option<String>,
+    #[serde(default = "default_groq_whisper_opt")]
     pub groq_whisper_model: Option<String>,
-    #[serde(default = "default_gemini_model")]
-    pub gemini_model: String,
+    #[serde(default = "default_gemini_model_opt")]
+    pub gemini_model: Option<String>,
 }
 
 impl Default for CredentialsConfig {
@@ -294,13 +296,13 @@ impl Default for CredentialsConfig {
             groq_keys: Vec::new(),
             gemini_keys: Vec::new(),
             openai_keys: Vec::new(),
-            vps_credentials_path: None,
+            vps_credentials_path: Some("/var/www/mcp-server/credentials/credentials.json".to_string()),
             validation_cache_ttl_hours: Some(24),
-            groq_primary_model: default_groq_primary(),
-            groq_fast_model: default_groq_fast(),
-            groq_multilingual_model: default_groq_multi(),
-            groq_whisper_model: Some("whisper-large-v3".to_string()),
-            gemini_model: default_gemini_model(),
+            groq_primary_model: default_groq_primary_opt(),
+            groq_fast_model: default_groq_fast_opt(),
+            groq_multilingual_model: default_groq_multi_opt(),
+            groq_whisper_model: default_groq_whisper_opt(),
+            gemini_model: default_gemini_model_opt(),
         }
     }
 }
