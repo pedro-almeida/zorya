@@ -107,9 +107,14 @@ impl SystrayController {
                 menu::{Menu, MenuEvent, MenuItem},
                 TrayIconBuilder, TrayIconEvent,
             };
+            use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
             use windows_sys::Win32::UI::WindowsAndMessaging::{
                 DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
             };
+
+            unsafe {
+                CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED as u32);
+            }
 
             let tray_menu = Menu::new();
             let item_open = MenuItem::new("⚡ Abrir Painel de Configurações (localhost:8085)", true, None);
