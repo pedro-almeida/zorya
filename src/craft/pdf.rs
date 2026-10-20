@@ -48,7 +48,10 @@ pub fn run_tesseract(input_path: &str) -> Option<String> {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PdfExtractRequest {
+    #[serde(default)]
     pub pdf_path: String,
+    #[serde(default)]
+    pub pdf_base64: Option<String>,
     pub enable_ocr_fallback: Option<bool>,
     pub max_pages: Option<usize>,
 }
@@ -98,17 +101,56 @@ pub fn extract_pdf_text_streams(raw: &[u8]) -> Vec<String> {
     pages
 }
 
-pub async fn handle_pdf_extract(Json(req): Json<PdfExtractRequest>) -> Result<Json<PdfExtractResponse>, (StatusCode, String)> {
-    if !crate::server::is_safe_craft_path(&req.pdf_path) {
-        return Err((StatusCode::FORBIDDEN, "Caminho de arquivo inválido ou não autorizado (Path Traversal detectado).".to_string()));
-    }
+pub async fn handle_pdf_extract(
+    Json(req): Json<PdfExtractRequest>,
+) -> Result<Json<PdfExtractResponse>, (StatusCode, String)> {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+    let mut temp_file_created: Option<std::path::PathBuf> = None;
+    let effective_path = if let Some(b64) = &req.pdf_base64 {
+        let clean_b64 = b64
+            .trim()
+            .strip_prefix("data:application/pdf;base64,")
+            .unwrap_or(b64.trim());
+        let bytes = BASE64.decode(clean_b64).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("PDF base64 inválido: {}", e),
+            )
+        })?;
+        let tmp_path = std::env::temp_dir().join(format!(
+            "zorya_pdf_{}.pdf",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::write(&tmp_path, &bytes).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao gravar PDF temporário: {}", e),
+            )
+        })?;
+        let p_str = tmp_path.to_string_lossy().to_string();
+        temp_file_created = Some(tmp_path);
+        p_str
+    } else {
+        if !crate::server::is_safe_craft_path(&req.pdf_path) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Caminho de arquivo inválido ou não autorizado (Path Traversal detectado)."
+                    .to_string(),
+            ));
+        }
+        req.pdf_path.clone()
+    };
+
     let ocr_enabled = req.enable_ocr_fallback.unwrap_or(true);
-    let raw = std::fs::read(&req.pdf_path).unwrap_or_default();
+    let raw = std::fs::read(&effective_path).unwrap_or_default();
     let mut raw_pages = extract_pdf_text_streams(&raw);
 
     // Se a extração interna retornou vazia ou muito curta, tenta pdftotext suprimindo janelas
-    if (raw_pages.is_empty() || raw_pages.iter().all(|p| p.trim().is_empty())) && std::path::Path::new(&req.pdf_path).exists() {
-        if let Some(txt) = run_pdftotext(&req.pdf_path) {
+    if (raw_pages.is_empty() || raw_pages.iter().all(|p| p.trim().is_empty()))
+        && std::path::Path::new(&effective_path).exists()
+    {
+        if let Some(txt) = run_pdftotext(&effective_path) {
             raw_pages = vec![txt];
         }
     }
@@ -123,7 +165,7 @@ pub async fn handle_pdf_extract(Json(req): Json<PdfExtractRequest>) -> Result<Js
         let used_ocr = p_txt.trim().len() < 30 && ocr_enabled;
         let mut final_txt = p_txt.trim().to_string();
         if used_ocr {
-            if let Some(ocr_text) = run_tesseract(&req.pdf_path) {
+            if let Some(ocr_text) = run_tesseract(&effective_path) {
                 if !ocr_text.trim().is_empty() {
                     final_txt = ocr_text;
                 }
@@ -144,8 +186,18 @@ pub async fn handle_pdf_extract(Json(req): Json<PdfExtractRequest>) -> Result<Js
         });
     }
 
+    if let Some(tmp) = temp_file_created {
+        let _ = std::fs::remove_file(tmp);
+    }
+
+    let result_path = if req.pdf_path.is_empty() {
+        "remote_base64_upload.pdf".to_string()
+    } else {
+        req.pdf_path
+    };
+
     Ok(Json(PdfExtractResponse {
-        pdf_path: req.pdf_path,
+        pdf_path: result_path,
         total_pages: pages.len(),
         combined_markdown: combined,
         pages,
