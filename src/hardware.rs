@@ -101,7 +101,18 @@ impl HardwareProfile {
 
         let npu_detected = Self::probe_npu(&cpu_brand);
         let igpu_model = Self::probe_igpu();
-        let (nvidia_model, nvidia_vram_mb, nvidia_free_mb) = Self::probe_nvidia_cuda();
+        let (mut nvidia_model, mut nvidia_vram_mb, mut nvidia_free_mb) = Self::probe_nvidia_cuda();
+        #[cfg(target_os = "windows")]
+        if nvidia_model.is_none() {
+            if let Some((name, vram)) = Self::detect_windows_wmi_gpu() {
+                let lower = name.to_lowercase();
+                if lower.contains("nvidia") || lower.contains("geforce") || lower.contains("gtx") || lower.contains("rtx") {
+                    nvidia_model = Some(name);
+                    nvidia_vram_mb = vram;
+                    nvidia_free_mb = vram;
+                }
+            }
+        }
         let amd_dgpu = if nvidia_model.is_none() {
             Self::probe_amd_rocm_vulkan()
         } else {
@@ -263,8 +274,13 @@ impl HardwareProfile {
     fn probe_igpu() -> Option<String> {
         #[cfg(target_os = "windows")]
         {
-            if let Ok(out) = new_command("wmic")
-                .args(["path", "win32_VideoController", "get", "Name"])
+            if let Ok(out) = new_command("powershell")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
+                ])
                 .output()
             {
                 let text = String::from_utf8_lossy(&out.stdout);
@@ -329,5 +345,27 @@ impl HardwareProfile {
             }
         }
         None
+    }
+
+    #[allow(dead_code)]
+    fn detect_windows_wmi_gpu() -> Option<(String, u64)> {
+        let out = new_command("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-CimInstance Win32_VideoController | Select-Object -First 1 Name,AdapterRAM | ConvertTo-Json -Compress",
+            ])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let val: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+        let name = val.get("Name")?.as_str()?.trim().to_string();
+        let ram_bytes = val.get("AdapterRAM").and_then(|v| v.as_u64()).unwrap_or(0);
+        let vram_mb = if ram_bytes > 0 { ram_bytes / (1024 * 1024) } else { 4096 };
+        Some((name, vram_mb))
     }
 }

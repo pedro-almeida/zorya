@@ -105,6 +105,9 @@ pub async fn handle_voice_tts(
 
 pub async fn handle_list_embeddings() -> Json<Vec<SpeakerEmbedding>> {
     let reg = VoiceRegistry::new();
-    let guard = reg.profiles.read().unwrap();
+    let guard = reg
+        .profiles
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     Json(guard.values().cloned().collect())
 }

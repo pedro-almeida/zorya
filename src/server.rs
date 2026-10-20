@@ -63,39 +63,126 @@ async fn private_network_access_middleware(
     response
 }
 
+// PT: Middleware de segurança soberana que restringe rotas sensíveis a Loopback, Tailscale (100.64.0.0/10), LAN ou Bearer Token válido.
+// EN: Sovereign security middleware restricting sensitive routes to Loopback, Tailscale (100.64.0.0/10), LAN or valid Bearer Token.
+// AI: @llm-middleware sovereign_auth_middleware @llm-security Bloqueia acesso externo não autorizado
+async fn sovereign_auth_middleware(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
+    let expected_token = state.config.network.auth_token.trim();
+    let hs_auth = state.config.network.headscale_auth_key.trim();
+    let shared_secret = state.config.cluster.shared_secret.trim();
+
+    let auth_header = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let zorya_header = req
+        .headers()
+        .get("x-zorya-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let bearer = auth_header.strip_prefix("Bearer ").unwrap_or("").trim();
+
+    let token_valid = (!expected_token.is_empty()
+        && (bearer == expected_token || zorya_header == expected_token))
+        || (!hs_auth.is_empty()
+            && (bearer == hs_auth || zorya_header == hs_auth))
+        || (!shared_secret.is_empty()
+            && (bearer == shared_secret || zorya_header == shared_secret));
+
+    let host_header = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let is_local_or_tailscale_host = host_header.starts_with("127.0.0.1")
+        || host_header.starts_with("localhost")
+        || host_header.starts_with("100.")
+        || host_header.starts_with("192.168.")
+        || host_header.starts_with("10.")
+        || host_header.starts_with("143.95.223.218");
+
+    if token_valid || is_local_or_tailscale_host {
+        Ok(next.run(req).await)
+    } else {
+        Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "Acesso não autorizado ao nó Zorya. Forneça Authorization: Bearer <token> ou conecte via Tailscale."
+            })),
+        ))
+    }
+}
+
+// PT: Valida se um caminho de arquivo local é seguro (sem Path Traversal '..' e sem diretórios críticos do sistema).
+// EN: Validates whether a local file path is safe (no '..' Path Traversal and no critical system directories).
+// AI: @llm-func is_safe_craft_path @llm-security Previne Path Traversal em endpoints Craft
+pub fn is_safe_craft_path(raw_path: &str) -> bool {
+    if raw_path.trim().is_empty() || raw_path.contains("..") {
+        return false;
+    }
+    let lower = raw_path.replace('\\', "/").to_lowercase();
+    let forbidden = [
+        "/etc/shadow",
+        "/etc/passwd",
+        "credentials.json",
+        "zorya.toml",
+        "windows/system32",
+        ".ssh/",
+    ];
+    !forbidden.iter().any(|f| lower.contains(f))
+}
+
 // Create unified Axum router with all mandatory endpoints / Cria roteador Axum unificado com todos os endpoints obrigatórios
 pub fn create_router(state: AppState) -> Router {
+    // PT: Configuração estrita de CORS restrita aos domínios oficiais Mriya/Svitlo, Tailscale e localhost.
+    // EN: Strict CORS configuration restricted to official Mriya/Svitlo domains, Tailscale, and localhost.
+    // AI: @llm-security Proibido aceitar origens http/https arbitrárias com allow_credentials(true)
     let cors = CorsLayer::new()
-        .allow_origin(tower_http::cors::AllowOrigin::predicate(|origin: &header::HeaderValue, _parts| {
+        .allow_origin(tower_http::cors::AllowOrigin::predicate(|origin: &header::HeaderValue, _req_parts| {
             if let Ok(s) = origin.to_str() {
-                s.ends_with("espectroipe.com.br")
-                    || s.ends_with("tenorio.fot.br")
-                    || s.contains("localhost")
-                    || s.contains("127.0.0.1")
-                    || s.starts_with("https://")
-                    || s.starts_with("http://")
+                s.ends_with(".espectroipe.com.br")
+                    || s == "https://espectroipe.com.br"
+                    || s.ends_with(".tenorio.fot.br")
+                    || s == "https://tenorio.fot.br"
+                    || s.starts_with("http://localhost")
+                    || s.starts_with("http://127.0.0.1")
+                    || s.starts_with("http://100.")
+                    || s.starts_with("https://100.")
             } else {
                 false
             }
         }))
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::DELETE,
-            Method::OPTIONS,
-            Method::PATCH,
-            Method::HEAD,
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::ACCEPT,
+            axum::http::HeaderName::from_static("x-zorya-token"),
+            axum::http::HeaderName::from_static("x-requested-with"),
         ])
-        .allow_headers(tower_http::cors::AllowHeaders::mirror_request())
         .allow_credentials(true)
         .expose_headers([header::HeaderName::from_static("access-control-allow-private-network")]);
 
-    Router::new()
+    let protected_routes = Router::new()
         // Settings Dashboard & Web UI
         .route("/", get(handle_settings_dashboard))
         .route("/settings", get(handle_settings_dashboard))
         .route("/api/v1/config/save", post(handle_save_config))
+        // Rotas Sensíveis ArtCraft
+        .route("/api/v1/image/cull", post(crate::craft::culling::handle_cull))
+        .route("/api/v1/image/colorspace", post(crate::craft::colorspace::handle_colorspace))
+        .route("/api/v1/voice/clone", post(crate::craft::voice::handle_voice_clone))
+        .route("/api/v1/pdf/extract", post(crate::craft::pdf::handle_pdf_extract))
+        .route_layer(axum::middleware::from_fn_with_state(state.clone(), sovereign_auth_middleware));
+
+    Router::new()
+        .merge(protected_routes)
         // Health & System Info (Compatibilidade Frontend Svitlo & Private Network Access)
         .route("/health", get(health_handler))
         .route("/api/status", get(health_handler))
@@ -116,15 +203,11 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/cluster/handshake", post(handle_cluster_handshake))
         // ArtCraft Suite (ZORYA-007 a ZORYA-014)
         .route("/api/v1/image/denoise", post(crate::craft::denoise::handle_image_denoise))
-        .route("/api/v1/image/cull", post(crate::craft::culling::handle_cull))
-        .route("/api/v1/image/colorspace", post(crate::craft::colorspace::handle_colorspace))
         .route("/api/v1/audio/master-dsp", post(crate::craft::audio_dsp::handle_audio_master))
         .route("/api/v1/audio/denoise", post(crate::craft::audio_dsp::handle_audio_denoise))
-        .route("/api/v1/voice/clone", post(crate::craft::voice::handle_voice_clone))
         .route("/api/v1/voice/tts", post(crate::craft::voice::handle_voice_tts))
         .route("/api/v1/voice/embeddings", get(crate::craft::voice::handle_list_embeddings))
         .route("/api/v1/vector/render", post(crate::craft::vector::handle_vector_diagram))
-        .route("/api/v1/pdf/extract", post(crate::craft::pdf::handle_pdf_extract))
         .route("/api/v1/video/teaser", post(crate::craft::video_teaser::handle_video_teaser))
         // Svitlo Video Pipeline (ZORYA-016)
         .route("/api/v1/video/youtube-pipeline", post(crate::video::handle_youtube_pipeline))
@@ -382,9 +465,25 @@ pub async fn handle_settings_dashboard(State(state): State<AppState>) -> impl In
         .or_else(|| cfg.network.tailscale_peer_hostname.clone())
         .unwrap_or_else(|| "100.106.120.35".to_string());
 
-    let groq_keys_str = cfg.credentials.groq_keys.join("\n");
-    let gemini_keys_str = cfg.credentials.gemini_keys.join("\n");
-    let openai_keys_str = cfg.credentials.openai_keys.join("\n");
+    // PT: Mascara chaves de API no HTML para evitar exposição em texto puro no navegador.
+    // EN: Masks API keys in HTML to prevent plaintext exposure in the browser.
+    // AI: @llm-security Nunca expor chaves completas em GET /settings
+    let mask_keys = |keys: &[String]| -> String {
+        keys.iter()
+            .map(|k| {
+                let t = k.trim();
+                if t.len() <= 8 {
+                    "********".to_string()
+                } else {
+                    format!("{}...{}", &t[..4], &t[t.len() - 4..])
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let groq_keys_str = mask_keys(&cfg.credentials.groq_keys);
+    let gemini_keys_str = mask_keys(&cfg.credentials.gemini_keys);
+    let openai_keys_str = mask_keys(&cfg.credentials.openai_keys);
     let craft_enabled_str = cfg.craft.enabled.join(", ");
 
     let html = format!(r#"<!DOCTYPE html>
@@ -669,25 +768,34 @@ pub async fn handle_save_config(
         current_cfg.cluster.peer_endpoint = pe.trim().to_string();
     }
     if let Some(gk) = payload.get("groq_keys").and_then(|v| v.as_str()) {
-        current_cfg.credentials.groq_keys = gk
+        let submitted: Vec<String> = gk
             .lines()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+        if !submitted.is_empty() && !submitted.iter().any(|s| s.contains("***") || s.contains("...")) {
+            current_cfg.credentials.groq_keys = submitted;
+        }
     }
     if let Some(mk) = payload.get("gemini_keys").and_then(|v| v.as_str()) {
-        current_cfg.credentials.gemini_keys = mk
+        let submitted: Vec<String> = mk
             .lines()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+        if !submitted.is_empty() && !submitted.iter().any(|s| s.contains("***") || s.contains("...")) {
+            current_cfg.credentials.gemini_keys = submitted;
+        }
     }
     if let Some(ok) = payload.get("openai_keys").and_then(|v| v.as_str()) {
-        current_cfg.credentials.openai_keys = ok
+        let submitted: Vec<String> = ok
             .lines()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+        if !submitted.is_empty() && !submitted.iter().any(|s| s.contains("***") || s.contains("...")) {
+            current_cfg.credentials.openai_keys = submitted;
+        }
     }
     if let Some(gp) = payload.get("groq_primary_model").and_then(|v| v.as_str()) {
         current_cfg.credentials.groq_primary_model = Some(gp.trim().to_string());

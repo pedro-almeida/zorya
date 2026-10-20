@@ -203,7 +203,10 @@ impl SystrayController {
     }
 
     pub fn snapshot(&self) -> SystrayStatus {
-        self.inner.read().unwrap().clone()
+        self.inner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     pub fn begin_ai_work(&self) -> SystrayGuard {

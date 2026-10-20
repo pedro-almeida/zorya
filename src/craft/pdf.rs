@@ -99,6 +99,9 @@ pub fn extract_pdf_text_streams(raw: &[u8]) -> Vec<String> {
 }
 
 pub async fn handle_pdf_extract(Json(req): Json<PdfExtractRequest>) -> Result<Json<PdfExtractResponse>, (StatusCode, String)> {
+    if !crate::server::is_safe_craft_path(&req.pdf_path) {
+        return Err((StatusCode::FORBIDDEN, "Caminho de arquivo inválido ou não autorizado (Path Traversal detectado).".to_string()));
+    }
     let ocr_enabled = req.enable_ocr_fallback.unwrap_or(true);
     let raw = std::fs::read(&req.pdf_path).unwrap_or_default();
     let mut raw_pages = extract_pdf_text_streams(&raw);

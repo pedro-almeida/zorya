@@ -174,6 +174,8 @@ pub struct NetworkConfig {
     pub tailscale_local_api: String,
     pub fallback_vps_ip: Option<String>,
     pub fallback_nitro_ip: Option<String>,
+    #[serde(default)]
+    pub auth_token: String,
     #[serde(default = "default_30")]
     pub reconnect_interval_secs: u64,
 }
@@ -184,6 +186,10 @@ fn default_node_name() -> String { "Usina-Zorya-Nitro".to_string() }
 fn default_allowed_ip() -> String { "0.0.0.0/0".to_string() }
 fn default_ts_api() -> String { "http://127.0.0.1:41112/localapi/v0/status".to_string() }
 fn default_30() -> u64 { 30 }
+
+fn default_vps_ip() -> String {
+    std::env::var("MRIYA_VPS_IP").unwrap_or_else(|_| "143.95.223.218".to_string())
+}
 
 impl Default for NetworkConfig {
     fn default() -> Self {
@@ -198,8 +204,9 @@ impl Default for NetworkConfig {
             fallback_ip: Some("0.0.0.0".to_string()),
             prefer_tailscale: true,
             tailscale_local_api: default_ts_api(),
-            fallback_vps_ip: Some("72.60.144.210".to_string()),
+            fallback_vps_ip: Some(default_vps_ip()),
             fallback_nitro_ip: Some("100.106.120.35".to_string()),
+            auth_token: String::new(),
             reconnect_interval_secs: 30,
         }
     }
@@ -310,26 +317,35 @@ impl Default for CredentialsConfig {
 // Cluster configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusterConfig {
-    #[serde(default = "default_role")]
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_role", alias = "role")]
     pub node_role: String,
     #[serde(default = "default_peer_endpoint")]
     pub peer_endpoint: String,
-    #[serde(default = "default_30")]
+    #[serde(default = "default_30", alias = "heartbeat_interval_secs")]
     pub health_check_interval_secs: u64,
     #[serde(default = "default_true")]
     pub offload_light_tasks_to_vps: bool,
+    #[serde(default)]
+    pub shared_secret: String,
 }
 
 fn default_role() -> String { "nitro".to_string() }
-fn default_peer_endpoint() -> String { "http://72.60.144.210:8085".to_string() }
+fn default_peer_endpoint() -> String {
+    std::env::var("ZORYA_PEER_ENDPOINT")
+        .unwrap_or_else(|_| "http://143.95.223.218:8085".to_string())
+}
 
 impl Default for ClusterConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             node_role: default_role(),
             peer_endpoint: default_peer_endpoint(),
             health_check_interval_secs: 30,
             offload_light_tasks_to_vps: true,
+            shared_secret: String::new(),
         }
     }
 }

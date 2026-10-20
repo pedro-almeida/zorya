@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
-use tokio::net::{TcpListener, TcpSocket};
+use tokio::net::TcpListener;
 use tokio::sync::{broadcast, RwLock};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -91,27 +91,48 @@ pub fn main_config_snapshot() -> ZoryaConfig {
     resolve_config_path()
 }
 
-/// Cria um listener TCP resiliente com SO_REUSEADDR imediatamente em LISTENING
-pub fn bind_resilient_listener(host: &str, port: u16) -> anyhow::Result<TcpListener> {
-    let addr: SocketAddr = format!("{}:{}", host, port)
-        .parse()
-        .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], port)));
-
-    let socket = if addr.is_ipv4() {
-        TcpSocket::new_v4()?
-    } else {
-        TcpSocket::new_v6()?
-    };
-
-    socket.set_reuseaddr(true)?;
-    #[cfg(unix)]
-    {
-        let _ = socket.set_reuseport(true);
+// PT: Realiza bind TCP resiliente na porta 8085 encerrando processos órfãos antes de abrir o socket.
+// EN: Performs resilient TCP bind on port 8085 terminating orphan processes before opening the socket.
+// AI: @llm-func bind_resilient_listener @llm-invariant Garante porta 8085 em LISTENING imediato
+pub async fn bind_resilient_listener(addr: SocketAddr) -> anyhow::Result<TcpListener> {
+    let mut last_err = None;
+    for attempt in 1..=5 {
+        match TcpListener::bind(addr).await {
+            Ok(listener) => {
+                tracing::info!(
+                    "Socket TCP vinculado e em LISTENING ativo em {} (tentativa {}/5)",
+                    addr, attempt
+                );
+                return Ok(listener);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Tentativa {}/5 de bind em {} falhou ({}). Limpando processos órfãos na porta {}...",
+                    attempt, addr, e, addr.port()
+                );
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = std::process::Command::new("powershell")
+                        .args([
+                            "-NoProfile",
+                            "-Command",
+                            &format!(
+                                "Get-NetTCPConnection -LocalPort {} -ErrorAction SilentlyContinue | ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }}",
+                                addr.port()
+                            ),
+                        ])
+                        .output();
+                }
+                last_err = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(800 * attempt)).await;
+            }
+        }
     }
-
-    socket.bind(addr)?;
-    let listener = socket.listen(1024)?;
-    Ok(listener)
+    Err(anyhow::anyhow!(
+        "Falha ao vincular e escutar em {} após 5 tentativas: {:?}",
+        addr,
+        last_err
+    ))
 }
 
 #[tokio::main]
@@ -147,16 +168,52 @@ async fn main() -> anyhow::Result<()> {
     // 2. Garante que a porta 8085 entre imediatamente em LISTENING antes de tarefas demoradas
     let port = config.server.port;
     let host = &config.server.host;
+    let addr: SocketAddr = format!("{}:{}", host, port)
+        .parse()
+        .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], port)));
     let listener = if !is_mcp_stdio {
-        let l = bind_resilient_listener(host, port)?;
+        let l = bind_resilient_listener(addr).await?;
         tracing::info!("Unified TCP socket bound & listening immediately on http://{}:{}", host, port);
         Some(l)
     } else {
         None
     };
 
-    // 3. Sonda de hardware executada com a porta já em LISTENING
-    let hw = HardwareProfile::detect();
+    // 3. Sonda de hardware executada com a porta já em LISTENING (timeout estrito de 4s)
+    let hw = match tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        tokio::task::spawn_blocking(HardwareProfile::detect),
+    )
+    .await
+    {
+        Ok(Ok(profile)) => profile,
+        _ => {
+            tracing::warn!("Timeout na detecção de hardware durante o boot; aplicando perfil padrão GTX 1650 (4096 MB).");
+            HardwareProfile {
+                cpu_brand: "Nitro 5 CPU".to_string(),
+                physical_cores: 4,
+                logical_cores: 8,
+                has_avx2: true,
+                has_avx512: false,
+                npu_detected: None,
+                total_ram_mb: 16384,
+                available_ram_mb: 8192,
+                igpu_model: Some("Intel(R) UHD Graphics".to_string()),
+                dgpu_model: Some("NVIDIA GeForce GTX 1650".to_string()),
+                dgpu_vram_mb: 4096,
+                dgpu_vram_free_mb: 4096,
+                display_offloaded_to_igpu: true,
+                compiled_features: vec!["cuda".to_string()],
+                active_backend: crate::hardware::ComputeBackend::Cuda,
+                profile_kind: crate::hardware::NodeProfileKind::NitroGtx1650,
+                recommended_model: "qwen2.5-7b-instruct-q4_k_m.gguf".to_string(),
+                recommended_ctx_size: 8192,
+                recommended_batch_size: 512,
+                recommended_threads: 4,
+                recommended_gpu_layers: 28,
+            }
+        }
+    };
 
     if !is_mcp_stdio {
         tracing::info!("================================================================");

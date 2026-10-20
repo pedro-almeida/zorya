@@ -1,43 +1,62 @@
-# Install and register Zorya v2.1.0 as a Windows Service on Nitro (GTX 1650) / Instala e registra o Zorya v2.1.0 como Serviço Windows no Nitro (GTX 1650)
-$ErrorActionPreference = "Stop"
+# PT: Script de instalacao e inicializacao do Zorya no Windows (Nitro 5).
+# EN: Zorya Windows installation and deployment script (Nitro 5).
 
-Write-Host "==> [1/4] Checking Rust toolchain / Verificando Rust toolchain..." -ForegroundColor Cyan
-if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-    Write-Host "Installing rustup toolchain / Instalando toolchain rustup..." -ForegroundColor Yellow
-    $rustupUrl = "https://win.rustup.rs/x86_64"
-    $rustupExe = "$env:TEMP\rustup-init.exe"
-    Invoke-WebRequest -Uri $rustupUrl -OutFile $rustupExe
-    Start-Process -FilePath $rustupExe -ArgumentList "-y --default-toolchain stable" -Wait -NoNewWindow
-    $env:Path += ";$env:USERPROFILE\.cargo\bin"
-}
+$ErrorActionPreference = "Continue"
 
-$RepoRoot = Split-Path -Parent $PSScriptRoot
-Set-Location $RepoRoot
+$InstallDir = "C:\Zorya"
+$ModelsDir  = "$InstallDir\models"
+$LogsDir    = "$InstallDir\logs"
 
-Write-Host "==> [2/4] Building Zorya v2.1.0 release binary (Pure Rust) / Compilando binário de produção Zorya v2.1.0 (Rust Puro)..." -ForegroundColor Cyan
-cargo build --release
-
-$InstallDir = "C:\ProgramData\Zorya"
+Write-Host "[Zorya] Preparando diretorios em $InstallDir..." -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Copy-Item -Force "$RepoRoot\target\release\zorya.exe" "$InstallDir\zorya.exe"
-if (-not (Test-Path "$InstallDir\zorya.toml")) {
-    Copy-Item -Force "$RepoRoot\zorya.toml" "$InstallDir\zorya.toml"
+New-Item -ItemType Directory -Force -Path $ModelsDir  | Out-Null
+New-Item -ItemType Directory -Force -Path $LogsDir    | Out-Null
+
+if (Test-Path ".\target\release\zorya.exe") {
+    Copy-Item ".\target\release\zorya.exe" "$InstallDir\zorya.exe" -Force
+}
+if (Test-Path ".\zorya.toml") {
+    Copy-Item ".\zorya.toml" "$InstallDir\zorya.toml" -Force
 }
 
-Write-Host "==> [3/4] Configuring Firewall for Port 8085 and WireGuard 51820 / Configurando Firewall para Porta 8085 e WireGuard 51820..." -ForegroundColor Cyan
-New-NetFirewallRule -DisplayName "Zorya v2.1.0 HTTP/MCP (8085)" -Direction Inbound -Protocol TCP -LocalPort 8085 -Action Allow -ErrorAction SilentlyContinue | Out-Null
-New-NetFirewallRule -DisplayName "Zorya v2.1.0 WireGuard (51820)" -Direction Inbound -Protocol UDP -LocalPort 51820 -Action Allow -ErrorAction SilentlyContinue | Out-Null
+# Registra inicializacao automatica no login do usuario atual (HKCU)
+$RegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+Set-ItemProperty -Path $RegPath -Name "Zorya" -Value "`"$InstallDir\zorya.exe`" --background" -ErrorAction SilentlyContinue
 
-Write-Host "==> [4/4] Registering Windows Service 'ZoryaDaemon' / Registrando Serviço Windows 'ZoryaDaemon'..." -ForegroundColor Cyan
-$ServiceName = "ZoryaDaemon"
-if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
-    Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
-    sc.exe delete $ServiceName | Out-Null
+# Se executado como Administrador, configura Firewall e Servico/Task
+$IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if ($IsAdmin) {
+    Write-Host "[Zorya] Privilegios de administrador detectados: configurando Firewall..." -ForegroundColor Cyan
+    Remove-NetFirewallRule -DisplayName "Zorya Edge AI 8085" -ErrorAction SilentlyContinue
+    New-NetFirewallRule -DisplayName "Zorya Edge AI 8085" `
+        -Direction Inbound `
+        -Action Allow `
+        -Protocol TCP `
+        -LocalPort 8085 `
+        -Profile Any -ErrorAction SilentlyContinue | Out-Null
+
+    sc.exe stop ZoryaDaemon 2>$null | Out-Null
+    sc.exe delete ZoryaDaemon 2>$null | Out-Null
+}
+
+# Se o daemon nao estiver ativo, inicia o processo
+$Existing = Get-Process -Name zorya -ErrorAction SilentlyContinue
+if (-not $Existing) {
+    Write-Host "[Zorya] Iniciando daemon zorya.exe..." -ForegroundColor Cyan
+    Start-Process "$InstallDir\zorya.exe" -WorkingDirectory $InstallDir
     Start-Sleep -Seconds 2
 }
 
-sc.exe create $ServiceName binPath= "`"$InstallDir\zorya.exe`"" start= auto DisplayName= "Zorya v2.1.0 Sovereign Coprocessor" | Out-Null
-sc.exe description $ServiceName "Sovereign Rust AI & Multimedia Daemon (boringtun + Headscale + ArtCraft + MCP SSE)" | Out-Null
-sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/5000/restart/5000 | Out-Null
-
-Write-Host "✅ Zorya v2.1.0 installed at $InstallDir\zorya.exe / Zorya v2.1.0 instalado em $InstallDir\zorya.exe" -ForegroundColor Green
+# Valida escuta na porta 8085
+$Conn = Get-NetTCPConnection -LocalPort 8085 -State Listen -ErrorAction SilentlyContinue
+if ($Conn) {
+    Write-Host "[Zorya] Daemon ativo e escutando na porta 8085!" -ForegroundColor Green
+    try {
+        $Health = Invoke-RestMethod -Uri "http://127.0.0.1:8085/health" -TimeoutSec 3
+        Write-Host "[Zorya] Health check OK: Status=$($Health.status), Node=$($Health.node), GPU=$($Health.gpu_name)" -ForegroundColor Green
+    } catch {
+        Write-Host "[Zorya] Aviso: Porta aberta, aguardando inicializacao total do endpoint HTTP..." -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "[Zorya] Atencao: Porta 8085 ainda nao detectada em LISTEN." -ForegroundColor Yellow
+}

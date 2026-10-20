@@ -350,12 +350,16 @@ async fn execute_mcp_tool(state: &AppState, tool_name: &str, args: Value) -> any
         }
         "svitlo_generate" => {
             let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let student_text = args.get("student_text").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let system_prompt = args.get("system_prompt").and_then(|v| v.as_str()).map(|s| s.to_string());
             let topic = args.get("topic").and_then(|v| v.as_str()).map(|s| s.to_string());
             let mode = args.get("mode").and_then(|v| v.as_str()).map(|s| s.to_string());
             let res = state
                 .inference
                 .generate_svitlo_study(crate::inference::SvitloGenerateRequest {
                     content,
+                    student_text,
+                    system_prompt,
                     topic,
                     mode,
                 })

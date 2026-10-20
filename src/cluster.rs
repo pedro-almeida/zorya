@@ -82,11 +82,13 @@ impl ClusterCoordinator {
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
         };
 
-        let peer_endpoint = format!(
-            "http://{}:{}",
-            config.network.allowed_ip,
-            config.network.listen_port.unwrap_or(8085)
-        );
+        let peer_endpoint = if !config.cluster.peer_endpoint.trim().is_empty() {
+            config.cluster.peer_endpoint.trim().trim_end_matches('/').to_string()
+        } else if let Some(vps_ip) = &config.network.fallback_vps_ip {
+            format!("http://{}:8085", vps_ip)
+        } else {
+            "http://143.95.223.218:8085".to_string()
+        };
 
         let coordinator = Arc::new(Self {
             local_capabilities,

@@ -5,21 +5,35 @@ enable_mcp_sse = true
 mcp_sse_path = "/mcp/sse"
 log_level = "info"
 
+[node]
+
 [network]
+headscale_url = "https://headscale.espectroipe.com.br"
+headscale_auth_key = "hskey-default"
 node_name = "Usina-Zorya-Nitro"
 allowed_ip = "0.0.0.0/0"
 listen_port = 8085
-prefer_tailscale = true
 tailscale_peer_hostname = "100.106.120.35"
 fallback_ip = "0.0.0.0"
+prefer_tailscale = true
+tailscale_local_api = "http://127.0.0.1:41112/localapi/v0/status"
 fallback_vps_ip = "143.95.223.218"
 fallback_nitro_ip = "100.106.120.35"
 reconnect_interval_secs = 30
+
+[hardware]
+profile = "auto"
+dedicated_vram_mb = 4096
+reserve_display_on_igpu = true
+cpu_threads_override = 0
 
 [models]
 models_dir = "models"
 nitro_default = "qwen2.5-7b-instruct-q4_k_m.gguf"
 vps_default = "qwen2.5-3b-instruct-q4_k_m.gguf"
+nitro_ctx_size = 8192
+vps_ctx_size = 2048
+batch_size = 512
 fast_model = "qwen2.5-3b-instruct-q4_k_m.gguf"
 deep_model = "qwen2.5-7b-instruct-q4_k_m.gguf"
 gpu_layers = 33
@@ -33,6 +47,19 @@ default_model = "qwen2.5-7b-instruct-q4_k_m.gguf"
 dedicated_vram_mb = 4096
 gpu_device_index = 0
 
+[craft]
+enabled = [
+    "lightcraft",
+    "photocraft",
+    "vectorcraft",
+    "soundcraft",
+    "pdfcraft",
+]
+denoise_default_method = "bilateral"
+audio_target_lufs = -14.0
+audio_max_true_peak_db = -1.0
+default_icc_profile = "sRGB"
+
 [credentials]
 groq_keys = []
 gemini_keys = []
@@ -45,16 +72,9 @@ groq_multilingual_model = "qwen/qwen3.8-27b"
 groq_whisper_model = "whisper-large-v3"
 gemini_model = "gemini-2.5-flash"
 
-[craft]
-enabled = ["lightcraft", "photocraft", "vectorcraft", "soundcraft", "pdfcraft"]
-denoise_default_method = "bilateral"
-audio_target_lufs = -14.0
-audio_max_true_peak_db = -1.0
-default_icc_profile = "sRGB"
-
 [cluster]
 node_role = "nitro_primary"
 peer_endpoint = "https://svitlo.espectroipe.com.br"
 health_check_interval_secs = 30
-auto_failover = true
+offload_light_tasks_to_vps = true
 shared_secret = "zorya-cluster-2026-sovereign"

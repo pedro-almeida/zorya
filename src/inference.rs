@@ -26,10 +26,20 @@ pub const DEFAULT_VPS_MODEL: &str = "qwen2.5-3b-instruct-q4_k_m.gguf";
 
 pub const SVITLO_INTERNAL_SYSTEM_PROMPT: &str = "Você é o Professor Universitário e Cientista Cognitivo do Svitlo v3.0 rodando na Usina Zorya. Sua missão é produzir uma síntese acadêmica magistral, profunda e rigorosa baseada nas evidências científicas do OpenAlex, aplicando o Método Cornell, a Técnica de Feynman e flashcards de retenção ativa.";
 
+// PT: Estrutura de requisição para geração pedagógica estruturada no Svitlo.
+// EN: Request payload structure for Svitlo structured pedagogical generation.
+// AI: @llm-struct SvitloGenerateRequest @llm-invariant Separa student_text real de system_prompt
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SvitloGenerateRequest {
+    #[serde(default, alias = "text", alias = "prompt")]
     pub content: String,
+    #[serde(default)]
+    pub student_text: Option<String>,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    #[serde(default)]
     pub topic: Option<String>,
+    #[serde(default)]
     pub mode: Option<String>,
 }
 
@@ -430,9 +440,18 @@ impl NativeInferenceEngine {
                 .await
             {
                 if resp.status().is_success() {
-                    if let Ok(body) = resp.json::<Value>().await {
+                    if let Ok(mut body) = resp.json::<Value>().await {
                         if let Some(txt) = body["choices"][0]["message"]["content"].as_str() {
-                            if txt.trim().len() > 80 {
+                            if !txt.trim().is_empty() {
+                                if body.get("usage").is_none() {
+                                    let prompt_tokens = ((system_text.len() + user_text.len()) / 4).max(1);
+                                    let completion_tokens = (txt.len() / 4).max(1);
+                                    body["usage"] = json!({
+                                        "prompt_tokens": prompt_tokens,
+                                        "completion_tokens": completion_tokens,
+                                        "total_tokens": prompt_tokens + completion_tokens
+                                    });
+                                }
                                 return Ok(body);
                             }
                         }
@@ -441,11 +460,18 @@ impl NativeInferenceEngine {
             }
         }
 
-        // 2. Tenta Cofre de Chaves Groq Cloud (openai/gpt-oss-120b, qwen/qwen3.8-27b, openai/gpt-oss-20b)
+        // 2. Tenta Cofre de Chaves Groq Cloud (openai/gpt-oss-120b, openai/gpt-oss-20b, qwen/qwen3.8-27b)
+        // PT: Modelos Groq homologados para fallback cloud de baixa latência.
+        // EN: Approved Groq models for low-latency cloud fallback.
+        // AI: @llm-constant GROQ_APPROVED_MODELS
+        const GROQ_APPROVED_MODELS: &[&str] = &[
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
+            "qwen/qwen3.8-27b",
+        ];
         let (groq_keys, gemini_keys) = Self::collect_cloud_keys();
-        let groq_models = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"];
         for g_key in groq_keys.iter().take(4) {
-            for g_model in groq_models {
+            for &g_model in GROQ_APPROVED_MODELS {
                 if let Ok(resp) = self
                     .http_client
                     .post("https://api.groq.com/openai/v1/chat/completions")
@@ -465,8 +491,10 @@ impl NativeInferenceEngine {
                     if resp.status().is_success() {
                         if let Ok(body) = resp.json::<Value>().await {
                             if let Some(txt) = body["choices"][0]["message"]["content"].as_str() {
-                                if txt.trim().len() > 80 {
+                                if !txt.trim().is_empty() {
                                     let elapsed_ms = start.elapsed().as_millis() as u64;
+                                    let prompt_tokens = ((system_text.len() + user_text.len()) / 4).max(1);
+                                    let completion_tokens = (txt.len() / 4).max(1);
                                     return Ok(json!({
                                         "id": format!("chatcmpl-zorya-groq-{}", elapsed_ms),
                                         "object": "chat.completion",
@@ -481,7 +509,12 @@ impl NativeInferenceEngine {
                                                 "content": txt
                                             },
                                             "finish_reason": "stop"
-                                        }]
+                                        }],
+                                        "usage": {
+                                            "prompt_tokens": prompt_tokens,
+                                            "completion_tokens": completion_tokens,
+                                            "total_tokens": prompt_tokens + completion_tokens
+                                        }
                                     }));
                                 }
                             }
@@ -520,8 +553,10 @@ impl NativeInferenceEngine {
                                 .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
                                 .collect::<Vec<_>>()
                                 .join("");
-                            if combined.trim().len() > 80 {
+                            if !combined.trim().is_empty() {
                                 let elapsed_ms = start.elapsed().as_millis() as u64;
+                                let prompt_tokens = ((system_text.len() + user_text.len()) / 4).max(1);
+                                let completion_tokens = (combined.len() / 4).max(1);
                                 return Ok(json!({
                                     "id": format!("chatcmpl-zorya-gemini-{}", elapsed_ms),
                                     "object": "chat.completion",
@@ -536,7 +571,12 @@ impl NativeInferenceEngine {
                                             "content": combined
                                         },
                                         "finish_reason": "stop"
-                                    }]
+                                    }],
+                                    "usage": {
+                                        "prompt_tokens": prompt_tokens,
+                                        "completion_tokens": completion_tokens,
+                                        "total_tokens": prompt_tokens + completion_tokens
+                                    }
                                 }));
                             }
                         }
@@ -827,7 +867,7 @@ impl NativeInferenceEngine {
 
     /// Gera estudo estruturado completo Svitlo com triagem OpenAlex, síntese profunda, Feynman, Cornell, Mermaid v11.17.2 e VectorCraft SVG em cada card.
     pub async fn generate_svitlo_study(&self, req: SvitloGenerateRequest) -> anyhow::Result<Value> {
-        let pure_text = extract_pure_student_text(&req.content);
+        let pure_text = extract_pure_student_text(&req.content, req.student_text.as_deref());
         let clean_topic = extract_clean_academic_topic(req.topic.as_deref().unwrap_or(&pure_text));
 
         // 1. Busca e faz a triagem de artigos científicos no OpenAlex
@@ -1170,27 +1210,71 @@ pub fn extract_clean_academic_topic(raw: &str) -> String {
     }
 }
 
-/// Remove qualquer envelope de template ou cabeçalho bruto repetido
-pub fn extract_pure_student_text(raw: &str) -> String {
-    let mut cleaned = raw.to_string();
-    let markers_to_strip = [
+// PT: Isola exclusivamente o texto real do estudante, removendo qualquer system_prompt injetado acidentalmente.
+// EN: Isolates exclusively the real student text, stripping any accidentally injected system_prompt.
+// AI: @llm-func extract_pure_student_text @llm-rule Nunca permitir que instruções de sistema vazem para o corpus do aluno
+pub fn extract_pure_student_text(raw: &str, explicit_student_text: Option<&str>) -> String {
+    if let Some(st) = explicit_student_text {
+        let trimmed = st.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with("Você é um professor") {
+            return trimmed.to_string();
+        }
+    }
+
+    let mut text = raw.trim();
+
+    // Se houver marcador explícito do bloco do estudante, extrai apenas o conteúdo após o marcador
+    for marker in [
+        "SOLICITAÇÃO / TEXTO DO ESTUDANTE:",
+        "CONTEÚDO PARA PROCESSAMENTO:",
+        "Conteúdo real do estudante:",
+        "Conteúdo para estudo:",
+        "TEXTO DO ESTUDANTE:",
+    ] {
+        if let Some(idx) = text.find(marker) {
+            text = text[idx + marker.len()..].trim();
+            break;
+        }
+    }
+
+    // Remove blocos de instruções de sistema, referências injetadas ou sufixos de formatação JSON
+    for cutoff in [
+        "\n\nContexto acadêmico complementar:",
+        "\n\nRetorne o JSON completo",
+        "\n\nFORMATO OBRIGATÓRIO DO JSON",
+        "\n\nVALIDAÇÃO CIENTÍFICA E METODOLÓGICA",
+        "\n\nPERFIL NEUROPSICOLÓGICO CLÍNICO",
+        "\n\nREFERÊNCIAS VERIFICADAS",
+        "\n\nARTIGOS CIENTÍFICOS TRIADOS",
         "### INSTRUÇÃO:",
-        "### TEXTO DO ESTUDANTE:",
-        "### CONTEÚDO:",
-        "<|im_start|>system",
-        "<|im_start|>user",
-        "<|im_end|>",
-        "```markdown",
-        "```json",
-        "```",
-    ];
-    for marker in markers_to_strip {
-        cleaned = cleaned.replace(marker, "");
+        "INSTRUÇÕES OBRIGATÓRIAS",
+        "REGRAS:",
+        "FORMATO JSON:",
+        "Retorne EXCLUSIVAMENTE",
+    ] {
+        if let Some(idx) = text.find(cutoff) {
+            if idx > 0 {
+                text = text[..idx].trim();
+            }
+        }
     }
-    if let Some(pos) = cleaned.find("### CONTEÚDO PURO:") {
-        cleaned = cleaned[pos + "### CONTEÚDO PURO:".len()..].to_string();
+
+    // Se o texto começou com system_prompt ("Você é um professor...") sem marcador claro, descarta o preâmbulo
+    if text.starts_with("Você é um professor") || text.starts_with("Sua missão é destilar") {
+        if let Some(pos) = text.rfind("\n\n") {
+            let candidate = text[pos..].trim();
+            if !candidate.is_empty() {
+                text = candidate;
+            }
+        }
     }
-    cleaned.trim().to_string()
+
+    let cleaned = text.trim();
+    if cleaned.is_empty() {
+        raw.trim().chars().take(1200).collect()
+    } else {
+        cleaned.to_string()
+    }
 }
 
 /// Sanitiza diagramas Mermaid para a gramática estrita do Mermaid v11.17.2
@@ -1336,11 +1420,21 @@ pub fn build_card_vectorcraft_svg(topic: &str, front: &str, back: &str, idx: usi
     })
 }
 
+// PT: Handler HTTP Axum para geração pedagógica Svitlo garantindo uso exclusivo do texto real do estudante.
+// EN: Axum HTTP handler for Svitlo pedagogical generation ensuring exclusive use of real student text.
+// AI: @llm-handler handle_svitlo_generate @llm-route POST /api/v1/svitlo/generate
 pub async fn handle_svitlo_generate(
     State(state): State<AppState>,
-    Json(req): Json<SvitloGenerateRequest>,
+    Json(mut req): Json<SvitloGenerateRequest>,
 ) -> Response {
     let _guard = state.systray.begin_ai_work();
+    let pure_student_content = extract_pure_student_text(
+        &req.content,
+        req.student_text.as_deref(),
+    );
+    req.content = pure_student_content.clone();
+    req.student_text = Some(pure_student_content);
+
     match state.inference.generate_svitlo_study(req).await {
         Ok(res) => (StatusCode::OK, Json(res)).into_response(),
         Err(err) => (
@@ -1356,7 +1450,7 @@ pub async fn handle_anki_generate_media(
     Json(req): Json<AnkiGenerateMediaRequest>,
 ) -> Response {
     let _guard = state.systray.begin_ai_work();
-    let pure_content = req.content.as_deref().map(extract_pure_student_text);
+    let pure_content = req.content.as_deref().map(|c| extract_pure_student_text(c, None));
     let topic = req.topic.clone().unwrap_or_else(|| {
         req.front
             .as_deref()
@@ -1384,13 +1478,50 @@ pub async fn handle_anki_generate_media(
         .into_response()
 }
 
+// PT: Handler compatível com OpenAI POST /v1/chat/completions com objeto usage e suporte a respostas curtas.
+// EN: OpenAI-compatible POST /v1/chat/completions handler with usage object and short response support.
+// AI: @llm-handler handle_chat_completions @llm-route POST /v1/chat/completions
 pub async fn handle_chat_completions(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Response {
     let _guard = state.systray.begin_ai_work();
+
+    let mut system_parts: Vec<String> = Vec::new();
+    let mut conversation_parts: Vec<String> = Vec::new();
+
+    for msg in &req.messages {
+        let content_str = match &msg.content {
+            Value::String(s) => s.trim().to_string(),
+            other => other.to_string(),
+        };
+        match msg.role.as_str() {
+            "system" => system_parts.push(content_str),
+            "assistant" => conversation_parts.push(format!("Assistente: {}", content_str)),
+            _ => conversation_parts.push(content_str),
+        }
+    }
+
+    let prompt_chars = system_parts.iter().map(|s| s.len()).sum::<usize>()
+        + conversation_parts.iter().map(|s| s.len()).sum::<usize>();
+    let prompt_tokens = (prompt_chars / 4).max(1);
+
     match state.inference.chat_completions(req).await {
-        Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
+        Ok(mut resp) => {
+            if resp.get("usage").is_none() {
+                let content_chars = resp["choices"][0]["message"]["content"]
+                    .as_str()
+                    .map(|s| s.len())
+                    .unwrap_or(0);
+                let completion_tokens = (content_chars / 4).max(1);
+                resp["usage"] = json!({
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens
+                });
+            }
+            (StatusCode::OK, Json(resp)).into_response()
+        }
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": { "message": err.to_string(), "type": "native_inference_error" } })),

@@ -4,16 +4,32 @@ use serde::{Deserialize, Serialize};
 use sysinfo::{Disks, System};
 
 // Compact health response required for GET /health & GET /api/status
+// Compact health response required for GET /health & GET /api/status (compatible with Mriya probeZorya)
+// PT: Estrutura de resposta do endpoint /health compatível com o probeZorya do Mriya.
+// EN: /health endpoint response structure compatible with Mriya's probeZorya.
+// AI: @llm-struct HealthResponse @llm-route GET /health
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthResponse {
     pub status: String,
-    pub online: bool,
-    pub node: String,
+    pub service: String,
     pub version: String,
     pub port: u16,
-    pub cpu_usage: f32,
-    pub ram_mb: u64,
+    pub active_model: String,
+    pub gpu_name: String,
     pub gpu_vram_mb: u64,
+    pub gpu_vram_total_mb: u64,
+    pub ram_total_mb: u64,
+    pub ram_available_mb: u64,
+    pub recommended_tier: String,
+    pub timestamp: String,
+    #[serde(default)]
+    pub online: bool,
+    #[serde(default)]
+    pub node: String,
+    #[serde(default)]
+    pub cpu_usage: f32,
+    #[serde(default)]
+    pub ram_mb: u64,
 }
 
 // Detailed system telemetry for GET /api/v1/system/info / Telemetria detalhada do sistema para GET /api/v1/system/info
@@ -73,18 +89,30 @@ impl TelemetryCollector {
         self.sys.refresh_memory();
 
         let cpu_usage = (self.sys.global_cpu_usage() * 10.0).round() / 10.0;
-        let ram_mb = self.sys.total_memory() / (1024 * 1024);
-        let (_, vram_total_mb, _) = Self::probe_nvidia_vram(self.default_vram_mb, self.gpu_name.as_deref());
+        let ram_total_mb = self.sys.total_memory() / (1024 * 1024);
+        let ram_available_mb = self.sys.available_memory() / (1024 * 1024);
+        let (gpu_name, vram_total_mb, _) = Self::probe_nvidia_vram(self.default_vram_mb, self.gpu_name.as_deref());
+
+        let ram_mb = if ram_total_mb > 0 { ram_total_mb } else { 16384 };
+        let ram_avail = if ram_available_mb > 0 { ram_available_mb } else { 8192 };
 
         HealthResponse {
             status: "ok".to_string(),
+            service: "zorya-edge-daemon".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            port: 8085,
+            active_model: "qwen2.5-7b-instruct-q4_k_m.gguf".to_string(),
+            gpu_name,
+            gpu_vram_mb: vram_total_mb,
+            gpu_vram_total_mb: vram_total_mb,
+            ram_total_mb: ram_mb,
+            ram_available_mb: ram_avail,
+            recommended_tier: "Medium3BTo7B".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
             online: true,
             node: if self.node_name.is_empty() { "usina-zorya".to_string() } else { self.node_name.clone() },
-            version: "3.0.0".to_string(),
-            port: 8085,
             cpu_usage,
-            ram_mb: if ram_mb > 0 { ram_mb } else { 4096 },
-            gpu_vram_mb: vram_total_mb,
+            ram_mb,
         }
     }
 
