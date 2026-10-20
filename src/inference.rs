@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
-use crate::craft::{render_svg_diagram, VectorDiagramSpec, VectorEdgeSpec, VectorNodeSpec};
 use crate::hardware::{ComputeBackend, HardwareProfile, NodeProfileKind};
 use crate::server::AppState;
 
@@ -43,13 +42,24 @@ pub struct SvitloGenerateRequest {
     pub mode: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AnkiGenerateMediaRequest {
-    pub content: Option<String>,
-    pub front: Option<String>,
-    pub back: Option<String>,
+    #[serde(default)]
     pub topic: Option<String>,
+    #[serde(default)]
+    pub front: Option<String>,
+    #[serde(default)]
+    pub back: Option<String>,
+    #[serde(default)]
+    pub teacher_explanation: Option<String>,
+    #[serde(default)]
+    pub citation_text: Option<String>,
+    #[serde(default, alias = "prompt")]
+    pub content: Option<String>,
+    #[serde(default)]
     pub media_type: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 pub type AnkiMediaRequest = AnkiGenerateMediaRequest;
@@ -1364,60 +1374,167 @@ pub fn sanitize_mermaid_v11(raw: &str, fallback_topic: &str) -> String {
     sanitized_lines.join("\n")
 }
 
-/// Constrói um diagrama vetorial SVG rico via VectorCraft para ilustrar cada flashcard
+// PT: Quebra texto longo em múltiplas linhas sem cortar palavras ao meio para diagramas de alta legibilidade.
+// EN: Wraps long text into multiple lines without splitting words for high-readability diagrams.
+fn wrap_svg_lines(text: &str, max_chars: usize, max_lines: usize) -> Vec<String> {
+    let clean = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if clean.is_empty() {
+        return vec!["—".to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in clean.split_whitespace() {
+        if current.is_empty() {
+            current.push_str(word);
+        } else if current.chars().count() + 1 + word.chars().count() <= max_chars {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(current);
+            current = word.to_string();
+            if lines.len() >= max_lines - 1 {
+                break;
+            }
+        }
+    }
+    if !current.is_empty() && lines.len() < max_lines {
+        let mut last = current;
+        if last.chars().count() > max_chars {
+            last = last.chars().take(max_chars - 1).collect::<String>() + "…";
+        }
+        lines.push(last);
+    }
+    lines
+}
+
+fn xml_escape_card(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+// PT: Extrai 3 cláusulas conceituais completas da resposta do card (evitando palavras soltas genéricas).
+// EN: Extracts 3 complete conceptual clauses from the card answer (avoiding generic single words).
+fn extract_three_analytical_pillars(back: &str, explanation: &str, topic: &str) -> Vec<(String, String)> {
+    let combined = format!("{}. {}", back.trim(), explanation.trim());
+    let mut clauses: Vec<String> = combined
+        .split(|c| c == ';' || c == '.')
+        .map(|s| s.trim().trim_matches(|c: char| c == ',' || c == '-' || c == ':').to_string())
+        .filter(|s| s.chars().count() >= 14)
+        .collect();
+
+    if clauses.len() < 3 {
+        let comma_parts: Vec<String> = back
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| s.chars().count() >= 10)
+            .collect();
+        clauses.extend(comma_parts);
+    }
+
+    let stop = [
+        "existem", "três", "tres", "formas", "principais", "como", "para", "pelo", "pela",
+        "uma", "são", "sao", "que", "mais", "quase", "todos", "início", "inicio", "rápido",
+        "rapido", "qual", "quais", "este", "esta", "essas", "esses",
+    ];
+    let defaults = ["1. Conceito & Base", "2. Mecanismo & Achados", "3. Conduta & Implicação"];
+    let mut result = Vec::with_capacity(3);
+
+    for i in 0..3 {
+        let clause = clauses
+            .get(i)
+            .cloned()
+            .unwrap_or_else(|| if i == 0 { back.to_string() } else { topic.to_string() });
+        let meaningful: Vec<String> = clause
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+            .filter(|w| w.chars().count() >= 4 && !stop.contains(&w.to_lowercase().as_str()))
+            .take(2)
+            .collect();
+        let title = if meaningful.is_empty() {
+            defaults[i].to_string()
+        } else {
+            format!("{}. {}", i + 1, meaningful.join(" "))
+        };
+        result.push((title, clause));
+    }
+    result
+}
+
+/// Constrói um Infográfico Vetorial rico de 3 Pilares Analíticos Completos para cada flashcard
 pub fn build_card_vectorcraft_svg(topic: &str, front: &str, back: &str, idx: usize) -> String {
-    let short_topic: String = topic.chars().take(36).collect();
-    let short_front: String = front.chars().take(48).collect();
-    let short_back: String = back.chars().take(64).collect();
+    let clean_topic = topic
+        .trim_start_matches("Estudo Ativo - ")
+        .trim_start_matches("Resumo - ")
+        .trim();
+    let pillars = extract_three_analytical_pillars(back, "", clean_topic);
+    let q_lines = wrap_svg_lines(front, 72, 2);
+    let a_lines = wrap_svg_lines(back, 92, 3);
 
-    let spec = VectorDiagramSpec {
-        title: format!("{} • Card #{}", short_topic, idx + 1),
-        subtitle: Some("Diagrama Conceitual Svitlo • VectorCraft".to_string()),
-        width: Some(960),
-        height: Some(540),
-        nodes: vec![
-            VectorNodeSpec {
-                id: "n1".to_string(),
-                label: short_topic,
-                description: Some("Eixo Temático".to_string()),
-                x: Some(70.0),
-                y: Some(180.0),
-                color: Some("#8B5E3C".to_string()),
-            },
-            VectorNodeSpec {
-                id: "n2".to_string(),
-                label: short_front,
-                description: Some("Questão / Gatilho Cognitivo".to_string()),
-                x: Some(370.0),
-                y: Some(180.0),
-                color: Some("#C9A84C".to_string()),
-            },
-            VectorNodeSpec {
-                id: "n3".to_string(),
-                label: short_back,
-                description: Some("Síntese e Fixação".to_string()),
-                x: Some(670.0),
-                y: Some(180.0),
-                color: Some("#10B981".to_string()),
-            },
-        ],
-        edges: Some(vec![
-            VectorEdgeSpec {
-                from: "n1".to_string(),
-                to: "n2".to_string(),
-                label: Some("investiga".to_string()),
-            },
-            VectorEdgeSpec {
-                from: "n2".to_string(),
-                to: "n3".to_string(),
-                label: Some("consolida".to_string()),
-            },
-        ]),
-    };
+    let mut q_tspans = String::new();
+    for (i, ln) in q_lines.iter().enumerate() {
+        let y = 58 + i * 24;
+        q_tspans.push_str(&format!(
+            r#"<tspan x="32" y="{y}">{}</tspan>"#,
+            xml_escape_card(ln)
+        ));
+    }
 
-    render_svg_diagram(&spec).unwrap_or_else(|_| {
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="960" height="540"><rect width="100%" height="100%" fill="#0F172A"/><text x="50%" y="50%" fill="#F8FAFC" text-anchor="middle" font-size="20">VectorCraft Diagram</text></svg>"##.to_string()
-    })
+    let mut a_tspans = String::new();
+    for (i, ln) in a_lines.iter().enumerate() {
+        let y = 358 + i * 20;
+        a_tspans.push_str(&format!(
+            r#"<tspan x="36" y="{y}">{}</tspan>"#,
+            xml_escape_card(ln)
+        ));
+    }
+
+    let colors = [
+        ("#1E40AF", "#EFF6FF", "#3B82F6"),
+        ("#9A3412", "#FFF7ED", "#EA580C"),
+        ("#065F46", "#ECFDF5", "#10B981"),
+    ];
+
+    let mut pillars_svg = String::new();
+    for (i, (p_title, p_detail)) in pillars.iter().enumerate() {
+        let x = 28 + i * 308;
+        let (hdr_c, bg_c, bd_c) = colors[i % 3];
+        let d_lines = wrap_svg_lines(p_detail, 34, 4);
+        let mut d_tspans = String::new();
+        for (li, dln) in d_lines.iter().enumerate() {
+            let dy = 168 + li * 20;
+            d_tspans.push_str(&format!(
+                r#"<tspan x="{}" y="{dy}">{}</tspan>"#,
+                x + 14,
+                xml_escape_card(dln)
+            ));
+        }
+        let mid_x = x + 144;
+        pillars_svg.push_str(&format!(
+            r##"<rect x="{x}" y="106" width="288" height="176" rx="10" fill="{bg_c}" stroke="{bd_c}" stroke-width="2"/>
+            <rect x="{x}" y="106" width="288" height="36" rx="10" fill="{hdr_c}"/>
+            <text x="{}" y="129" font-family="Inter, Georgia, sans-serif" font-size="14" font-weight="700" fill="#FFFFFF">{}</text>
+            <text font-family="Inter, sans-serif" font-size="13" fill="#1E1914">{d_tspans}</text>
+            <line x1="{mid_x}" y1="282" x2="{mid_x}" y2="308" stroke="{bd_c}" stroke-width="2.5"/>"##,
+            x + 14,
+            xml_escape_card(&p_title.chars().take(28).collect::<String>())
+        ));
+    }
+
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 440" width="960" height="440">
+  <rect width="960" height="440" rx="14" fill="#FCF9F4" stroke="#B48E4C" stroke-width="2.5"/>
+  <rect x="12" y="12" width="936" height="78" rx="10" fill="#4A321F"/>
+  <text x="32" y="32" font-family="Inter, sans-serif" font-size="11.5" font-weight="700" fill="#EBC86E">FLASHCARD ANALÍTICO #{}</text>
+  <text font-family="Georgia, serif" font-size="17" font-weight="700" fill="#FFFDF9">{q_tspans}</text>
+  {pillars_svg}
+  <rect x="28" y="310" width="904" height="112" rx="10" fill="#FFFFFF" stroke="#B48E4C" stroke-width="2"/>
+  <text x="36" y="334" font-family="Inter, sans-serif" font-size="13.5" font-weight="700" fill="#4A321F">SÍNTESE DA RESPOSTA VERIFICADA:</text>
+  <text font-family="Inter, sans-serif" font-size="13.5" fill="#1E1914">{a_tspans}</text>
+</svg>"##,
+        idx + 1
+    )
 }
 
 // PT: Handler HTTP Axum para geração pedagógica Svitlo garantindo uso exclusivo do texto real do estudante.
@@ -1445,32 +1562,50 @@ pub async fn handle_svitlo_generate(
     }
 }
 
+// PT: Handler POST /api/v1/anki/generate-media retornando image_base64, media, image_data_url e visual_svg para compatibilidade total com o Svitlo.
+// EN: POST /api/v1/anki/generate-media handler returning image_base64, media, image_data_url, and visual_svg for full Svitlo compatibility.
+// AI: @llm-handler handle_anki_generate_media @llm-route POST /api/v1/anki/generate-media
 pub async fn handle_anki_generate_media(
     State(state): State<AppState>,
     Json(req): Json<AnkiGenerateMediaRequest>,
 ) -> Response {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     let _guard = state.systray.begin_ai_work();
+
     let pure_content = req.content.as_deref().map(|c| extract_pure_student_text(c, None));
     let topic = req.topic.clone().unwrap_or_else(|| {
         req.front
             .as_deref()
             .or(pure_content.as_deref())
-            .unwrap_or("Conceito Anki")
+            .unwrap_or("Conceito Acadêmico")
             .chars()
             .take(60)
             .collect::<String>()
     });
 
     let front_str = req.front.as_deref().unwrap_or(&topic);
-    let back_str = req.back.as_deref().or(pure_content.as_deref()).unwrap_or("Síntese Aplicada");
+    let back_str = req
+        .back
+        .as_deref()
+        .or(pure_content.as_deref())
+        .unwrap_or("Síntese Aplicada");
+
     let svg = build_card_vectorcraft_svg(&topic, front_str, back_str, 0);
+    let svg_b64 = BASE64.encode(svg.as_bytes());
+    let data_url = format!("data:image/svg+xml;base64,{}", svg_b64);
 
     (
         StatusCode::OK,
         Json(json!({
+            "success": true,
             "status": "success",
             "topic": topic,
-            "media_type": req.media_type.unwrap_or_else(|| "svg".to_string()),
+            "format": "svg+xml",
+            "media_type": "svg+xml",
+            "media": svg_b64,
+            "image_base64": svg_b64,
+            "image": svg_b64,
+            "image_data_url": data_url,
             "visual_svg": svg,
             "svg": svg,
         })),
