@@ -1,11 +1,17 @@
 [server]
 host = "0.0.0.0"
 port = 8085
+node_name = "Usina-Zorya-Nitro"
+tailscale_ip = "100.106.120.35"
+vps_endpoint = "https://svitlo.espectroipe.com.br"
+auth_token = ""
+csrf_secret = "zorya-csrf-secret-sovereign-2026"
 enable_mcp_sse = true
 mcp_sse_path = "/mcp/sse"
 log_level = "info"
 
 [node]
+role = "nitro"
 
 [network]
 headscale_url = "https://headscale.espectroipe.com.br"
@@ -13,6 +19,7 @@ headscale_auth_key = "hskey-default"
 node_name = "Usina-Zorya-Nitro"
 allowed_ip = "0.0.0.0/0"
 listen_port = 8085
+wireguard_port = 51820
 tailscale_peer_hostname = "100.106.120.35"
 fallback_ip = "0.0.0.0"
 prefer_tailscale = true
@@ -42,7 +49,14 @@ max_tokens = 4096
 ttl_seconds = 3600
 
 [inference]
-ollama_url = "http://127.0.0.1:11434"
+models_dir = "models"
+local_runtime_url = "http://127.0.0.1:8085"
+fast_gguf = "qwen2.5-3b-instruct-q4_k_m.gguf"
+deep_gguf = "qwen2.5-7b-instruct-q4_k_m.gguf"
+gpu_layers = 33
+ctx_size = 8192
+max_output_tokens = 4096
+vram_ttl_secs = 3600
 default_model = "qwen2.5-7b-instruct-q4_k_m.gguf"
 dedicated_vram_mb = 4096
 gpu_device_index = 0
@@ -54,6 +68,12 @@ enabled = [
     "vectorcraft",
     "soundcraft",
     "pdfcraft",
+    "wordcraft",
+    "effectcraft",
+    "filmcraft",
+    "deckcraft",
+    "figcraft",
+    "designcraft",
 ]
 denoise_default_method = "bilateral"
 audio_target_lufs = -14.0
@@ -73,8 +93,25 @@ groq_whisper_model = "whisper-large-v3"
 gemini_model = "gemini-2.5-flash"
 
 [cluster]
-node_role = "nitro_primary"
+enabled = true
+node_role = "nitro"
 peer_endpoint = "https://svitlo.espectroipe.com.br"
 health_check_interval_secs = 30
 offload_light_tasks_to_vps = true
 shared_secret = "zorya-cluster-2026-sovereign"
+artcraft_modules = [
+    "lightcraft",
+    "photocraft",
+    "vectorcraft",
+    "soundcraft",
+    "pdfcraft",
+    "wordcraft",
+    "effectcraft",
+    "filmcraft",
+    "deckcraft",
+    "figcraft",
+    "designcraft",
+]
+headscale_url = "https://headscale.espectroipe.com.br"
+headscale_auth_key = "hskey-default"
+enable_p2p = true

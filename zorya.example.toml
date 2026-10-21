@@ -1,0 +1,117 @@
+[server]
+host = "0.0.0.0"
+port = 8085
+node_name = "Usina-Zorya-Nitro"
+tailscale_ip = "100.106.120.35"
+vps_endpoint = "https://svitlo.espectroipe.com.br"
+auth_token = ""
+csrf_secret = "zorya-csrf-secret-sovereign-2026"
+enable_mcp_sse = true
+mcp_sse_path = "/mcp/sse"
+log_level = "info"
+
+[node]
+role = "nitro"
+
+[network]
+headscale_url = "https://headscale.espectroipe.com.br"
+headscale_auth_key = "hskey-default"
+node_name = "Usina-Zorya-Nitro"
+allowed_ip = "0.0.0.0/0"
+listen_port = 8085
+wireguard_port = 51820
+tailscale_peer_hostname = "100.106.120.35"
+fallback_ip = "0.0.0.0"
+prefer_tailscale = true
+tailscale_local_api = "http://127.0.0.1:41112/localapi/v0/status"
+fallback_vps_ip = "143.95.223.218"
+fallback_nitro_ip = "100.106.120.35"
+reconnect_interval_secs = 30
+
+[hardware]
+profile = "auto"
+dedicated_vram_mb = 4096
+reserve_display_on_igpu = true
+cpu_threads_override = 0
+
+[models]
+models_dir = "models"
+nitro_default = "qwen2.5-7b-instruct-q4_k_m.gguf"
+vps_default = "qwen2.5-3b-instruct-q4_k_m.gguf"
+nitro_ctx_size = 8192
+vps_ctx_size = 2048
+batch_size = 512
+fast_model = "qwen2.5-3b-instruct-q4_k_m.gguf"
+deep_model = "qwen2.5-7b-instruct-q4_k_m.gguf"
+gpu_layers = 33
+context_size = 8192
+max_tokens = 4096
+ttl_seconds = 3600
+
+[inference]
+models_dir = "models"
+local_runtime_url = "http://127.0.0.1:8085"
+fast_gguf = "qwen2.5-3b-instruct-q4_k_m.gguf"
+deep_gguf = "qwen2.5-7b-instruct-q4_k_m.gguf"
+gpu_layers = 33
+ctx_size = 8192
+max_output_tokens = 4096
+vram_ttl_secs = 3600
+default_model = "qwen2.5-7b-instruct-q4_k_m.gguf"
+dedicated_vram_mb = 4096
+gpu_device_index = 0
+
+[craft]
+enabled = [
+    "lightcraft",
+    "photocraft",
+    "vectorcraft",
+    "soundcraft",
+    "pdfcraft",
+    "wordcraft",
+    "effectcraft",
+    "filmcraft",
+    "deckcraft",
+    "figcraft",
+    "designcraft",
+]
+denoise_default_method = "bilateral"
+audio_target_lufs = -14.0
+audio_max_true_peak_db = -1.0
+default_icc_profile = "sRGB"
+
+[credentials]
+groq_keys = []
+gemini_keys = []
+openai_keys = []
+vps_credentials_path = "/var/www/mcp-server/credentials/credentials.json"
+validation_cache_ttl_hours = 24
+groq_primary_model = "openai/gpt-oss-120b"
+groq_fast_model = "openai/gpt-oss-20b"
+groq_multilingual_model = "qwen/qwen3.8-27b"
+groq_whisper_model = "whisper-large-v3"
+gemini_model = "gemini-2.5-flash"
+
+[cluster]
+enabled = true
+node_role = "nitro"
+peer_endpoint = "https://svitlo.espectroipe.com.br"
+health_check_interval_secs = 30
+offload_light_tasks_to_vps = true
+shared_secret = "zorya-cluster-2026-sovereign"
+artcraft_modules = [
+    "lightcraft",
+    "photocraft",
+    "vectorcraft",
+    "soundcraft",
+    "pdfcraft",
+    "wordcraft",
+    "effectcraft",
+    "filmcraft",
+    "deckcraft",
+    "figcraft",
+    "designcraft",
+]
+headscale_url = "https://headscale.espectroipe.com.br"
+headscale_auth_key = "hskey-default"
+enable_p2p = true

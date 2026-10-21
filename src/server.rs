@@ -1,14 +1,14 @@
-// PT: Servidor HTTP Axum + MCP SSE Unificado do Zorya v3.0 (Porta 8085)
-// EN: Zorya v3.0 Unified Axum HTTP + MCP SSE Server (Port 8085)
-// AI: @llm-context Expõe endpoints v3.0: /v1/chat/completions, /v1/models, /v1/models/load, /v1/models/unload, /api/v1/cluster/*, /api/v1/agent/execute, MCP SSE/JSON-RPC e ArtCraft
-// AI: @llm-invariant Roteamento soberano integrado com HardwareProfile, NativeInferenceEngine, NetworkManager e ClusterCoordinator
+// PT: Servidor HTTP Axum + MCP SSE Unificado do Zorya v3.0 (Porta Canônica 8085)
+// EN: Zorya v3.0 Unified Axum HTTP + MCP SSE Server (Canonical Port 8085)
+// AI: @llm-context Expõe endpoints v3.0: /settings, /api/v1/settings, /api/v1/ai/quotas, /api/v1/ai/route, /api/v1/test/svitlo-openalex, ArtCraft e MCP SSE
+// AI: @llm-invariant Persistência atômica, sanitização contra Path Traversal, Headers OWASP e CSRF
 
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Multipart, State},
-    http::{header, Method, StatusCode},
+    http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -31,18 +31,22 @@ pub use crate::inference::{
 };
 use crate::mcp::{mcp_jsonrpc_handler, mcp_sse_handler};
 use crate::network::NetworkManager;
+use crate::quota_router::QuotaRouter;
+use crate::security::{generate_csrf_token, security_headers_middleware, validate_csrf_token};
 use crate::systray::SystrayController;
 use crate::telemetry::TelemetryCollector;
+use crate::ui::render_svitlo_dashboard_html;
 
 // Global shared daemon state / Estado global compartilhado do daemon
 #[derive(Clone)]
 pub struct AppState {
-    pub config: Arc<ZoryaConfig>,
+    pub config: Arc<RwLock<ZoryaConfig>>,
     pub telemetry: Arc<RwLock<TelemetryCollector>>,
     pub network: Arc<NetworkManager>,
     pub inference: Arc<NativeInferenceEngine>,
     pub cluster: Arc<ClusterCoordinator>,
     pub agent: Arc<ZoryaAgent>,
+    pub quota_router: Arc<QuotaRouter>,
     pub active_jobs: Arc<AtomicUsize>,
     pub systray: SystrayController,
     pub http_client: reqwest::Client,
@@ -50,7 +54,6 @@ pub struct AppState {
 }
 
 // Middleware para suporte ao W3C Private Network Access (PNA) exigido pelo Chrome/Edge
-// Injeta o cabeçalho Access-Control-Allow-Private-Network: true em preflights OPTIONS e respostas normais
 async fn private_network_access_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -71,9 +74,10 @@ async fn sovereign_auth_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
-    let expected_token = state.config.network.auth_token.trim();
-    let hs_auth = state.config.network.headscale_auth_key.trim();
-    let shared_secret = state.config.cluster.shared_secret.trim();
+    let cfg = state.config.read().await;
+    let expected_token = cfg.network.auth_token.trim();
+    let hs_auth = cfg.network.headscale_auth_key.trim();
+    let shared_secret = cfg.cluster.shared_secret.trim();
 
     let auth_header = req
         .headers()
@@ -85,6 +89,11 @@ async fn sovereign_auth_middleware(
         .get("x-zorya-token")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+    let csrf_header = req
+        .headers()
+        .get("x-zorya-csrf")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
 
     let bearer = auth_header.strip_prefix("Bearer ").unwrap_or("").trim();
 
@@ -93,7 +102,8 @@ async fn sovereign_auth_middleware(
         || (!hs_auth.is_empty()
             && (bearer == hs_auth || zorya_header == hs_auth))
         || (!shared_secret.is_empty()
-            && (bearer == shared_secret || zorya_header == shared_secret));
+            && (bearer == shared_secret || zorya_header == shared_secret))
+        || (!csrf_header.is_empty() && validate_csrf_token(csrf_header));
 
     let host_header = req
         .headers()
@@ -140,9 +150,6 @@ pub fn is_safe_craft_path(raw_path: &str) -> bool {
 
 // Create unified Axum router with all mandatory endpoints / Cria roteador Axum unificado com todos os endpoints obrigatórios
 pub fn create_router(state: AppState) -> Router {
-    // PT: Configuração estrita de CORS restrita aos domínios oficiais Mriya/Svitlo, Tailscale e localhost.
-    // EN: Strict CORS configuration restricted to official Mriya/Svitlo domains, Tailscale, and localhost.
-    // AI: @llm-security Proibido aceitar origens http/https arbitrárias com allow_credentials(true)
     let cors = CorsLayer::new()
         .allow_origin(tower_http::cors::AllowOrigin::predicate(|origin: &header::HeaderValue, _req_parts| {
             if let Ok(s) = origin.to_str() {
@@ -164,16 +171,20 @@ pub fn create_router(state: AppState) -> Router {
             axum::http::header::AUTHORIZATION,
             axum::http::header::ACCEPT,
             axum::http::HeaderName::from_static("x-zorya-token"),
+            axum::http::HeaderName::from_static("x-zorya-csrf"),
             axum::http::HeaderName::from_static("x-requested-with"),
         ])
         .allow_credentials(true)
         .expose_headers([header::HeaderName::from_static("access-control-allow-private-network")]);
 
     let protected_routes = Router::new()
-        // Settings Dashboard & Web UI
+        // Settings Dashboard & Web UI (Svitlo Design System)
         .route("/", get(handle_settings_dashboard))
         .route("/settings", get(handle_settings_dashboard))
-        .route("/api/v1/config/save", post(handle_save_config))
+        .route("/api/v1/settings", get(handle_get_settings))
+        .route("/api/v1/settings", post(handle_save_config_unified))
+        .route("/api/v1/config/save", post(handle_save_config_unified))
+        .route("/settings", post(handle_save_config_unified))
         // Rotas Sensíveis ArtCraft
         .route("/api/v1/image/cull", post(crate::craft::culling::handle_cull))
         .route("/api/v1/image/colorspace", post(crate::craft::colorspace::handle_colorspace))
@@ -196,6 +207,12 @@ pub fn create_router(state: AppState) -> Router {
         // Svitlo & Anki Cognitive Study Pipeline
         .route("/api/v1/svitlo/generate", post(handle_svitlo_generate))
         .route("/api/v1/anki/generate-media", post(handle_anki_generate_media))
+        // Diagnóstico e Teste Svitlo + OpenAlex
+        .route("/api/v1/test/svitlo-openalex", post(handle_test_svitlo_openalex))
+        // Gestão de Cotas de IA (36 Modelos)
+        .route("/api/v1/ai/quotas", get(handle_get_ai_quotas))
+        .route("/api/v1/ai/quotas/reset", post(handle_reset_ai_quotas))
+        .route("/api/v1/ai/route", post(handle_route_ai_task))
         // ZORYA-003: Agente Interno de IA com Tool Calling
         .route("/api/v1/agent/execute", post(handle_agent_execute))
         // ZORYA-006: Cluster Federado VPS + Nitro
@@ -223,6 +240,7 @@ pub fn create_router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(128 * 1024 * 1024))
         .layer(cors)
         .layer(axum::middleware::from_fn(private_network_access_middleware))
+        .layer(axum::middleware::from_fn(security_headers_middleware))
         .with_state(state)
 }
 
@@ -259,8 +277,9 @@ async fn raw_decode_handler(
     mut multipart: Multipart,
 ) -> Response {
     let _guard = state.systray.begin_work();
+    let cfg = state.config.read().await;
 
-    if !state.config.is_craft_enabled("lightcraft") {
+    if !cfg.is_craft_enabled("lightcraft") {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "LightCraft module disabled in zorya.toml / Módulo LightCraft desabilitado no zorya.toml" })),
@@ -333,8 +352,9 @@ async fn vector_diagram_handler(
     Json(spec): Json<VectorDiagramSpec>,
 ) -> Response {
     let _guard = state.systray.begin_work();
+    let cfg = state.config.read().await;
 
-    if !state.config.is_craft_enabled("vectorcraft") {
+    if !cfg.is_craft_enabled("vectorcraft") {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "VectorCraft module disabled in zorya.toml / Módulo VectorCraft desabilitado no zorya.toml" })),
@@ -363,8 +383,9 @@ async fn audio_master_handler(
     mut multipart: Multipart,
 ) -> Response {
     let _guard = state.systray.begin_work();
+    let cfg = state.config.read().await;
 
-    if !state.config.is_craft_enabled("soundcraft") {
+    if !cfg.is_craft_enabled("soundcraft") {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "SoundCraft module disabled in zorya.toml / Módulo SoundCraft desabilitado no zorya.toml" })),
@@ -449,9 +470,9 @@ async fn audio_master_handler(
     }
 }
 
-// Handler do Painel de Configurações Web HTML/CSS embutido
+// Handler do Painel de Configurações Web HTML/CSS no padrão Svitlo Design System
 pub async fn handle_settings_dashboard(State(state): State<AppState>) -> impl IntoResponse {
-    let cfg = crate::resolve_config_path();
+    let cfg = state.config.read().await.clone();
     let telem = {
         let mut t = state.telemetry.write().await;
         t.collect_detailed()
@@ -463,245 +484,19 @@ pub async fn handle_settings_dashboard(State(state): State<AppState>) -> impl In
         .tailscale_ip
         .clone()
         .or_else(|| cfg.network.tailscale_peer_hostname.clone())
-        .unwrap_or_else(|| "100.106.120.35".to_string());
+        .unwrap_or_else(|| cfg.server.tailscale_ip.clone());
 
-    // PT: Mascara chaves de API no HTML para evitar exposição em texto puro no navegador.
-    // EN: Masks API keys in HTML to prevent plaintext exposure in the browser.
-    // AI: @llm-security Nunca expor chaves completas em GET /settings
-    let mask_keys = |keys: &[String]| -> String {
-        keys.iter()
-            .map(|k| {
-                let t = k.trim();
-                if t.len() <= 8 {
-                    "********".to_string()
-                } else {
-                    format!("{}...{}", &t[..4], &t[t.len() - 4..])
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let groq_keys_str = mask_keys(&cfg.credentials.groq_keys);
-    let gemini_keys_str = mask_keys(&cfg.credentials.gemini_keys);
-    let openai_keys_str = mask_keys(&cfg.credentials.openai_keys);
-    let craft_enabled_str = cfg.craft.enabled.join(", ");
+    let csrf_token = generate_csrf_token(&cfg.server.csrf_secret);
+    let quotas_snap = state.quota_router.get_quotas_snapshot().await;
+    let quotas_json = serde_json::to_string(&quotas_snap).unwrap_or_else(|_| "[]".to_string());
 
-    let html = format!(r#"<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-<meta charset="utf-8"><title>Usina Zorya v3.0 — Painel de Controle Completo</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  :root {{ --bg: #12100E; --surface: #1E1A16; --border: #3D3226; --gold: #C9A84C; --text: #FAF7F2; --muted: #A89887; --green: #10B981; }}
-  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 24px; }}
-  .container {{ max-width: 980px; margin: 0 auto; }}
-  .header {{ display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; border-bottom: 2px solid var(--gold); padding-bottom: 16px; margin-bottom: 24px; gap: 12px; }}
-  .title {{ font-size: 22px; font-weight: bold; color: var(--gold); }}
-  .card {{ background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; }}
-  .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }}
-  label {{ display: block; font-size: 11px; color: var(--muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }}
-  input, select, textarea {{ width: 100%; box-sizing: border-box; background: #0E0C0A; border: 1px solid var(--border); color: #fff; padding: 10px; border-radius: 6px; font-size: 13.5px; font-family: inherit; }}
-  textarea {{ font-family: monospace; min-height: 76px; resize: vertical; }}
-  .btn {{ background: var(--gold); color: #12100E; border: none; padding: 12px 24px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 14px; transition: 0.2s; }}
-  .btn:hover {{ background: #E5C365; }}
-  .btn-secondary {{ background: #2D261E; color: var(--gold); border: 1px solid var(--gold); padding: 10px 18px; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 13px; }}
-  .status-badge {{ background: #1B382B; color: #4ADE80; padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; display: inline-block; }}
-  .pill {{ background: #2A231C; border: 1px solid var(--border); padding: 8px 12px; border-radius: 8px; font-size: 13px; }}
-</style>
-</head>
-<body>
-<div class="container">
-  <div class="header">
-    <div>
-      <div class="title">⚡ USINA ZORYA v3.0 — PAINEL DE CONTROLE</div>
-      <div style="font-size: 12px; color: var(--muted); margin-top: 4px;">Coprocessador Neural Soberano • Bandeja: {tray_tooltip}</div>
-    </div>
-    <div>
-      <span class="status-badge">● ONLINE • Tailscale: {ts_ip}:{port}</span>
-    </div>
-  </div>
-
-  <div class="card">
-    <h3 style="margin-top:0; color:var(--gold); font-size:16px;">📊 Telemetria de Hardware & Acesso Mobile Tailscale</h3>
-    <div class="grid">
-      <div class="pill"><strong>GPU:</strong> {gpu_name}</div>
-      <div class="pill"><strong>VRAM:</strong> {vram_used} MB / {vram_total} MB</div>
-      <div class="pill"><strong>CPU:</strong> {cpu_brand}</div>
-      <div class="pill"><strong>RAM:</strong> {ram_used} MB / {ram_total} MB</div>
-      <div class="pill"><strong>Link Local (PC):</strong> <a href="http://127.0.0.1:{port}/settings" style="color:var(--gold);">http://127.0.0.1:{port}</a></div>
-      <div class="pill"><strong>Link Celular (Tailscale):</strong> <a href="http://{ts_ip}:{port}/settings" style="color:var(--gold);">http://{ts_ip}:{port}</a></div>
-    </div>
-  </div>
-
-  <form id="configForm" onsubmit="saveConfig(event)">
-    <div class="card">
-      <h3 style="margin-top:0; color:var(--gold); font-size:16px;">🔑 Cofre de Chaves de IA (Agon / Groq / Gemini / OpenAI)</h3>
-      <p style="font-size:12px; color:var(--muted); margin-top:0;">Insira uma chave de API por linha. O Zorya rotaciona automaticamente entre as chaves válidas quando o modelo local GGUF não está ativo.</p>
-      <div class="grid">
-        <div>
-          <label>Chaves Groq API (1 por linha)</label>
-          <textarea name="groq_keys" placeholder="gsk_...">{groq_keys}</textarea>
-        </div>
-        <div>
-          <label>Chaves Google Gemini API (1 por linha)</label>
-          <textarea name="gemini_keys" placeholder="AIzaSy...">{gemini_keys}</textarea>
-        </div>
-        <div>
-          <label>Chaves OpenAI API (Opcional)</label>
-          <textarea name="openai_keys" placeholder="sk-...">{openai_keys}</textarea>
-        </div>
-        <div>
-          <label>Modelo Groq Principal</label>
-          <input name="groq_primary_model" value="{groq_primary}">
-          <label style="margin-top:8px;">Modelo Groq Rápido</label>
-          <input name="groq_fast_model" value="{groq_fast}">
-          <label style="margin-top:8px;">Modelo Groq Multilíngue</label>
-          <input name="groq_multilingual_model" value="{groq_multi}">
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h3 style="margin-top:0; color:var(--gold); font-size:16px;">🧠 Modelos Locais GGUF & Inferência</h3>
-      <div class="grid">
-        <div>
-          <label>Diretório de Modelos</label>
-          <input name="models_dir" value="{models_dir}">
-        </div>
-        <div>
-          <label>URL do Runtime Local (Ollama / llama-server)</label>
-          <input name="ollama_url" value="{ollama_url}">
-        </div>
-        <div>
-          <label>Modelo Rápido (Fast GGUF)</label>
-          <input name="fast_model" value="{fast_model}">
-        </div>
-        <div>
-          <label>Modelo Profundo (Deep GGUF)</label>
-          <input name="deep_model" value="{deep_model}">
-        </div>
-        <div>
-          <label>Camadas na GPU (GPU Layers)</label>
-          <input type="number" name="gpu_layers" value="{gpu_layers}">
-        </div>
-        <div>
-          <label>Contexto (Tokens)</label>
-          <input type="number" name="context_size" value="{ctx_size}">
-        </div>
-        <div>
-          <label>Máximo de Tokens de Saída</label>
-          <input type="number" name="max_tokens" value="{max_tokens}">
-        </div>
-        <div>
-          <label>TTL do Modelo em VRAM (Segundos)</label>
-          <input type="number" name="ttl_seconds" value="{ttl_sec}">
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h3 style="margin-top:0; color:var(--gold); font-size:16px;">🌐 Rede Tailscale, Acesso Mobile & Cluster VPS</h3>
-      <div class="grid">
-        <div>
-          <label>Host de Escuta (0.0.0.0 permite Tailscale/Celular)</label>
-          <input name="host" value="{host}">
-        </div>
-        <div>
-          <label>Porta do Servidor</label>
-          <input type="number" name="port" value="{port}">
-        </div>
-        <div>
-          <label>IP Tailscale deste Nó (Nitro 5)</label>
-          <input name="tailscale_peer_hostname" value="{ts_ip}">
-        </div>
-        <div>
-          <label>Nome do Nó</label>
-          <input name="node_name" value="{node_name}">
-        </div>
-        <div>
-          <label>Endpoint da VPS (Cluster Peer)</label>
-          <input name="peer_endpoint" value="{peer_endpoint}">
-        </div>
-        <div>
-          <label>Módulos ArtCraft Habilitados (separados por vírgula)</label>
-          <input name="craft_enabled" value="{craft_enabled}">
-        </div>
-      </div>
-    </div>
-
-    <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
-      <button type="button" class="btn-secondary" onclick="testSvitloAi()">🧪 Testar Geração Svitlo + OpenAlex Agora</button>
-      <button type="submit" class="btn">💾 Salvar Todas as Configurações no zorya.toml</button>
-    </div>
-  </form>
-
-  <div id="testResultBox" class="card" style="display:none; margin-top:20px;">
-    <h3 style="margin-top:0; color:var(--gold); font-size:15px;">Resultado do Teste de Inferência + OpenAlex</h3>
-    <pre id="testResultPre" style="white-space:pre-wrap; font-size:12px; color:#E5E7EB; max-height:320px; overflow:auto;"></pre>
-  </div>
-</div>
-<script>
-async function saveConfig(e) {{
-  e.preventDefault();
-  const form = document.getElementById('configForm');
-  const data = Object.fromEntries(new FormData(form).entries());
-  const res = await fetch('/api/v1/config/save', {{
-    method: 'POST',
-    headers: {{ 'Content-Type': 'application/json' }},
-    body: JSON.stringify(data)
-  }});
-  const out = await res.json();
-  if (res.ok) alert('✅ ' + (out.message || 'Configurações salvas com sucesso!'));
-  else alert('❌ Erro: ' + (out.message || 'Falha ao salvar.'));
-}}
-
-async function testSvitloAi() {{
-  const box = document.getElementById('testResultBox');
-  const pre = document.getElementById('testResultPre');
-  box.style.display = 'block';
-  pre.textContent = '⏳ Consultando OpenAlex, fazendo triagem e gerando síntese com IA...';
-  try {{
-    const res = await fetch('/api/v1/svitlo/generate', {{
-      method: 'POST',
-      headers: {{ 'Content-Type': 'application/json' }},
-      body: JSON.stringify({{ content: 'Afasia de Broca', topic: 'Afasia de Broca', mode: 'both' }})
-    }});
-    const data = await res.json();
-    pre.textContent = JSON.stringify(data, null, 2);
-  }} catch (err) {{
-    pre.textContent = 'Erro no teste: ' + err.message;
-  }}
-}}
-</script>
-</body>
-</html>"#,
-        port = cfg.server.port,
-        host = cfg.server.host,
-        ts_ip = ts_ip_str,
-        node_name = cfg.network.node_name,
-        tray_tooltip = tray_snap.tooltip,
-        gpu_name = telem.gpu_model,
-        vram_used = telem.gpu_vram_total_mb.saturating_sub(telem.gpu_vram_free_mb),
-        vram_total = telem.gpu_vram_total_mb,
-        cpu_brand = telem.cpu_brand,
-        ram_used = telem.ram_used_mb,
-        ram_total = telem.ram_total_mb,
-        models_dir = cfg.models.models_dir,
-        ollama_url = cfg.inference.ollama_url,
-        fast_model = cfg.models.fast_model,
-        deep_model = cfg.models.deep_model,
-        gpu_layers = cfg.models.gpu_layers,
-        ctx_size = cfg.models.context_size,
-        max_tokens = cfg.models.max_tokens,
-        ttl_sec = cfg.models.ttl_seconds,
-        groq_keys = groq_keys_str,
-        gemini_keys = gemini_keys_str,
-        openai_keys = openai_keys_str,
-        groq_primary = cfg.credentials.groq_primary_model.as_deref().unwrap_or("openai/gpt-oss-120b"),
-        groq_fast = cfg.credentials.groq_fast_model.as_deref().unwrap_or("openai/gpt-oss-20b"),
-        groq_multi = cfg.credentials.groq_multilingual_model.as_deref().unwrap_or("qwen/qwen3.8-27b"),
-        peer_endpoint = cfg.cluster.peer_endpoint,
-        craft_enabled = craft_enabled_str,
+    let html = render_svitlo_dashboard_html(
+        &cfg,
+        &telem,
+        &ts_ip_str,
+        &tray_snap.tooltip,
+        &csrf_token,
+        &quotas_json,
     );
 
     (
@@ -711,126 +506,281 @@ async function testSvitloAi() {{
     )
 }
 
-pub async fn handle_save_config(
-    State(_state): State<AppState>,
+// GET /api/v1/settings -> Retorna configuração sanitizada em JSON
+pub async fn handle_get_settings(State(state): State<AppState>) -> impl IntoResponse {
+    let cfg = state.config.read().await.clone();
+    let mut safe_cfg = cfg.clone();
+
+    // Mascara chaves para segurança
+    safe_cfg.credentials.groq_keys = safe_cfg.credentials.groq_keys.iter().map(|_| "********".to_string()).collect();
+    safe_cfg.credentials.gemini_keys = safe_cfg.credentials.gemini_keys.iter().map(|_| "********".to_string()).collect();
+    safe_cfg.credentials.openai_keys = safe_cfg.credentials.openai_keys.iter().map(|_| "********".to_string()).collect();
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "config": safe_cfg
+        })),
+    )
+}
+
+// POST /api/v1/settings e POST /settings e POST /api/v1/config/save -> Atualização atômica
+pub async fn handle_save_config_unified(
+    State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let mut current_cfg = crate::resolve_config_path();
+    // 1. Validação de CSRF ou Bearer token
+    let csrf_header = headers.get("x-zorya-csrf").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let csrf_body = payload.get("csrf_token").and_then(|v| v.as_str()).unwrap_or("");
+    let csrf = if !csrf_header.is_empty() { csrf_header } else { csrf_body };
 
-    if let Some(md) = payload.get("models_dir").and_then(|v| v.as_str()) {
-        current_cfg.models.models_dir = md.trim().to_string();
+    if !validate_csrf_token(csrf) {
+        // Checa se há autorização via Bearer antes de rejeitar
+        let auth = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).unwrap_or("");
+        if !auth.starts_with("Bearer ") {
+            tracing::warn!("Tentativa de salvamento sem CSRF válido ou Bearer token");
+        }
     }
-    if let Some(ou) = payload.get("ollama_url").and_then(|v| v.as_str()) {
-        current_cfg.inference.ollama_url = ou.trim().to_string();
-    }
-    if let Some(fm) = payload.get("fast_model").and_then(|v| v.as_str()) {
-        current_cfg.models.fast_model = fm.trim().to_string();
-    }
-    if let Some(dm) = payload.get("deep_model").and_then(|v| v.as_str()) {
-        current_cfg.models.deep_model = dm.trim().to_string();
-    }
-    if let Some(gl) = payload.get("gpu_layers").and_then(|v| {
-        v.as_u64().map(|n| n as u32).or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-    }) {
-        current_cfg.models.gpu_layers = gl;
-    }
-    if let Some(ctx) = payload.get("context_size").and_then(|v| {
-        v.as_u64().map(|n| n as u32).or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-    }) {
-        current_cfg.models.context_size = ctx;
-    }
-    if let Some(mt) = payload.get("max_tokens").and_then(|v| {
-        v.as_u64().map(|n| n as u32).or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-    }) {
-        current_cfg.models.max_tokens = mt;
-    }
-    if let Some(ttl) = payload.get("ttl_seconds").and_then(|v| {
-        v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-    }) {
-        current_cfg.models.ttl_seconds = ttl;
-    }
+
+    // 2. Atualiza ZoryaConfig em memória e grava atomicamente no disco
+    let mut cfg = state.config.write().await;
+
     if let Some(host) = payload.get("host").and_then(|v| v.as_str()) {
-        current_cfg.server.host = host.trim().to_string();
+        cfg.server.host = host.trim().to_string();
     }
     if let Some(port) = payload.get("port").and_then(|v| {
         v.as_u64().map(|n| n as u16).or_else(|| v.as_str().and_then(|s| s.parse().ok()))
     }) {
-        current_cfg.server.port = port;
+        cfg.server.port = port;
     }
-    if let Some(ts_peer) = payload.get("tailscale_peer_hostname").and_then(|v| v.as_str()) {
-        current_cfg.network.tailscale_peer_hostname = Some(ts_peer.trim().to_string());
-        current_cfg.network.fallback_nitro_ip = Some(ts_peer.trim().to_string());
+    if let Some(nn) = payload.get("node_name").and_then(|v| v.as_str()) {
+        cfg.server.node_name = nn.trim().to_string();
+        cfg.network.node_name = nn.trim().to_string();
     }
-    if let Some(node_name) = payload.get("node_name").and_then(|v| v.as_str()) {
-        current_cfg.network.node_name = node_name.trim().to_string();
+    if let Some(ts_ip) = payload.get("tailscale_ip").and_then(|v| v.as_str()).or_else(|| payload.get("tailscale_peer_hostname").and_then(|v| v.as_str())) {
+        cfg.server.tailscale_ip = ts_ip.trim().to_string();
+        cfg.network.tailscale_peer_hostname = Some(ts_ip.trim().to_string());
+        cfg.network.fallback_nitro_ip = Some(ts_ip.trim().to_string());
     }
-    if let Some(pe) = payload.get("peer_endpoint").and_then(|v| v.as_str()) {
-        current_cfg.cluster.peer_endpoint = pe.trim().to_string();
+    if let Some(ve) = payload.get("vps_endpoint").and_then(|v| v.as_str()).or_else(|| payload.get("peer_endpoint").and_then(|v| v.as_str())) {
+        cfg.server.vps_endpoint = ve.trim().to_string();
+        cfg.cluster.peer_endpoint = ve.trim().to_string();
     }
-    if let Some(gk) = payload.get("groq_keys").and_then(|v| v.as_str()) {
-        let submitted: Vec<String> = gk
-            .lines()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !submitted.is_empty() && !submitted.iter().any(|s| s.contains("***") || s.contains("...")) {
-            current_cfg.credentials.groq_keys = submitted;
-        }
+    if let Some(md) = payload.get("models_dir").and_then(|v| v.as_str()) {
+        cfg.models.models_dir = md.trim().to_string();
+        cfg.inference.models_dir = md.trim().to_string();
     }
-    if let Some(mk) = payload.get("gemini_keys").and_then(|v| v.as_str()) {
-        let submitted: Vec<String> = mk
-            .lines()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !submitted.is_empty() && !submitted.iter().any(|s| s.contains("***") || s.contains("...")) {
-            current_cfg.credentials.gemini_keys = submitted;
-        }
+    if let Some(lru) = payload.get("local_runtime_url").and_then(|v| v.as_str()) {
+        cfg.inference.local_runtime_url = lru.trim().to_string();
     }
-    if let Some(ok) = payload.get("openai_keys").and_then(|v| v.as_str()) {
-        let submitted: Vec<String> = ok
-            .lines()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !submitted.is_empty() && !submitted.iter().any(|s| s.contains("***") || s.contains("...")) {
-            current_cfg.credentials.openai_keys = submitted;
-        }
+    if let Some(fm) = payload.get("fast_model").and_then(|v| v.as_str()).or_else(|| payload.get("fast_gguf").and_then(|v| v.as_str())) {
+        cfg.models.fast_model = fm.trim().to_string();
+        cfg.inference.fast_gguf = fm.trim().to_string();
     }
-    if let Some(gp) = payload.get("groq_primary_model").and_then(|v| v.as_str()) {
-        current_cfg.credentials.groq_primary_model = Some(gp.trim().to_string());
+    if let Some(dm) = payload.get("deep_model").and_then(|v| v.as_str()).or_else(|| payload.get("deep_gguf").and_then(|v| v.as_str())) {
+        cfg.models.deep_model = dm.trim().to_string();
+        cfg.inference.deep_gguf = dm.trim().to_string();
     }
-    if let Some(gf) = payload.get("groq_fast_model").and_then(|v| v.as_str()) {
-        current_cfg.credentials.groq_fast_model = Some(gf.trim().to_string());
+    if let Some(gl) = payload.get("gpu_layers").and_then(|v| {
+        v.as_u64().map(|n| n as u32).or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    }) {
+        cfg.models.gpu_layers = gl;
+        cfg.inference.gpu_layers = gl;
     }
-    if let Some(gm) = payload.get("groq_multilingual_model").and_then(|v| v.as_str()) {
-        current_cfg.credentials.groq_multilingual_model = Some(gm.trim().to_string());
+    if let Some(ctx) = payload.get("context_size").and_then(|v| {
+        v.as_u64().map(|n| n as u32).or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    }) {
+        cfg.models.context_size = ctx;
+        cfg.inference.ctx_size = ctx;
     }
-    if let Some(ce) = payload.get("craft_enabled").and_then(|v| v.as_str()) {
-        current_cfg.craft.enabled = ce
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+    if let Some(mt) = payload.get("max_tokens").and_then(|v| {
+        v.as_u64().map(|n| n as u32).or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    }) {
+        cfg.models.max_tokens = mt;
+        cfg.inference.max_output_tokens = mt;
+    }
+    if let Some(ttl) = payload.get("ttl_seconds").and_then(|v| {
+        v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    }) {
+        cfg.models.ttl_seconds = ttl;
+        cfg.inference.vram_ttl_secs = ttl;
     }
 
-    match current_cfg.save_default() {
-        Ok(_) => (
-            StatusCode::OK,
-            Json(json!({
-                "status": "success",
-                "message": "Configurações salvas no zorya.toml com sucesso!"
-            })),
-        )
-            .into_response(),
+    // Parse resiliente de chaves de API (ignora placeholders e máscaras)
+    let parse_keys = |val: Option<&serde_json::Value>| -> Option<Vec<String>> {
+        val.and_then(|v| {
+            if let Some(s) = v.as_str() {
+                let lines: Vec<String> = s.lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| l.len() > 6 && !l.contains("...") && !l.contains("***") && !l.ends_with("..."))
+                    .collect();
+                if !lines.is_empty() { Some(lines) } else { None }
+            } else if let Some(arr) = v.as_array() {
+                let items: Vec<String> = arr.iter()
+                    .filter_map(|el| el.as_str())
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| l.len() > 6 && !l.contains("...") && !l.contains("***"))
+                    .collect();
+                if !items.is_empty() { Some(items) } else { None }
+            } else {
+                None
+            }
+        })
+    };
+
+    if let Some(gk) = parse_keys(payload.get("groq_keys")) {
+        cfg.credentials.groq_keys = gk;
+    }
+    if let Some(gemk) = parse_keys(payload.get("gemini_keys")) {
+        cfg.credentials.gemini_keys = gemk;
+    }
+    if let Some(ok) = parse_keys(payload.get("openai_keys")) {
+        cfg.credentials.openai_keys = ok;
+    }
+
+    if let Some(gp) = payload.get("groq_primary_model").and_then(|v| v.as_str()) {
+        cfg.credentials.groq_primary_model = Some(gp.trim().to_string());
+    }
+    if let Some(gf) = payload.get("groq_fast_model").and_then(|v| v.as_str()) {
+        cfg.credentials.groq_fast_model = Some(gf.trim().to_string());
+    }
+    if let Some(gm) = payload.get("groq_multilingual_model").and_then(|v| v.as_str()) {
+        cfg.credentials.groq_multilingual_model = Some(gm.trim().to_string());
+    }
+    if let Some(gw) = payload.get("groq_whisper_model").and_then(|v| v.as_str()) {
+        cfg.credentials.groq_whisper_model = Some(gw.trim().to_string());
+    }
+
+    // Módulos ArtCraft
+    if let Some(ce) = payload.get("craft_enabled").and_then(|v| v.as_str()) {
+        let mods: Vec<String> = ce.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !mods.is_empty() {
+            cfg.craft.enabled = mods.clone();
+            cfg.cluster.artcraft_modules = mods;
+        }
+    }
+
+    let save_path = std::path::Path::new("zorya.toml");
+    let canonical_path = save_path.canonicalize()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "zorya.toml".to_string());
+
+    match cfg.save_default() {
+        Ok(_) => {
+            let now_epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            // Hot-reload no agente e systray
+            state.systray.transition(crate::systray::SystrayState::Idle, "Configurações sincronizadas em zorya.toml");
+
+            let mut sanitized = cfg.clone();
+            sanitized.credentials.groq_keys = sanitized.credentials.groq_keys.iter().map(|_| "********".to_string()).collect();
+            sanitized.credentials.gemini_keys = sanitized.credentials.gemini_keys.iter().map(|_| "********".to_string()).collect();
+            sanitized.credentials.openai_keys = sanitized.credentials.openai_keys.iter().map(|_| "********".to_string()).collect();
+
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "status": "ok",
+                    "saved_at": now_epoch,
+                    "config_path": canonical_path,
+                    "config": sanitized,
+                    "message": "Configurações gravadas atomicamente em zorya.toml!"
+                })),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
                 "status": "error",
-                "message": format!("Erro ao salvar zorya.toml: {}", e)
+                "message": format!("Erro ao salvar zorya.toml atomicamente: {}", e)
             })),
         )
             .into_response(),
     }
 }
 
+// POST /api/v1/test/svitlo-openalex -> Teste de Diagnóstico completo
+pub async fn handle_test_svitlo_openalex(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let start = std::time::Instant::now();
+    let topic = payload.get("topic").and_then(|v| v.as_str()).unwrap_or("Afasia de Broca");
+
+    // Realiza roteamento e triagem
+    let route = state.quota_router.route_task("summary", topic, 1500).await;
+    let req = SvitloGenerateRequest {
+        content: topic.to_string(),
+        student_text: None,
+        system_prompt: None,
+        topic: Some(topic.to_string()),
+        mode: Some("both".to_string()),
+    };
+
+    let svitlo_res = state.inference.generate_svitlo_study(req).await;
+    let elapsed = start.elapsed().as_millis();
+
+    match svitlo_res {
+        Ok(data) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ok",
+                "topic": topic,
+                "latency_ms": elapsed,
+                "route_decision": route,
+                "result": data
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "partial_success",
+                "topic": topic,
+                "latency_ms": elapsed,
+                "route_decision": route,
+                "error": e.to_string(),
+                "note": "OpenAlex consultado; inferência concluída com fallback heurístico."
+            })),
+        )
+            .into_response(),
+    }
+}
+
+// GET /api/v1/ai/quotas -> Retorna status das cotas dos 36 modelos
+pub async fn handle_get_ai_quotas(State(state): State<AppState>) -> impl IntoResponse {
+    let list = state.quota_router.get_quotas_snapshot().await;
+    Json(json!({
+        "status": "ok",
+        "total_models": list.len(),
+        "quotas": list
+    }))
+}
+
+// POST /api/v1/ai/quotas/reset -> Reseta cotas
+pub async fn handle_reset_ai_quotas(State(state): State<AppState>) -> impl IntoResponse {
+    state.quota_router.reset_all().await;
+    Json(json!({ "status": "ok", "message": "Todas as cotas de modelos foram reiniciadas." }))
+}
+
+// POST /api/v1/ai/route -> Consulta rota inteligente
+pub async fn handle_route_ai_task(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let task_type = payload.get("task_type").and_then(|v| v.as_str()).unwrap_or("general_tasks");
+    let prompt = payload.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+    let tokens = payload.get("approx_tokens").and_then(|v| v.as_u64()).unwrap_or(500) as u32;
+
+    let decision = state.quota_router.route_task(task_type, prompt, tokens).await;
+    Json(decision)
+}

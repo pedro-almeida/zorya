@@ -12,9 +12,12 @@ pub mod inference;
 pub mod mcp;
 pub mod network;
 pub mod p2p_future;
+pub mod quota_router;
+pub mod security;
 pub mod server;
 pub mod systray;
 pub mod telemetry;
+pub mod ui;
 pub mod video;
 
 use std::net::SocketAddr;
@@ -260,14 +263,18 @@ async fn main() -> anyhow::Result<()> {
     // Canal broadcast SSE para notificações MCP JSON-RPC
     let (mcp_tx, _mcp_rx) = broadcast::channel::<String>(256);
 
+    // Inicializa roteador de cotas de IA (36 modelos canônicos)
+    let quota_router = crate::quota_router::QuotaRouter::new();
+
     // Constrói o estado global compartilhado da aplicação
     let state = AppState {
-        config: Arc::new(config.clone()),
+        config: Arc::new(RwLock::new(config.clone())),
         telemetry,
         network,
         inference,
         cluster,
         agent,
+        quota_router,
         active_jobs,
         systray,
         http_client: reqwest::Client::builder()

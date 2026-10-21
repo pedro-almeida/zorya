@@ -1,12 +1,16 @@
 // PT: Analisador e Estruturas de Configuração do Zorya v3.0 (zorya.toml)
 // EN: Zorya v3.0 Configuration Parser and Data Structures (zorya.toml)
-// AI: @llm-module config | @llm-context Compatibilidade total com seções [server], [hardware], [models], [network], [cluster], [credentials]/[keys], [craft]/[artcraft], [youtube]
+// AI: @llm-module config | @llm-context Compatibilidade total com seções [server], [vault]/[credentials], [inference]/[models], [cluster], [craft]
+// AI: @llm-invariant Persistência atômica via zorya.toml.tmp + fsync + rename; desserialização flexível de chaves e módulos
 
-use std::fs;
-use std::path::Path;
-use serde::{Deserialize, Serialize};
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use serde::{de, Deserialize, Deserializer, Serialize};
 
-// Root configuration structure / Estrutura raiz de configuração
+/// PT: Estrutura raiz de configuração do daemon Zorya v3.0
+/// EN: Root configuration structure for Zorya v3.0 daemon
+// AI: @llm-struct ZoryaConfig @llm-invariant #[serde(default)] em todos os blocos
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZoryaConfig {
     #[serde(default)]
@@ -23,18 +27,31 @@ pub struct ZoryaConfig {
     pub inference: InferenceConfig,
     #[serde(default, alias = "artcraft")]
     pub craft: CraftConfig,
-    #[serde(default, alias = "keys")]
+    #[serde(default, alias = "keys", alias = "vault")]
     pub credentials: CredentialsConfig,
     #[serde(default)]
     pub cluster: ClusterConfig,
 }
 
+/// PT: Configurações do servidor web e portas
+/// EN: Web server and port configuration
+// AI: @llm-struct ServerConfig @llm-invariant host=0.0.0.0, port=8085
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     #[serde(default = "default_host")]
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    #[serde(default = "default_node_name")]
+    pub node_name: String,
+    #[serde(default = "default_ts_ip")]
+    pub tailscale_ip: String,
+    #[serde(default = "default_vps_endpoint")]
+    pub vps_endpoint: String,
+    #[serde(default)]
+    pub auth_token: String,
+    #[serde(default = "default_csrf_secret")]
+    pub csrf_secret: String,
     #[serde(default = "default_true")]
     pub enable_mcp_sse: bool,
     #[serde(default = "default_mcp_path")]
@@ -45,6 +62,10 @@ pub struct ServerConfig {
 
 fn default_host() -> String { "0.0.0.0".to_string() }
 fn default_port() -> u16 { 8085 }
+fn default_node_name() -> String { "Usina-Zorya-Nitro".to_string() }
+fn default_ts_ip() -> String { "100.106.120.35".to_string() }
+fn default_vps_endpoint() -> String { "https://svitlo.espectroipe.com.br".to_string() }
+fn default_csrf_secret() -> String { "zorya-csrf-secret-sovereign-2026".to_string() }
 fn default_true() -> bool { true }
 fn default_mcp_path() -> String { "/mcp/sse".to_string() }
 fn default_log_level() -> String { "info".to_string() }
@@ -54,6 +75,11 @@ impl Default for ServerConfig {
         Self {
             host: default_host(),
             port: default_port(),
+            node_name: default_node_name(),
+            tailscale_ip: default_ts_ip(),
+            vps_endpoint: default_vps_endpoint(),
+            auth_token: String::new(),
+            csrf_secret: default_csrf_secret(),
             enable_mcp_sse: true,
             mcp_sse_path: default_mcp_path(),
             log_level: default_log_level(),
@@ -92,6 +118,9 @@ impl Default for HardwareConfig {
     }
 }
 
+/// PT: Configuração de modelos locais GGUF e parâmetros de inferência
+/// EN: Local GGUF models and inference configuration
+// AI: @llm-struct ModelsConfig
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelsConfig {
     #[serde(default = "default_models_dir")]
@@ -107,7 +136,6 @@ pub struct ModelsConfig {
     #[serde(default = "default_batch")]
     pub batch_size: u32,
 
-    // Web Settings Dashboard compatibility fields
     #[serde(default = "default_fast_model")]
     pub fast_model: String,
     #[serde(default = "default_deep_model")]
@@ -131,7 +159,7 @@ fn default_batch() -> u32 { 512 }
 fn default_fast_model() -> String { "qwen2.5-3b-instruct-q4_k_m.gguf".to_string() }
 fn default_deep_model() -> String { "qwen2.5-7b-instruct-q4_k_m.gguf".to_string() }
 fn default_gpu_layers() -> u32 { 33 }
-fn default_max_tokens() -> u32 { 2048 }
+fn default_max_tokens() -> u32 { 4096 }
 fn default_ttl_seconds() -> u64 { 3600 }
 
 impl Default for ModelsConfig {
@@ -153,7 +181,9 @@ impl Default for ModelsConfig {
     }
 }
 
-// Network and Headscale / Tailscale configuration
+/// PT: Configuração de rede Headscale / Tailscale
+/// EN: Headscale / Tailscale network configuration
+// AI: @llm-struct NetworkConfig
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
     #[serde(default = "default_headscale_url")]
@@ -182,11 +212,9 @@ pub struct NetworkConfig {
 
 fn default_headscale_url() -> String { "https://headscale.espectroipe.com.br".to_string() }
 fn default_hs_auth() -> String { "hskey-default".to_string() }
-fn default_node_name() -> String { "Usina-Zorya-Nitro".to_string() }
 fn default_allowed_ip() -> String { "0.0.0.0/0".to_string() }
 fn default_ts_api() -> String { "http://127.0.0.1:41112/localapi/v0/status".to_string() }
 fn default_30() -> u64 { 30 }
-
 fn default_vps_ip() -> String {
     std::env::var("MRIYA_VPS_IP").unwrap_or_else(|_| "143.95.223.218".to_string())
 }
@@ -200,45 +228,70 @@ impl Default for NetworkConfig {
             allowed_ip: default_allowed_ip(),
             listen_port: Some(8085),
             wireguard_port: Some(51820),
-            tailscale_peer_hostname: Some("100.106.120.35".to_string()),
+            tailscale_peer_hostname: Some(default_ts_ip()),
             fallback_ip: Some("0.0.0.0".to_string()),
             prefer_tailscale: true,
             tailscale_local_api: default_ts_api(),
             fallback_vps_ip: Some(default_vps_ip()),
-            fallback_nitro_ip: Some("100.106.120.35".to_string()),
+            fallback_nitro_ip: Some(default_ts_ip()),
             auth_token: String::new(),
             reconnect_interval_secs: 30,
         }
     }
 }
 
-// Local inference configuration
+/// PT: Configuração da inferência in-process GGUF (elimina dependência externa de Ollama)
+/// EN: In-process GGUF inference configuration (eliminates external Ollama dependency)
+// AI: @llm-struct InferenceConfig @llm-invariant local_runtime_url = "http://127.0.0.1:8085"
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceConfig {
-    #[serde(default = "default_ollama_url")]
-    pub ollama_url: String,
+    #[serde(default = "default_models_dir")]
+    pub models_dir: String,
+    #[serde(default = "default_local_runtime_url")]
+    pub local_runtime_url: String,
+    #[serde(default = "default_fast_model")]
+    pub fast_gguf: String,
+    #[serde(default = "default_deep_model")]
+    pub deep_gguf: String,
+    #[serde(default = "default_gpu_layers")]
+    pub gpu_layers: u32,
+    #[serde(default = "default_nitro_ctx")]
+    pub ctx_size: u32,
+    #[serde(default = "default_max_tokens")]
+    pub max_output_tokens: u32,
+    #[serde(default = "default_ttl_seconds")]
+    pub vram_ttl_secs: u64,
     pub default_model: Option<String>,
     pub dedicated_vram_mb: Option<u64>,
     pub gpu_device_index: Option<u32>,
 }
 
-fn default_ollama_url() -> String { "http://127.0.0.1:11434".to_string() }
+fn default_local_runtime_url() -> String { "http://127.0.0.1:8085".to_string() }
 
 impl Default for InferenceConfig {
     fn default() -> Self {
         Self {
-            ollama_url: default_ollama_url(),
-            default_model: Some("qwen2.5-7b-instruct-q4_k_m.gguf".to_string()),
+            models_dir: default_models_dir(),
+            local_runtime_url: default_local_runtime_url(),
+            fast_gguf: default_fast_model(),
+            deep_gguf: default_deep_model(),
+            gpu_layers: default_gpu_layers(),
+            ctx_size: default_nitro_ctx(),
+            max_output_tokens: default_max_tokens(),
+            vram_ttl_secs: default_ttl_seconds(),
+            default_model: Some(default_deep_model()),
             dedicated_vram_mb: Some(4096),
             gpu_device_index: Some(0),
         }
     }
 }
 
-// ArtCraft Suite modules configuration
+/// PT: Módulos ArtCraft integrados à Usina Zorya
+/// EN: ArtCraft modules integrated into Zorya Daemon
+// AI: @llm-struct CraftConfig @llm-invariant Suíte completa com 11 módulos
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CraftConfig {
-    #[serde(default = "default_craft_modules")]
+    #[serde(default = "default_craft_modules", deserialize_with = "string_or_vec")]
     pub enabled: Vec<String>,
     pub denoise_default_method: Option<String>,
     pub audio_target_lufs: Option<f32>,
@@ -246,13 +299,19 @@ pub struct CraftConfig {
     pub default_icc_profile: Option<String>,
 }
 
-fn default_craft_modules() -> Vec<String> {
+pub fn default_craft_modules() -> Vec<String> {
     vec![
         "lightcraft".to_string(),
         "photocraft".to_string(),
         "vectorcraft".to_string(),
         "soundcraft".to_string(),
         "pdfcraft".to_string(),
+        "wordcraft".to_string(),
+        "effectcraft".to_string(),
+        "filmcraft".to_string(),
+        "deckcraft".to_string(),
+        "figcraft".to_string(),
+        "designcraft".to_string(),
     ]
 }
 
@@ -274,24 +333,26 @@ fn default_groq_multi_opt() -> Option<String> { Some("qwen/qwen3.8-27b".to_strin
 fn default_groq_whisper_opt() -> Option<String> { Some("whisper-large-v3".to_string()) }
 fn default_gemini_model_opt() -> Option<String> { Some("gemini-2.5-flash".to_string()) }
 
-// Credentials configuration
+/// PT: Cofre de chaves de API com desserializador tolerante a string/lista
+/// EN: API key vault with tolerant string/list deserializer
+// AI: @llm-struct CredentialsConfig @llm-invariant string_or_vec sanitizado sem placeholders
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialsConfig {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_vec")]
     pub groq_keys: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_vec")]
     pub gemini_keys: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_vec")]
     pub openai_keys: Vec<String>,
     pub vps_credentials_path: Option<String>,
     pub validation_cache_ttl_hours: Option<u64>,
-    #[serde(default = "default_groq_primary_opt")]
+    #[serde(default = "default_groq_primary_opt", alias = "groq_model_primary")]
     pub groq_primary_model: Option<String>,
-    #[serde(default = "default_groq_fast_opt")]
+    #[serde(default = "default_groq_fast_opt", alias = "groq_model_fast")]
     pub groq_fast_model: Option<String>,
-    #[serde(default = "default_groq_multi_opt")]
+    #[serde(default = "default_groq_multi_opt", alias = "groq_model_multilingual")]
     pub groq_multilingual_model: Option<String>,
-    #[serde(default = "default_groq_whisper_opt")]
+    #[serde(default = "default_groq_whisper_opt", alias = "groq_model_whisper")]
     pub groq_whisper_model: Option<String>,
     #[serde(default = "default_gemini_model_opt")]
     pub gemini_model: Option<String>,
@@ -314,7 +375,9 @@ impl Default for CredentialsConfig {
     }
 }
 
-// Cluster configuration
+/// PT: Configuração do Cluster e Malha P2P
+/// EN: Cluster and P2P Mesh configuration
+// AI: @llm-struct ClusterConfig
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusterConfig {
     #[serde(default = "default_true")]
@@ -329,12 +392,20 @@ pub struct ClusterConfig {
     pub offload_light_tasks_to_vps: bool,
     #[serde(default)]
     pub shared_secret: String,
+    #[serde(default = "default_craft_modules", deserialize_with = "string_or_vec")]
+    pub artcraft_modules: Vec<String>,
+    #[serde(default = "default_headscale_url")]
+    pub headscale_url: String,
+    #[serde(default = "default_hs_auth")]
+    pub headscale_auth_key: String,
+    #[serde(default = "default_true")]
+    pub enable_p2p: bool,
 }
 
 fn default_role() -> String { "nitro".to_string() }
 fn default_peer_endpoint() -> String {
     std::env::var("ZORYA_PEER_ENDPOINT")
-        .unwrap_or_else(|_| "http://143.95.223.218:8085".to_string())
+        .unwrap_or_else(|_| "https://svitlo.espectroipe.com.br".to_string())
 }
 
 impl Default for ClusterConfig {
@@ -346,6 +417,10 @@ impl Default for ClusterConfig {
             health_check_interval_secs: 30,
             offload_light_tasks_to_vps: true,
             shared_secret: String::new(),
+            artcraft_modules: default_craft_modules(),
+            headscale_url: default_headscale_url(),
+            headscale_auth_key: default_hs_auth(),
+            enable_p2p: true,
         }
     }
 }
@@ -364,6 +439,69 @@ impl Default for ZoryaConfig {
             cluster: ClusterConfig::default(),
         }
     }
+}
+
+/// PT: Desserializador customizado que aceita tanto Vec<String> quanto String separada por quebras de linha ou vírgulas.
+/// EN: Custom deserializer accepting either Vec<String> or newline/comma-separated String.
+// AI: @llm-func string_or_vec @llm-security Rejeita placeholders como gsk_..., AIzaSy... e sk-...
+pub fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct StringOrVecVisitor;
+
+    impl<'de> de::Visitor<'de> for StringOrVecVisitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("string com quebras de linha/vírgulas ou vetor de strings")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Vec<String>, E>
+        where
+            E: de::Error,
+        {
+            let is_comma_separated = value.contains(',') && !value.contains('\n');
+            let items: Vec<String> = if is_comma_separated {
+                value.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| is_valid_token(s))
+                    .collect()
+            } else {
+                value.lines()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| is_valid_token(s))
+                    .collect()
+            };
+            Ok(items)
+        }
+
+        fn visit_seq<S>(self, mut seq: S) -> Result<Vec<String>, S::Error>
+        where
+            S: de::SeqAccess<'de>,
+        {
+            let mut items = Vec::new();
+            while let Some(elem) = seq.next_element::<String>()? {
+                let trimmed = elem.trim().to_string();
+                if is_valid_token(&trimmed) {
+                    items.push(trimmed);
+                }
+            }
+            Ok(items)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrVecVisitor)
+}
+
+fn is_valid_token(token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    // Rejeita placeholders conhecidos
+    let placeholders = ["gsk_...", "aizasy...", "sk-...", "********", "...", "hskey-default"];
+    let lower = token.to_lowercase();
+    !placeholders.iter().any(|&p| lower == p || lower.ends_with("..."))
 }
 
 impl ZoryaConfig {
@@ -388,20 +526,44 @@ impl ZoryaConfig {
             .enabled
             .iter()
             .any(|m| m.eq_ignore_ascii_case(module))
+            || self.cluster
+                .artcraft_modules
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case(module))
     }
 
-    pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> anyhow::Result<()> {
+    /// PT: Gravação atômica via arquivo temporário (zorya.toml.tmp) + fsync + rename
+    /// EN: Atomic write via temporary file (zorya.toml.tmp) + fsync + rename
+    // AI: @llm-func save_atomic @llm-security Permissão 0600 em Unix e atomicidade em queda de energia
+    pub fn save_atomic(&self, path: &Path) -> anyhow::Result<()> {
         let serialized = toml::to_string_pretty(self)?;
-        fs::write(path, serialized)?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let tmp_path = parent.join(format!("{}.tmp", path.file_name().and_then(|f| f.to_str()).unwrap_or("zorya.toml")));
+
+        {
+            let mut file = File::create(&tmp_path)?;
+            file.write_all(serialized.as_bytes())?;
+            file.sync_all()?;
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            let _ = std::fs::set_permissions(&tmp_path, perms);
+        }
+
+        std::fs::rename(&tmp_path, path)?;
+        tracing::info!("zorya.toml gravado atomicamente com sucesso em {:?}", path);
         Ok(())
     }
 
     pub fn save_default(&self) -> anyhow::Result<()> {
         if let Ok(env_path) = std::env::var("ZORYA_CONFIG") {
-            let p = std::path::PathBuf::from(&env_path);
-            return self.save_to_file(p);
+            let p = PathBuf::from(&env_path);
+            return self.save_atomic(&p);
         }
         let local_path = Path::new("zorya.toml");
-        self.save_to_file(local_path)
+        self.save_atomic(local_path)
     }
 }
