@@ -498,7 +498,20 @@ impl NativeInferenceEngine {
                     .send()
                     .await
                 {
-                    if resp.status().is_success() {
+                    let status = resp.status();
+                    let headers = resp.headers().clone();
+
+                    // Sincroniza telemetria real de cotas via headers HTTP da Groq
+                    if let Some(qr) = crate::quota_router::QuotaRouter::global() {
+                        let q_model = g_model.to_string();
+                        let q_headers = headers.clone();
+                        let q_code = status.as_u16();
+                        tokio::spawn(async move {
+                            qr.parse_groq_ratelimit_headers(&q_model, &q_headers, q_code).await;
+                        });
+                    }
+
+                    if status.is_success() {
                         if let Ok(body) = resp.json::<Value>().await {
                             if let Some(txt) = body["choices"][0]["message"]["content"].as_str() {
                                 if !txt.trim().is_empty() {
@@ -554,8 +567,21 @@ impl NativeInferenceEngine {
                 .send()
                 .await
             {
-                if resp.status().is_success() {
-                    if let Ok(body) = resp.json::<Value>().await {
+                let status = resp.status();
+                let headers = resp.headers().clone();
+
+                if let Ok(body) = resp.json::<Value>().await {
+                    // Sincroniza telemetria híbrida de cotas Gemini (headers + usageMetadata + error 429 details)
+                    if let Some(qr) = crate::quota_router::QuotaRouter::global() {
+                        let q_headers = headers.clone();
+                        let q_body = body.clone();
+                        let q_code = status.as_u16();
+                        tokio::spawn(async move {
+                            qr.parse_gemini_quota_state("gemini-2.5-flash", &q_headers, Some(&q_body), q_code).await;
+                        });
+                    }
+
+                    if status.is_success() {
                         if let Some(parts) = body["candidates"][0]["content"]["parts"].as_array() {
                             let combined: String = parts
                                 .iter()
@@ -595,7 +621,74 @@ impl NativeInferenceEngine {
             }
         }
 
-        anyhow::bail!("Nenhum motor de inferência (GGUF local, Groq ou Gemini) retornou resposta válida.")
+        // 4. Tenta Provedor OpenRouter Condicional (se chave configurada e ativa)
+        let main_cfg = crate::main_config_snapshot();
+        if main_cfg.credentials.openrouter_enabled && !main_cfg.credentials.openrouter_keys.is_empty() {
+            let or_model = if !main_cfg.credentials.openrouter_default_model.trim().is_empty() {
+                main_cfg.credentials.openrouter_default_model.trim()
+            } else {
+                "qwen/qwen3-32b:free"
+            };
+
+            for or_key in &main_cfg.credentials.openrouter_keys {
+                if !or_key.starts_with("sk-or-v1-") || or_key.len() <= 20 {
+                    continue;
+                }
+                if let Ok(resp) = self
+                    .http_client
+                    .post("https://openrouter.ai/api/v1/chat/completions")
+                    .header("HTTP-Referer", "https://svitlo.espectroipe.com.br")
+                    .header("X-Title", "Zorya Svitlo")
+                    .bearer_auth(or_key)
+                    .json(&json!({
+                        "model": or_model,
+                        "messages": [
+                            {"role": "system", "content": system_text},
+                            {"role": "user", "content": user_text}
+                        ],
+                        "temperature": temperature,
+                        "max_tokens": max_tokens
+                    }))
+                    .send()
+                    .await
+                {
+                    if resp.status().is_success() {
+                        if let Ok(body) = resp.json::<Value>().await {
+                            if let Some(txt) = body["choices"][0]["message"]["content"].as_str() {
+                                if !txt.trim().is_empty() {
+                                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                                    let prompt_tokens = ((system_text.len() + user_text.len()) / 4).max(1);
+                                    let completion_tokens = (txt.len() / 4).max(1);
+                                    return Ok(json!({
+                                        "id": format!("chatcmpl-zorya-openrouter-{}", elapsed_ms),
+                                        "object": "chat.completion",
+                                        "created": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+                                        "model": format!("zorya-openrouter/{}", or_model),
+                                        "backend": self.hardware.active_backend.as_str(),
+                                        "latency_ms": elapsed_ms,
+                                        "choices": [{
+                                            "index": 0,
+                                            "message": {
+                                                "role": "assistant",
+                                                "content": txt
+                                            },
+                                            "finish_reason": "stop"
+                                        }],
+                                        "usage": {
+                                            "prompt_tokens": prompt_tokens,
+                                            "completion_tokens": completion_tokens,
+                                            "total_tokens": prompt_tokens + completion_tokens
+                                        }
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        anyhow::bail!("Nenhum motor de inferência (GGUF local, Groq, Gemini ou OpenRouter) retornou resposta válida.")
     }
 
     /// Busca e faz a TRIAGEM de artigos científicos no OpenAlex para fundamentar o estudo

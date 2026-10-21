@@ -487,8 +487,9 @@ pub async fn handle_settings_dashboard(State(state): State<AppState>) -> impl In
         .unwrap_or_else(|| cfg.server.tailscale_ip.clone());
 
     let csrf_token = generate_csrf_token(&cfg.server.csrf_secret);
-    let quotas_snap = state.quota_router.get_quotas_snapshot().await;
+    let (quotas_snap, or_status) = state.quota_router.get_quotas_snapshot().await;
     let quotas_json = serde_json::to_string(&quotas_snap).unwrap_or_else(|_| "[]".to_string());
+    let or_status_json = serde_json::to_string(&or_status).unwrap_or_else(|_| "{}".to_string());
 
     let html = render_svitlo_dashboard_html(
         &cfg,
@@ -497,6 +498,7 @@ pub async fn handle_settings_dashboard(State(state): State<AppState>) -> impl In
         &tray_snap.tooltip,
         &csrf_token,
         &quotas_json,
+        &or_status_json,
     );
 
     (
@@ -515,6 +517,7 @@ pub async fn handle_get_settings(State(state): State<AppState>) -> impl IntoResp
     safe_cfg.credentials.groq_keys = safe_cfg.credentials.groq_keys.iter().map(|_| "********".to_string()).collect();
     safe_cfg.credentials.gemini_keys = safe_cfg.credentials.gemini_keys.iter().map(|_| "********".to_string()).collect();
     safe_cfg.credentials.openai_keys = safe_cfg.credentials.openai_keys.iter().map(|_| "********".to_string()).collect();
+    safe_cfg.credentials.openrouter_keys = safe_cfg.credentials.openrouter_keys.iter().map(|_| "********".to_string()).collect();
 
     (
         StatusCode::OK,
@@ -639,6 +642,15 @@ pub async fn handle_save_config_unified(
     if let Some(ok) = parse_keys(payload.get("openai_keys")) {
         cfg.credentials.openai_keys = ok;
     }
+    if let Some(ork) = parse_keys(payload.get("openrouter_keys")) {
+        cfg.credentials.openrouter_keys = ork;
+        cfg.credentials.auto_activate_openrouter();
+    }
+    if let Some(ordm) = payload.get("openrouter_default_model").and_then(|v| v.as_str()) {
+        if !ordm.trim().is_empty() {
+            cfg.credentials.openrouter_default_model = ordm.trim().to_string();
+        }
+    }
 
     if let Some(gp) = payload.get("groq_primary_model").and_then(|v| v.as_str()) {
         cfg.credentials.groq_primary_model = Some(gp.trim().to_string());
@@ -677,6 +689,13 @@ pub async fn handle_save_config_unified(
                 .unwrap_or_default()
                 .as_secs();
 
+            // Sincroniza status do OpenRouter no quota router
+            let or_keys = cfg.credentials.openrouter_keys.clone();
+            let qr = Arc::clone(&state.quota_router);
+            tokio::spawn(async move {
+                qr.sync_openrouter_status(&or_keys).await;
+            });
+
             // Hot-reload no agente e systray
             state.systray.transition(crate::systray::SystrayState::Idle, "Configurações sincronizadas em zorya.toml");
 
@@ -684,6 +703,7 @@ pub async fn handle_save_config_unified(
             sanitized.credentials.groq_keys = sanitized.credentials.groq_keys.iter().map(|_| "********".to_string()).collect();
             sanitized.credentials.gemini_keys = sanitized.credentials.gemini_keys.iter().map(|_| "********".to_string()).collect();
             sanitized.credentials.openai_keys = sanitized.credentials.openai_keys.iter().map(|_| "********".to_string()).collect();
+            sanitized.credentials.openrouter_keys = sanitized.credentials.openrouter_keys.iter().map(|_| "********".to_string()).collect();
 
             (
                 StatusCode::OK,
@@ -756,13 +776,14 @@ pub async fn handle_test_svitlo_openalex(
     }
 }
 
-// GET /api/v1/ai/quotas -> Retorna status das cotas dos 36 modelos
+// GET /api/v1/ai/quotas -> Retorna status das cotas dos 36 modelos e status OpenRouter
 pub async fn handle_get_ai_quotas(State(state): State<AppState>) -> impl IntoResponse {
-    let list = state.quota_router.get_quotas_snapshot().await;
+    let (list, or_status) = state.quota_router.get_quotas_snapshot().await;
     Json(json!({
         "status": "ok",
         "total_models": list.len(),
-        "quotas": list
+        "quotas": list,
+        "openrouter": or_status
     }))
 }
 

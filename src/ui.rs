@@ -1,7 +1,7 @@
 // PT: Interface Web do Painel de Controle Zorya v3.0 no Svitlo Design System
 // EN: Zorya v3.0 Control Panel Web UI in Svitlo Design System
 // AI: @llm-module ui | @llm-context Paleta Carvão Profundo (#0E0E0E), Âmbar (#F5A623), Verde (#2ECC71), Borda (#3A3A3C)
-// AI: @llm-invariant Grid de alta densidade, botões com feedback de estado assíncrono, persistência atômica validada
+// AI: @llm-invariant Grid de alta densidade, botões com feedback de estado assíncrono, persistência atômica validada e suporte OpenRouter
 
 use crate::config::ZoryaConfig;
 use crate::telemetry::DetailedSystemInfo;
@@ -16,6 +16,7 @@ pub fn render_svitlo_dashboard_html(
     tray_tooltip: &str,
     csrf_token: &str,
     quotas_json: &str,
+    openrouter_status_json: &str,
 ) -> String {
     let mask_keys = |keys: &[String]| -> String {
         keys.iter()
@@ -34,6 +35,7 @@ pub fn render_svitlo_dashboard_html(
     let groq_keys_str = mask_keys(&cfg.credentials.groq_keys);
     let gemini_keys_str = mask_keys(&cfg.credentials.gemini_keys);
     let openai_keys_str = mask_keys(&cfg.credentials.openai_keys);
+    let openrouter_keys_str = mask_keys(&cfg.credentials.openrouter_keys);
     let craft_enabled_str = cfg.craft.enabled.join(", ");
 
     let vram_total = telem.gpu_vram_total_mb.max(4096);
@@ -303,7 +305,7 @@ pub fn render_svitlo_dashboard_html(
     box-shadow: 0 0 0 2px rgba(245, 166, 35, 0.2);
   }}
   textarea {{
-    min-height: 84px;
+    min-height: 72px;
     resize: vertical;
     line-height: 1.4;
   }}
@@ -355,6 +357,7 @@ pub fn render_svitlo_dashboard_html(
   }}
   .badge-ok {{ background: rgba(46, 204, 113, 0.15); color: var(--green); }}
   .badge-warn {{ background: rgba(245, 166, 35, 0.15); color: var(--amber); }}
+  .badge-standby {{ background: rgba(138, 138, 142, 0.2); color: var(--gray); }}
   /* Toast Flutuante */
   #toast {{
     position: fixed;
@@ -471,6 +474,15 @@ pub fn render_svitlo_dashboard_html(
           <textarea name="openai_keys" id="openaiKeys" placeholder="sk-..." oninput="updateKeyCounters()">{openai_keys}</textarea>
         </div>
 
+        <!-- OpenRouter Condicional com Badge Dinâmico -->
+        <div class="field-group">
+          <label>
+            Chaves OpenRouter API (Opcional - Ativação Automática)
+            <span class="key-count" id="openrouterBadge">○ STANDBY</span>
+          </label>
+          <textarea name="openrouter_keys" id="openrouterKeys" placeholder="sk-or-v1-..." oninput="updateKeyCounters()">{openrouter_keys}</textarea>
+        </div>
+
         <div class="input-grid-2">
           <div class="field-group">
             <label>Modelo Groq Principal</label>
@@ -493,18 +505,23 @@ pub fn render_svitlo_dashboard_html(
           </div>
         </div>
 
-        <!-- Tabela Compacta de Cotas dos 36 Modelos -->
+        <div class="field-group">
+          <label>Modelo Padrão OpenRouter (Standby / Fallback)</label>
+          <input name="openrouter_default_model" value="{openrouter_model}">
+        </div>
+
+        <!-- Tabela Compacta de Cotas dos Modelos com Saldos Reais -->
         <div class="field-group" style="margin-top:10px;">
-          <label>Status das Cotas Diárias (36 Modelos / Roteamento)</label>
+          <label>Telemetria Real de Cotas (Headers HTTP Groq / Gemini / OpenRouter)</label>
           <div class="quotas-table-container">
             <table id="quotasTable">
               <thead>
                 <tr>
                   <th>Provedor</th>
                   <th>Modelo</th>
-                  <th>RPM</th>
-                  <th>TPM</th>
-                  <th>RPD</th>
+                  <th>RPM (Restante)</th>
+                  <th>TPM (Restante)</th>
+                  <th>RPD (Restante)</th>
                 </tr>
               </thead>
               <tbody id="quotasTbody">
@@ -629,16 +646,30 @@ pub fn render_svitlo_dashboard_html(
 
 <script>
 const rawQuotas = {quotas_json};
+const openRouterStatus = {openrouter_status_json};
 
 function updateKeyCounters() {{
-  ['groq', 'gemini', 'openai'].forEach(p => {{
+  ['groq', 'gemini', 'openai', 'openrouter'].forEach(p => {{
     const el = document.getElementById(p + 'Keys');
     const cntEl = document.getElementById(p + 'KeyCount');
-    if (el && cntEl) {{
+    if (el) {{
       const lines = el.value.split('\n')
         .map(s => s.trim())
         .filter(s => s.length > 5 && !s.includes('...') && !s.includes('***'));
-      cntEl.textContent = lines.length + ' válidas';
+      if (cntEl) cntEl.textContent = lines.length + ' válidas';
+
+      if (p === 'openrouter') {{
+        const badge = document.getElementById('openrouterBadge');
+        if (badge) {{
+          if (lines.length > 0 || openRouterStatus.enabled) {{
+            badge.textContent = `● ATIVO (${{lines.length || openRouterStatus.active_keys_count}} chaves)`;
+            badge.style.color = 'var(--green)';
+          }} else {{
+            badge.textContent = '○ STANDBY (Sem chave — rota pronta e desativada)';
+            badge.style.color = 'var(--gray)';
+          }}
+        }}
+      }}
     }}
   }});
 }}
@@ -649,12 +680,15 @@ function renderQuotasTable() {{
   tbody.innerHTML = '';
   rawQuotas.forEach(q => {{
     const tr = document.createElement('tr');
+    const rpdRem = q.rpd_remaining !== null && q.rpd_remaining !== undefined ? q.rpd_remaining : (q.rpd_limit ? (q.rpd_limit - q.rpd_current) : '∞');
+    const tpmRem = q.tpm_remaining !== null && q.tpm_remaining !== undefined ? q.tpm_remaining.toLocaleString() : (q.tpm_limit ? (q.tpm_limit - q.tpm_current).toLocaleString() : '∞');
+
     tr.innerHTML = `
       <td style="color:var(--gray);">${{q.provider}}</td>
       <td style="color:var(--white); font-weight:600;">${{q.model_name}}</td>
       <td><span class="badge-quota badge-ok">${{q.rpm_current}} / ${{q.rpm_limit || '∞'}}</span></td>
-      <td><span class="badge-quota badge-ok">${{q.tpm_current}} / ${{q.tpm_limit ? q.tpm_limit.toLocaleString() : '∞'}}</span></td>
-      <td><span class="badge-quota ${{q.rpd_current > 0 ? 'badge-warn' : 'badge-ok'}}">${{q.rpd_current}} / ${{q.rpd_limit || '∞'}}</span></td>
+      <td><span class="badge-quota badge-ok">${{tpmRem}} rest.</span></td>
+      <td><span class="badge-quota ${{rpdRem === 0 ? 'badge-warn' : 'badge-ok'}}">${{rpdRem}} rest.</span></td>
     `;
     tbody.appendChild(tr);
   }});
@@ -776,12 +810,15 @@ document.addEventListener('DOMContentLoaded', () => {{
         groq_keys = groq_keys_str,
         gemini_keys = gemini_keys_str,
         openai_keys = openai_keys_str,
+        openrouter_keys = openrouter_keys_str,
         groq_primary = cfg.credentials.groq_primary_model.as_deref().unwrap_or("openai/gpt-oss-120b"),
         groq_fast = cfg.credentials.groq_fast_model.as_deref().unwrap_or("openai/gpt-oss-20b"),
         groq_multi = cfg.credentials.groq_multilingual_model.as_deref().unwrap_or("qwen/qwen3.8-27b"),
         groq_whisper = cfg.credentials.groq_whisper_model.as_deref().unwrap_or("whisper-large-v3"),
+        openrouter_model = cfg.credentials.openrouter_default_model,
         craft_enabled = craft_enabled_str,
         csrf_token = csrf_token,
         quotas_json = quotas_json,
+        openrouter_status_json = openrouter_status_json,
     )
 }

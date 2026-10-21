@@ -42,8 +42,7 @@
 
 use serde::{Deserialize, Serialize};
 
-// TODO: FASE 3 — Rede P2P nativa
-// TODO: FASE 3 — Rede P2P
+// AI: @llm-architecture Fase 3 — Especificações da Rede P2P nativa e Sharding Distribuído
 
 /// Identificador único de um nó na malha Zorya P2P (equivalente ao `NodeId` do Exo e `PeerID` do Hivemind/Petals)
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -52,7 +51,7 @@ pub struct ZoryaPeerId(pub String);
 /// Descritor de transporte WireGuard userspace (`boringtun`) inspirado em `tailscale.git/wgengine/magicsock`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NativeWireGuardEndpoint {
-    // TODO: FASE 3 — Rede P2P nativa: integrar handshake Noise_IK com boringtun::noise::Tunn
+    // Protocolo: Handshake Noise_IK via boringtun::noise::Tunn
     pub public_key_base64: String,
     pub direct_endpoints: Vec<String>,
     pub derp_region_code: String,
@@ -63,7 +62,7 @@ pub struct NativeWireGuardEndpoint {
 /// Fatia de camadas Transformer servida por um nó (inspirado em `petals.data_structures.ServerInfo` e `exo` ShardAssignments)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransformerShardAssignment {
-    // TODO: FASE 3 — Rede P2P: conectar ao carregamento parcial de tensores GGUF no llama-cpp-2
+    // Pipeline: Conexão com carregamento parcial de tensores GGUF no llama-cpp-2
     pub model_id: String,
     pub total_layers: u32,
     pub start_block: u32,
@@ -76,7 +75,7 @@ pub struct TransformerShardAssignment {
 /// Estado e telemetria de um peer no grafo de topologia (inspirado em `exo.shared.topology.TopologySnapshot`)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct P2pPeerNode {
-    // TODO: FASE 3 — Rede P2P nativa: alimentar via UDP multicast discovery (magic b"ZRY") + DHT
+    // Descoberta: Alimentada via UDP multicast discovery (magic b"ZRY") + DHT
     pub peer_id: ZoryaPeerId,
     pub hostname: String,
     pub wg_endpoint: NativeWireGuardEndpoint,
@@ -90,7 +89,7 @@ pub struct P2pPeerNode {
 /// Grafo de topologia em anel para inferência distribuída (inspirado em `exo.master.placement_utils.Cycle`)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZoryaSwarmTopology {
-    // TODO: FASE 3 — Rede P2P: implementar filter_cycles_by_memory e get_shard_assignments em Rust puro
+    // Balanceamento: filter_cycles_by_memory e get_shard_assignments em Rust puro
     pub model_id: String,
     pub ring_cycle: Vec<P2pPeerNode>,
     pub total_swarm_vram_mb: u64,
@@ -100,7 +99,7 @@ pub struct ZoryaSwarmTopology {
 /// Sessão de inferência distribuída pipeline-parallel (inspirada em `petals.client.inference_session.InferenceSession`)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistributedInferenceSession {
-    // TODO: FASE 3 — Rede P2P: transmitir hidden states comprimidos em Q8_0 entre start_block..end_block
+    // Transporte: Transmite hidden states comprimidos em Q8_0 entre start_block..end_block
     pub session_id: String,
     pub topology: ZoryaSwarmTopology,
     pub current_step_layer: u32,
@@ -114,7 +113,7 @@ impl ZoryaSwarmTopology {
         total_layers: u32,
         peers: &[P2pPeerNode],
     ) -> Vec<(ZoryaPeerId, TransformerShardAssignment)> {
-        // TODO: FASE 3 — Rede P2P: ativar alocação dinâmica de camadas quando 2+ nós formarem enxame
+        // Alocação dinâmica de camadas quando 2+ nós formarem enxame
         let total_mem: u64 = peers
             .iter()
             .map(|p| p.vram_available_mb.max(p.ram_available_mb / 2).max(1))

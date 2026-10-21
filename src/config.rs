@@ -332,10 +332,11 @@ fn default_groq_fast_opt() -> Option<String> { Some("openai/gpt-oss-20b".to_stri
 fn default_groq_multi_opt() -> Option<String> { Some("qwen/qwen3.8-27b".to_string()) }
 fn default_groq_whisper_opt() -> Option<String> { Some("whisper-large-v3".to_string()) }
 fn default_gemini_model_opt() -> Option<String> { Some("gemini-2.5-flash".to_string()) }
+fn default_openrouter_model() -> String { "qwen/qwen3-32b:free".to_string() }
 
 /// PT: Cofre de chaves de API com desserializador tolerante a string/lista
 /// EN: API key vault with tolerant string/list deserializer
-// AI: @llm-struct CredentialsConfig @llm-invariant string_or_vec sanitizado sem placeholders
+// AI: @llm-struct CredentialsConfig @llm-invariant string_or_vec sanitizado sem placeholders; suporte OpenRouter condicional
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialsConfig {
     #[serde(default, deserialize_with = "string_or_vec")]
@@ -344,6 +345,12 @@ pub struct CredentialsConfig {
     pub gemini_keys: Vec<String>,
     #[serde(default, deserialize_with = "string_or_vec")]
     pub openai_keys: Vec<String>,
+    #[serde(default, deserialize_with = "string_or_vec")]
+    pub openrouter_keys: Vec<String>,
+    #[serde(default)]
+    pub openrouter_enabled: bool,
+    #[serde(default = "default_openrouter_model")]
+    pub openrouter_default_model: String,
     pub vps_credentials_path: Option<String>,
     pub validation_cache_ttl_hours: Option<u64>,
     #[serde(default = "default_groq_primary_opt", alias = "groq_model_primary")]
@@ -364,6 +371,9 @@ impl Default for CredentialsConfig {
             groq_keys: Vec::new(),
             gemini_keys: Vec::new(),
             openai_keys: Vec::new(),
+            openrouter_keys: Vec::new(),
+            openrouter_enabled: false,
+            openrouter_default_model: default_openrouter_model(),
             vps_credentials_path: Some("/var/www/mcp-server/credentials/credentials.json".to_string()),
             validation_cache_ttl_hours: Some(24),
             groq_primary_model: default_groq_primary_opt(),
@@ -372,6 +382,17 @@ impl Default for CredentialsConfig {
             groq_whisper_model: default_groq_whisper_opt(),
             gemini_model: default_gemini_model_opt(),
         }
+    }
+}
+
+impl CredentialsConfig {
+    /// PT: Autoativa OpenRouter se houver pelo menos uma chave válida não-placeholder
+    pub fn auto_activate_openrouter(&mut self) {
+        let has_valid = self.openrouter_keys.iter().any(|k| {
+            let t = k.trim();
+            t.starts_with("sk-or-v1-") && t.len() > 20 && !t.contains("...")
+        });
+        self.openrouter_enabled = has_valid;
     }
 }
 
@@ -499,7 +520,7 @@ fn is_valid_token(token: &str) -> bool {
         return false;
     }
     // Rejeita placeholders conhecidos
-    let placeholders = ["gsk_...", "aizasy...", "sk-...", "********", "...", "hskey-default"];
+    let placeholders = ["gsk_...", "aizasy...", "sk-...", "sk-or-v1-...", "********", "...", "hskey-default"];
     let lower = token.to_lowercase();
     !placeholders.iter().any(|&p| lower == p || lower.ends_with("..."))
 }
@@ -507,18 +528,32 @@ fn is_valid_token(token: &str) -> bool {
 impl ZoryaConfig {
     pub fn load_or_default<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
         let path_ref = path.as_ref();
-        if path_ref.exists() {
+        let mut parsed = if path_ref.exists() {
             let raw = fs::read_to_string(path_ref)?;
-            let parsed: ZoryaConfig = toml::from_str(&raw)?;
-            Ok(parsed)
+            let p: ZoryaConfig = toml::from_str(&raw)?;
+            p
         } else {
             tracing::warn!(
                 "Configuration file {:?} not found, using built-in defaults / Arquivo {:?} não encontrado, usando padrões internos",
                 path_ref,
                 path_ref
             );
-            Ok(Self::default())
+            Self::default()
+        };
+
+        // Auto-ativação condicional do OpenRouter caso haja chave válida
+        let env_or_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
+        let has_valid_or_key = parsed.credentials.openrouter_keys.iter().any(|k| k.starts_with("sk-or-v1-") && k.len() > 20)
+            || (env_or_key.starts_with("sk-or-v1-") && env_or_key.len() > 20);
+
+        if has_valid_or_key {
+            parsed.credentials.openrouter_enabled = true;
+            if !env_or_key.is_empty() && !parsed.credentials.openrouter_keys.contains(&env_or_key) {
+                parsed.credentials.openrouter_keys.push(env_or_key);
+            }
         }
+
+        Ok(parsed)
     }
 
     pub fn is_craft_enabled(&self, module: &str) -> bool {

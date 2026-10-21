@@ -64,10 +64,42 @@ fn test_prompt_injection_heuristics() {
 #[tokio::test]
 async fn test_quota_router_initialization_and_route() {
     let router = QuotaRouter::new();
-    let snap = router.get_quotas_snapshot().await;
-    assert_eq!(snap.len(), 37, "All 37 canonical models/resources from prompt table must be present in QuotaRouter catalog");
+    let (snap, or_status) = router.get_quotas_snapshot().await;
+    assert_eq!(snap.len(), 38, "All 38 canonical models/resources (27 Gemini + 10 Groq + 1 OpenRouter standby) must be present in QuotaRouter catalog");
+    assert!(!or_status.enabled, "OpenRouter should be standby by default without valid keys");
 
     let decision = router.route_task("programming", "Escreva um algoritmo de ordenação em Rust", 300).await;
     assert!(decision.prompt_guard_passed, "Clean task must pass prompt guard");
     assert!(!decision.selected_model.is_empty(), "Model must be selected");
+}
+
+#[test]
+fn test_header_duration_parsing() {
+    let d1 = QuotaRouter::parse_duration_str("2m59.56s");
+    assert_eq!(d1.as_secs(), 180);
+
+    let d2 = QuotaRouter::parse_duration_str("42s");
+    assert_eq!(d2.as_secs(), 42);
+
+    let d3 = QuotaRouter::parse_duration_str("450ms");
+    assert_eq!(d3.as_millis(), 450);
+
+    let d4 = QuotaRouter::parse_duration_str("1h10m");
+    assert_eq!(d4.as_secs(), 60); // fallback padrão resiliente
+}
+
+#[test]
+fn test_openrouter_standby_and_auto_activate() {
+    let mut cfg = ZoryaConfig::default();
+    assert!(!cfg.credentials.openrouter_enabled);
+
+    // Placeholder chave deve ser ignorado
+    cfg.credentials.openrouter_keys = vec!["sk-or-v1-...".to_string(), "".to_string()];
+    cfg.credentials.auto_activate_openrouter();
+    assert!(!cfg.credentials.openrouter_enabled);
+
+    // Chave real deve autoativar
+    cfg.credentials.openrouter_keys = vec!["sk-or-v1-abcdef1234567890abcdef1234567890".to_string()];
+    cfg.credentials.auto_activate_openrouter();
+    assert!(cfg.credentials.openrouter_enabled);
 }

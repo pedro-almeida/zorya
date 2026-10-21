@@ -265,6 +265,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Inicializa roteador de cotas de IA (36 modelos canônicos)
     let quota_router = crate::quota_router::QuotaRouter::new();
+    let qr_init = Arc::clone(&quota_router);
+    let or_keys_init = config.credentials.openrouter_keys.clone();
+    tokio::spawn(async move {
+        qr_init.sync_openrouter_status(&or_keys_init).await;
+    });
 
     // Constrói o estado global compartilhado da aplicação
     let state = AppState {
