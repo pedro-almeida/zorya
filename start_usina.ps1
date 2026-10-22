@@ -1,38 +1,34 @@
 param([switch]$Background)
-$ErrorActionPreference = "SilentlyContinue"
+$RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location $RepoRoot
 
-$RepoDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ReleaseExe = Join-Path $RepoDir "target\release\zorya.exe"
-$ProgramDataDir = "C:\ProgramData\Zorya"
-$ProgramDataExe = Join-Path $ProgramDataDir "zorya.exe"
-
-# Sincronização resiliente de binário mais recente para C:\ProgramData\Zorya\zorya.exe
-if (Test-Path $ReleaseExe) {
-    if (Test-Path $ProgramDataDir) {
-        if (-not (Test-Path $ProgramDataExe) -or ((Get-Item $ReleaseExe).LastWriteTime -gt (Get-Item $ProgramDataExe).LastWriteTime)) {
-            Write-Host "[Zorya] Sincronizando binario mais recente para $ProgramDataExe..." -ForegroundColor Cyan
-            Copy-Item -Path $ReleaseExe -Destination $ProgramDataExe -Force
-        }
-        $RepoToml = Join-Path $RepoDir "zorya.toml"
-        $ProgramDataToml = Join-Path $ProgramDataDir "zorya.toml"
-        if (Test-Path $RepoToml) {
-            if (-not (Test-Path $ProgramDataToml) -or ((Get-Item $RepoToml).LastWriteTime -gt (Get-Item $ProgramDataToml).LastWriteTime)) {
-                Copy-Item -Path $RepoToml -Destination $ProgramDataToml -Force
-            }
-        }
-    }
-}
-
-$TargetExe = if (Test-Path $ReleaseExe) { $ReleaseExe } elseif (Test-Path $ProgramDataExe) { $ProgramDataExe } else { Join-Path $RepoDir "zorya.exe" }
-$LogOut = Join-Path $RepoDir "zorya_node.log"
-$LogErr = Join-Path $RepoDir "zorya_err.log"
-
+Write-Host "[Zorya] Encerrando processos zorya antigos para liberar a porta 8085..." -ForegroundColor Yellow
 Get-Process zorya -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 600
 
-if ($Background) {
-    Start-Process -FilePath $TargetExe -WorkingDirectory $RepoDir -RedirectStandardOutput $LogOut -RedirectStandardError $LogErr -WindowStyle Hidden
-    Write-Host "[Zorya] Usina iniciada em background a partir de $TargetExe!" -ForegroundColor Green
-    exit 0
+# Configuracao da GPU Dedicada GTX 1650 (Isolamento da VRAM de 4096MB)
+$env:CUDA_VISIBLE_DEVICES = "0"
+$env:CUDA_DEVICE_ORDER = "PCI_BUS_ID"
+$env:GGML_CUDA_ENABLE_UNIFIED_MEMORY = "0"
+$env:ZORYA_GPU_LAYERS = "33"
+$env:ZORYA_PORT = "8085"
+
+$ReleaseExe = Join-Path $RepoRoot "target\release\zorya.exe"
+if (-not (Test-Path $ReleaseExe) -or ((Get-ChildItem -Path "$RepoRoot\src" -Recurse | Measure-Object -Property LastWriteTime -Maximum).Maximum -gt (Get-Item $ReleaseExe).LastWriteTime)) {
+    Write-Host "[Zorya] Compilando binario de release com novo Painel Svitlo e Systray animado..." -ForegroundColor Cyan
+    cargo build --release
 }
 
-& $TargetExe
+$InstallDir = "C:\ProgramData\Zorya"
+if (Test-Path $InstallDir) {
+    Copy-Item -Path $ReleaseExe -Destination "$InstallDir\zorya.exe" -Force -ErrorAction SilentlyContinue
+    Copy-Item -Path "$RepoRoot\zorya.toml" -Destination "$InstallDir\zorya.toml" -Force -ErrorAction SilentlyContinue
+}
+
+Write-Host "[Zorya] Iniciando Usina Zorya v3.0 na porta 8085..." -ForegroundColor Green
+if ($Background) {
+    Start-Process -FilePath $ReleaseExe -WorkingDirectory $RepoRoot -WindowStyle Hidden
+    Write-Host "[Zorya] Executando em segundo plano. Acesse http://127.0.0.1:8085/settings" -ForegroundColor Green
+} else {
+    & $ReleaseExe
+}
