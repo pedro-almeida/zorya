@@ -119,6 +119,66 @@ impl KeyVaultManager {
         })
     }
 
+    // PT: Recarrega o cofre de chaves a partir da configuração em memória sem reiniciar o processo
+    // EN: Reloads the key vault from memory configuration without restarting the process
+    // AI: @llm-func reload_from_config @llm-invariant Atualização atômica em memória com hot-reload imediato
+    pub async fn reload_from_config(&self, config: &ZoryaConfig) {
+        let mut map: HashMap<String, Vec<KeyHealthEntry>> = HashMap::new();
+        let vps_creds_path = Path::new("/var/www/mcp-server/credentials/credentials.json");
+
+        if vps_creds_path.exists() {
+            if let Ok(raw) = std::fs::read_to_string(vps_creds_path) {
+                if let Ok(parsed) = serde_json::from_str::<Value>(&raw) {
+                    for provider in ["groq", "gemini", "openai"] {
+                        let mut entries = Vec::new();
+                        if let Some(obj) = parsed.get(provider).and_then(|v| v.as_object()) {
+                            for (role, val) in obj {
+                                if let Some(k) = val.as_str() {
+                                    if k.len() > 10 {
+                                        entries.push(KeyHealthEntry {
+                                            key: k.trim().to_string(),
+                                            role: role.clone(),
+                                            valid: true,
+                                            last_checked_epoch: 0,
+                                            exhausted: false,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        if !entries.is_empty() {
+                            map.insert(provider.to_string(), entries);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback ou complemento com chaves de zorya.toml ([credentials])
+        for (provider, list) in [
+            ("groq", &config.credentials.groq_keys),
+            ("gemini", &config.credentials.gemini_keys),
+            ("openai", &config.credentials.openai_keys),
+        ] {
+            let entry_vec = map.entry(provider.to_string()).or_default();
+            for (idx, k) in list.iter().enumerate() {
+                if !k.trim().is_empty() && !entry_vec.iter().any(|e| e.key == k.trim()) {
+                    entry_vec.push(KeyHealthEntry {
+                        key: k.trim().to_string(),
+                        role: format!("toml_{}", idx),
+                        valid: true,
+                        last_checked_epoch: 0,
+                        exhausted: false,
+                    });
+                }
+            }
+        }
+
+        *self.keys.write().await = map;
+        *self.cursor.write().await = HashMap::new();
+        tracing::info!("KeyVaultManager recarregado com sucesso via hot-reload a partir de ZoryaConfig");
+    }
+
     // PT: Seleciona chave saudável com cache de validação de 24h e rotação round-robin
     // EN: Selects a healthy key with 24h validation cache and round-robin rotation
     pub async fn acquire_key(&self, provider: &str) -> anyhow::Result<String> {

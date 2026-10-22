@@ -38,21 +38,34 @@ if %ERRORLEVEL% EQU 0 (
 )
 
 :: -----------------------------------------------------------------------------
-:: ETAPA 2: Compilacao do Daemon Go
+:: ETAPA 2: Compilacao do Daemon Rust Zorya v3.0
 :: -----------------------------------------------------------------------------
-echo [2/2] Compilando daemon Go (Zorya)...
+echo [2/2] Compilando daemon Rust Zorya v3.0 (cargo build --release)...
 
-where go >nul 2>nul
-if %ERRORLEVEL% EQU 0 (
-    pushd "%ROOT_DIR%"
-    go build -ldflags="-s -w -H=windowsgui" -o "%BIN_DIR%\zorya.exe" ./cmd/zorya
-    go build -ldflags="-s -w -H=windowsgui" -o "%ROOT_DIR%\zorya.exe" ./cmd/zorya
+pushd "%ROOT_DIR%"
+cargo build --release
+if %ERRORLEVEL% NEQ 0 (
+    echo [ERRO] Falha ao compilar Zorya via Cargo!
     popd
-    echo [*] Binario zorya.exe compilado em %BIN_DIR%\zorya.exe e %ROOT_DIR%\zorya.exe
-) else (
-    echo [AVISO] Go nao localizado no PATH.
+    exit /b %ERRORLEVEL%
 )
 
+if exist "%ROOT_DIR%\target\release\zorya.exe" (
+    copy /y "%ROOT_DIR%\target\release\zorya.exe" "%BIN_DIR%\zorya.exe" >nul
+    copy /y "%ROOT_DIR%\target\release\zorya.exe" "%ROOT_DIR%\zorya.exe" >nul
+    echo [*] Binario zorya.exe copiado para %BIN_DIR%\zorya.exe e %ROOT_DIR%\zorya.exe
+    
+    if exist "C:\ProgramData\Zorya" (
+        copy /y "%ROOT_DIR%\target\release\zorya.exe" "C:\ProgramData\Zorya\zorya.exe" >nul
+        echo [*] Binario zorya.exe sincronizado em C:\ProgramData\Zorya\zorya.exe
+        if exist "%ROOT_DIR%\zorya.toml" (
+            copy /y "%ROOT_DIR%\zorya.toml" "C:\ProgramData\Zorya\zorya.toml" >nul
+            echo [*] Configuracao zorya.toml sincronizada em C:\ProgramData\Zorya\zorya.toml
+        )
+    )
+)
+popd
+
 echo =============================================================================
-echo   Build finalizado!
+echo   Build finalizado com sucesso!
 echo =============================================================================

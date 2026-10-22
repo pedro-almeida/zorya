@@ -394,6 +394,57 @@ impl CredentialsConfig {
         });
         self.openrouter_enabled = has_valid;
     }
+
+    // PT: Mescla novas chaves enviadas pelo painel preservando chaves mascaradas (ex: gsk_...abcd) que já existem no cofre
+    // EN: Merges new keys submitted from UI while preserving masked keys (e.g., gsk_...abcd) already present in vault
+    // AI: @llm-func merge_submitted_keys @llm-invariant Nunca apaga chaves antigas quando o usuário envia linhas mascaradas junto com chaves novas
+    pub fn merge_submitted_keys(existing: &[String], submitted_raw: &str, force_clear: bool) -> Vec<String> {
+        if force_clear {
+            return Vec::new();
+        }
+        let trimmed_all = submitted_raw.trim();
+        if trimmed_all.is_empty() {
+            return existing.to_vec();
+        }
+        let mut result: Vec<String> = Vec::new();
+        for line in trimmed_all.lines().flat_map(|l| l.split(',')) {
+            let token = line.trim();
+            if token.is_empty() {
+                continue;
+            }
+            // Se for uma máscara gerada pela UI (ex: "gsk_...9f2a" ou "********"), recupera a chave original correspondente
+            if token.contains("...") || token.contains("***") {
+                if token.len() >= 11 && token.contains("...") {
+                    let parts: Vec<&str> = token.split("...").collect();
+                    if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+                        if let Some(orig) = existing.iter().find(|k| {
+                            let kt = k.trim();
+                            kt.starts_with(parts[0]) && kt.ends_with(parts[1])
+                        }) {
+                            if !result.contains(orig) {
+                                result.push(orig.clone());
+                            }
+                            continue;
+                        }
+                    }
+                }
+                // Se for máscara genérica, preserva todas as existentes ainda não adicionadas
+                for orig in existing {
+                    if !result.contains(orig) {
+                        result.push(orig.clone());
+                    }
+                }
+                continue;
+            }
+            if is_valid_token(token) && !result.contains(&token.to_string()) {
+                result.push(token.to_string());
+            }
+        }
+        if result.is_empty() && !existing.is_empty() {
+            return existing.to_vec();
+        }
+        result
+    }
 }
 
 /// PT: Configuração do Cluster e Malha P2P
@@ -526,6 +577,45 @@ fn is_valid_token(token: &str) -> bool {
 }
 
 impl ZoryaConfig {
+    // PT: Resolve todos os caminhos existentes onde zorya.toml reside
+    // EN: Resolves all existing paths where zorya.toml resides
+    // AI: @llm-func resolve_active_paths @llm-invariant Garante sincronização consistente entre diretórios ativos
+    pub fn resolve_active_paths() -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = Vec::new();
+
+        if let Ok(env_path) = std::env::var("ZORYA_CONFIG") {
+            let p = PathBuf::from(env_path.trim());
+            if !p.as_os_str().is_empty() && p.exists() && !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
+
+        let local_path = PathBuf::from("zorya.toml");
+        if local_path.exists() && !paths.contains(&local_path) {
+            paths.push(local_path);
+        }
+
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(parent) = exe_path.parent() {
+                let exe_cfg = parent.join("zorya.toml");
+                if exe_cfg.exists() && !paths.contains(&exe_cfg) {
+                    paths.push(exe_cfg);
+                }
+            }
+        }
+
+        let prog_data = PathBuf::from(r"C:\ProgramData\Zorya\zorya.toml");
+        if prog_data.exists() && !paths.contains(&prog_data) {
+            paths.push(prog_data);
+        }
+
+        if paths.is_empty() {
+            vec![PathBuf::from("zorya.toml")]
+        } else {
+            paths
+        }
+    }
+
     pub fn load_or_default<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
         let path_ref = path.as_ref();
         let mut parsed = if path_ref.exists() {
@@ -567,9 +657,9 @@ impl ZoryaConfig {
                 .any(|m| m.eq_ignore_ascii_case(module))
     }
 
-    /// PT: Gravação atômica via arquivo temporário (zorya.toml.tmp) + fsync + rename
-    /// EN: Atomic write via temporary file (zorya.toml.tmp) + fsync + rename
-    // AI: @llm-func save_atomic @llm-security Permissão 0600 em Unix e atomicidade em queda de energia
+    /// PT: Gravação atômica via arquivo temporário (zorya.toml.tmp) + fsync + rename resiliente
+    /// EN: Atomic write via temporary file (zorya.toml.tmp) + fsync + resilient rename
+    // AI: @llm-func save_atomic @llm-security Permissão 0600 em Unix e atomicidade em queda de energia/Windows
     pub fn save_atomic(&self, path: &Path) -> anyhow::Result<()> {
         let serialized = toml::to_string_pretty(self)?;
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -588,17 +678,42 @@ impl ZoryaConfig {
             let _ = std::fs::set_permissions(&tmp_path, perms);
         }
 
-        std::fs::rename(&tmp_path, path)?;
+        if let Err(e) = std::fs::rename(&tmp_path, path) {
+            tracing::debug!("Rename direto falhou ({}), aplicando cópia resiliente...", e);
+            std::fs::copy(&tmp_path, path)?;
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+
         tracing::info!("zorya.toml gravado atomicamente com sucesso em {:?}", path);
         Ok(())
     }
 
+    /// PT: Grava em todos os caminhos ativos descobertos para manter instâncias sincronizadas
+    /// EN: Writes to all discovered active paths to keep instances synchronized
+    // AI: @llm-func save_default @llm-invariant Gravação redundante e sincronizada
     pub fn save_default(&self) -> anyhow::Result<()> {
-        if let Ok(env_path) = std::env::var("ZORYA_CONFIG") {
-            let p = PathBuf::from(&env_path);
-            return self.save_atomic(&p);
+        let active_paths = Self::resolve_active_paths();
+        let mut success_count = 0;
+        let mut last_err = None;
+
+        for p in &active_paths {
+            match self.save_atomic(p) {
+                Ok(_) => {
+                    success_count += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("Falha ao gravar zorya.toml em {:?}: {}", p, e);
+                    last_err = Some(e);
+                }
+            }
         }
-        let local_path = Path::new("zorya.toml");
-        self.save_atomic(local_path)
+
+        if success_count > 0 {
+            Ok(())
+        } else if let Some(e) = last_err {
+            Err(e)
+        } else {
+            self.save_atomic(Path::new("zorya.toml"))
+        }
     }
 }

@@ -182,6 +182,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/", get(handle_settings_dashboard))
         .route("/settings", get(handle_settings_dashboard))
         .route("/api/v1/settings", get(handle_get_settings))
+        .route("/api/v1/settings/keys", get(handle_get_settings_keys))
         .route("/api/v1/settings", post(handle_save_config_unified))
         .route("/api/v1/config/save", post(handle_save_config_unified))
         .route("/settings", post(handle_save_config_unified))
@@ -513,7 +514,7 @@ pub async fn handle_get_settings(State(state): State<AppState>) -> impl IntoResp
     let cfg = state.config.read().await.clone();
     let mut safe_cfg = cfg.clone();
 
-    // Mascara chaves para segurança
+    // Mascara chaves para segurança padrão
     safe_cfg.credentials.groq_keys = safe_cfg.credentials.groq_keys.iter().map(|_| "********".to_string()).collect();
     safe_cfg.credentials.gemini_keys = safe_cfg.credentials.gemini_keys.iter().map(|_| "********".to_string()).collect();
     safe_cfg.credentials.openai_keys = safe_cfg.credentials.openai_keys.iter().map(|_| "********".to_string()).collect();
@@ -524,6 +525,42 @@ pub async fn handle_get_settings(State(state): State<AppState>) -> impl IntoResp
         Json(json!({
             "status": "ok",
             "config": safe_cfg
+        })),
+    )
+}
+
+// GET /api/v1/settings/keys -> Retorna chaves reais e mascaradas para o botão Mostrar/Ocultar Chaves do painel local
+pub async fn handle_get_settings_keys(State(state): State<AppState>) -> impl IntoResponse {
+    let cfg = state.config.read().await.clone();
+    let mask = |keys: &[String]| -> Vec<String> {
+        keys.iter()
+            .map(|k| {
+                let t = k.trim();
+                if t.len() <= 8 {
+                    "********".to_string()
+                } else {
+                    format!("{}...{}", &t[..4], &t[t.len() - 4..])
+                }
+            })
+            .collect()
+    };
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "real_keys": {
+                "groq_keys": cfg.credentials.groq_keys,
+                "gemini_keys": cfg.credentials.gemini_keys,
+                "openai_keys": cfg.credentials.openai_keys,
+                "openrouter_keys": cfg.credentials.openrouter_keys,
+            },
+            "masked_keys": {
+                "groq_keys": mask(&cfg.credentials.groq_keys),
+                "gemini_keys": mask(&cfg.credentials.gemini_keys),
+                "openai_keys": mask(&cfg.credentials.openai_keys),
+                "openrouter_keys": mask(&cfg.credentials.openrouter_keys),
+            }
         })),
     )
 }
@@ -611,41 +648,66 @@ pub async fn handle_save_config_unified(
         cfg.inference.vram_ttl_secs = ttl;
     }
 
-    // Parse resiliente de chaves de API (ignora placeholders e máscaras)
-    let parse_keys = |val: Option<&serde_json::Value>| -> Option<Vec<String>> {
-        val.and_then(|v| {
-            if let Some(s) = v.as_str() {
-                let lines: Vec<String> = s.lines()
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| l.len() > 6 && !l.contains("...") && !l.contains("***") && !l.ends_with("..."))
-                    .collect();
-                if !lines.is_empty() { Some(lines) } else { None }
-            } else if let Some(arr) = v.as_array() {
-                let items: Vec<String> = arr.iter()
-                    .filter_map(|el| el.as_str())
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| l.len() > 6 && !l.contains("...") && !l.contains("***"))
-                    .collect();
-                if !items.is_empty() { Some(items) } else { None }
+    // Helper para extração resiliente de flags booleanas
+    let parse_bool = |key: &str| -> Option<bool> {
+        payload.get(key).and_then(|v| {
+            if let Some(b) = v.as_bool() {
+                Some(b)
+            } else if let Some(s) = v.as_str() {
+                let sl = s.trim().to_lowercase();
+                Some(sl == "true" || sl == "on" || sl == "1" || sl == "yes")
             } else {
                 None
             }
         })
     };
 
-    if let Some(gk) = parse_keys(payload.get("groq_keys")) {
-        cfg.credentials.groq_keys = gk;
+    // Flags de limpeza explícita de chaves
+    let clear_groq = parse_bool("clear_groq_keys").unwrap_or(false);
+    let clear_gemini = parse_bool("clear_gemini_keys").unwrap_or(false);
+    let clear_openai = parse_bool("clear_openai_keys").unwrap_or(false);
+    let clear_openrouter = parse_bool("clear_openrouter_keys").unwrap_or(false);
+
+    // Merge e salvamento de chaves via crate::config::CredentialsConfig::merge_submitted_keys
+    if clear_groq {
+        cfg.credentials.groq_keys = Vec::new();
+    } else if let Some(s) = payload.get("groq_keys").and_then(|v| v.as_str()) {
+        cfg.credentials.groq_keys = crate::config::CredentialsConfig::merge_submitted_keys(&cfg.credentials.groq_keys, s, false);
+    } else if let Some(arr) = payload.get("groq_keys").and_then(|v| v.as_array()) {
+        let s = arr.iter().filter_map(|el| el.as_str()).collect::<Vec<_>>().join("\n");
+        cfg.credentials.groq_keys = crate::config::CredentialsConfig::merge_submitted_keys(&cfg.credentials.groq_keys, &s, false);
     }
-    if let Some(gemk) = parse_keys(payload.get("gemini_keys")) {
-        cfg.credentials.gemini_keys = gemk;
+
+    if clear_gemini {
+        cfg.credentials.gemini_keys = Vec::new();
+    } else if let Some(s) = payload.get("gemini_keys").and_then(|v| v.as_str()) {
+        cfg.credentials.gemini_keys = crate::config::CredentialsConfig::merge_submitted_keys(&cfg.credentials.gemini_keys, s, false);
+    } else if let Some(arr) = payload.get("gemini_keys").and_then(|v| v.as_array()) {
+        let s = arr.iter().filter_map(|el| el.as_str()).collect::<Vec<_>>().join("\n");
+        cfg.credentials.gemini_keys = crate::config::CredentialsConfig::merge_submitted_keys(&cfg.credentials.gemini_keys, &s, false);
     }
-    if let Some(ok) = parse_keys(payload.get("openai_keys")) {
-        cfg.credentials.openai_keys = ok;
+
+    if clear_openai {
+        cfg.credentials.openai_keys = Vec::new();
+    } else if let Some(s) = payload.get("openai_keys").and_then(|v| v.as_str()) {
+        cfg.credentials.openai_keys = crate::config::CredentialsConfig::merge_submitted_keys(&cfg.credentials.openai_keys, s, false);
+    } else if let Some(arr) = payload.get("openai_keys").and_then(|v| v.as_array()) {
+        let s = arr.iter().filter_map(|el| el.as_str()).collect::<Vec<_>>().join("\n");
+        cfg.credentials.openai_keys = crate::config::CredentialsConfig::merge_submitted_keys(&cfg.credentials.openai_keys, &s, false);
     }
-    if let Some(ork) = parse_keys(payload.get("openrouter_keys")) {
-        cfg.credentials.openrouter_keys = ork;
+
+    if clear_openrouter {
+        cfg.credentials.openrouter_keys = Vec::new();
+        cfg.credentials.auto_activate_openrouter();
+    } else if let Some(s) = payload.get("openrouter_keys").and_then(|v| v.as_str()) {
+        cfg.credentials.openrouter_keys = crate::config::CredentialsConfig::merge_submitted_keys(&cfg.credentials.openrouter_keys, s, false);
+        cfg.credentials.auto_activate_openrouter();
+    } else if let Some(arr) = payload.get("openrouter_keys").and_then(|v| v.as_array()) {
+        let s = arr.iter().filter_map(|el| el.as_str()).collect::<Vec<_>>().join("\n");
+        cfg.credentials.openrouter_keys = crate::config::CredentialsConfig::merge_submitted_keys(&cfg.credentials.openrouter_keys, &s, false);
         cfg.credentials.auto_activate_openrouter();
     }
+
     if let Some(ordm) = payload.get("openrouter_default_model").and_then(|v| v.as_str()) {
         if !ordm.trim().is_empty() {
             cfg.credentials.openrouter_default_model = ordm.trim().to_string();
@@ -664,13 +726,63 @@ pub async fn handle_save_config_unified(
     if let Some(gw) = payload.get("groq_whisper_model").and_then(|v| v.as_str()) {
         cfg.credentials.groq_whisper_model = Some(gw.trim().to_string());
     }
+    if let Some(gm) = payload.get("gemini_model").and_then(|v| v.as_str()) {
+        if !gm.trim().is_empty() {
+            cfg.credentials.gemini_model = Some(gm.trim().to_string());
+        }
+    }
 
-    // Módulos ArtCraft
-    if let Some(ce) = payload.get("craft_enabled").and_then(|v| v.as_str()) {
-        let mods: Vec<String> = ce.split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+    // Flags booleanas de governança e recursos
+    if let Some(b) = parse_bool("openrouter_enabled") {
+        cfg.credentials.openrouter_enabled = b;
+    }
+    if let Some(b) = parse_bool("prefer_tailscale") {
+        cfg.network.prefer_tailscale = b;
+    }
+    if let Some(b) = parse_bool("reserve_display_on_igpu") {
+        cfg.hardware.reserve_display_on_igpu = b;
+    }
+    if let Some(b) = parse_bool("enable_mcp_sse") {
+        cfg.server.enable_mcp_sse = b;
+    }
+    if let Some(b) = parse_bool("cluster_enabled") {
+        cfg.cluster.enabled = b;
+    }
+    if let Some(b) = parse_bool("offload_light_tasks_to_vps") {
+        cfg.cluster.offload_light_tasks_to_vps = b;
+    }
+    if let Some(b) = parse_bool("enable_p2p") {
+        cfg.cluster.enable_p2p = b;
+    }
+
+    // Parâmetros de ArtCraft
+    if let Some(ddm) = payload.get("denoise_default_method").and_then(|v| v.as_str()) {
+        if !ddm.trim().is_empty() {
+            cfg.craft.denoise_default_method = Some(ddm.trim().to_string());
+        }
+    }
+    if let Some(lufs) = payload.get("audio_target_lufs").and_then(|v| {
+        v.as_f64().map(|n| n as f32).or_else(|| v.as_str().and_then(|s| s.parse::<f32>().ok()))
+    }) {
+        cfg.craft.audio_target_lufs = Some(lufs);
+    }
+    if let Some(icc) = payload.get("default_icc_profile").and_then(|v| v.as_str()) {
+        if !icc.trim().is_empty() {
+            cfg.craft.default_icc_profile = Some(icc.trim().to_string());
+        }
+    }
+
+    // Módulos ArtCraft (array JSON ou string separada por vírgula)
+    let craft_mods: Option<Vec<String>> = if let Some(arr) = payload.get("craft_enabled").and_then(|v| v.as_array()) {
+        let list: Vec<String> = arr.iter().filter_map(|el| el.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        Some(list)
+    } else if let Some(ce) = payload.get("craft_enabled").and_then(|v| v.as_str()) {
+        let list: Vec<String> = ce.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        Some(list)
+    } else {
+        None
+    };
+    if let Some(mods) = craft_mods {
         if !mods.is_empty() {
             cfg.craft.enabled = mods.clone();
             cfg.cluster.artcraft_modules = mods;
@@ -696,7 +808,10 @@ pub async fn handle_save_config_unified(
                 qr.sync_openrouter_status(&or_keys).await;
             });
 
-            // Hot-reload no agente e systray
+            // Hot-reload imediato no agente e cofre em memória
+            state.agent.key_vault.reload_from_config(&cfg).await;
+
+            // Feedback visual no systray
             state.systray.transition(crate::systray::SystrayState::Idle, "Configurações sincronizadas em zorya.toml");
 
             let mut sanitized = cfg.clone();
@@ -712,7 +827,7 @@ pub async fn handle_save_config_unified(
                     "saved_at": now_epoch,
                     "config_path": canonical_path,
                     "config": sanitized,
-                    "message": "Configurações gravadas atomicamente em zorya.toml!"
+                    "message": "Configurações gravadas atomicamente em zorya.toml com hot-reload ativo!"
                 })),
             )
                 .into_response()
