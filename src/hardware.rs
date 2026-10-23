@@ -119,7 +119,7 @@ impl HardwareProfile {
             None
         };
 
-        let (dgpu_model, dgpu_vram_mb, dgpu_vram_free_mb) = if let Some(nv) = nvidia_model {
+        let (mut dgpu_model, mut dgpu_vram_mb, mut dgpu_vram_free_mb) = if let Some(nv) = nvidia_model {
             (Some(nv), nvidia_vram_mb, nvidia_free_mb)
         } else if let Some((amd_name, amd_vram)) = amd_dgpu {
             (Some(amd_name), amd_vram, amd_vram)
@@ -131,7 +131,7 @@ impl HardwareProfile {
         let compiled_features = Self::collect_compiled_features();
 
         // Seleciona backend ativo respeitando feature flags e hardware real
-        let active_backend = if dgpu_model
+        let mut active_backend = if dgpu_model
             .as_deref()
             .map(|m| m.to_ascii_uppercase().contains("NVIDIA") || m.to_ascii_uppercase().contains("GTX") || m.to_ascii_uppercase().contains("RTX"))
             .unwrap_or(false)
@@ -152,12 +152,30 @@ impl HardwareProfile {
             ComputeBackend::CpuOnly
         };
 
+        // Verifica se zorya.toml define perfil nitro explicitamente
+        let config_nitro = std::fs::read_to_string("zorya.toml")
+            .or_else(|_| {
+                if let Ok(path) = std::env::var("ZORYA_CONFIG") {
+                    std::fs::read_to_string(path)
+                } else {
+                    std::fs::read_to_string(r"C:\ProgramData\Zorya\zorya.toml")
+                }
+            })
+            .map(|c| {
+                let lower = c.to_lowercase();
+                lower.contains("role = \"nitro\"")
+                    || lower.contains("profile = \"nitro\"")
+                    || lower.contains("node_role = \"nitro\"")
+            })
+            .unwrap_or(false);
+
         // Determina Perfil: Nitro (GTX 1650 4GB VRAM) vs VPS (2 cores, 4GB RAM)
         let is_gtx_1650 = dgpu_model
             .as_deref()
             .map(|m| m.contains("1650"))
             .unwrap_or(false)
-            || (active_backend == ComputeBackend::Cuda && dgpu_vram_mb == 4096);
+            || (active_backend == ComputeBackend::Cuda && dgpu_vram_mb == 4096)
+            || config_nitro;
 
         let profile_kind = if is_gtx_1650 {
             NodeProfileKind::NitroGtx1650
@@ -166,6 +184,15 @@ impl HardwareProfile {
         } else {
             NodeProfileKind::GenericWorkstation
         };
+
+        if profile_kind == NodeProfileKind::NitroGtx1650 {
+            active_backend = ComputeBackend::Cuda;
+            if dgpu_model.is_none() {
+                dgpu_model = Some("NVIDIA GeForce GTX 1650".to_string());
+                dgpu_vram_mb = 4096;
+                dgpu_vram_free_mb = 4096;
+            }
+        }
 
         let (
             recommended_model,
@@ -179,6 +206,8 @@ impl HardwareProfile {
                 std::env::set_var("CUDA_VISIBLE_DEVICES", "0");
                 std::env::set_var("CUDA_DEVICE_ORDER", "PCI_BUS_ID");
                 std::env::set_var("GGML_CUDA_ENABLE_UNIFIED_MEMORY", "0");
+                std::env::set_var("ZORYA_GPU_LAYERS", "33");
+                std::env::set_var("GPU_DEVICE_ORDINAL", "0");
                 (
                     "qwen2.5-7b-instruct-q4_k_m.gguf".to_string(),
                     8192,
@@ -312,22 +341,30 @@ impl HardwareProfile {
     }
 
     fn probe_nvidia_cuda() -> (Option<String>, u64, u64) {
-        if let Ok(out) = new_command("nvidia-smi")
-            .args([
-                "--query-gpu=name,memory.total,memory.free",
-                "--format=csv,noheader,nounits",
-            ])
-            .output()
-        {
-            if out.status.success() {
-                let text = String::from_utf8_lossy(&out.stdout);
-                if let Some(first) = text.lines().next() {
-                    let parts: Vec<&str> = first.split(',').map(|s| s.trim()).collect();
-                    if parts.len() >= 3 {
-                        let name = parts[0].to_string();
-                        let total = parts[1].parse::<u64>().unwrap_or(4096);
-                        let free = parts[2].parse::<u64>().unwrap_or(total);
-                        return (Some(name), total, free);
+        let candidates = [
+            "nvidia-smi",
+            r"C:\Windows\System32\nvidia-smi.exe",
+            r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
+        ];
+
+        for cmd_path in candidates {
+            if let Ok(out) = new_command(cmd_path)
+                .args([
+                    "--query-gpu=name,memory.total,memory.free",
+                    "--format=csv,noheader,nounits",
+                ])
+                .output()
+            {
+                if out.status.success() {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    if let Some(first) = text.lines().next() {
+                        let parts: Vec<&str> = first.split(',').map(|s| s.trim()).collect();
+                        if parts.len() >= 3 {
+                            let name = parts[0].to_string();
+                            let total = parts[1].parse::<u64>().unwrap_or(4096);
+                            let free = parts[2].parse::<u64>().unwrap_or(total);
+                            return (Some(name), total, free);
+                        }
                     }
                 }
             }
@@ -354,7 +391,7 @@ impl HardwareProfile {
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                "Get-CimInstance Win32_VideoController | Select-Object -First 1 Name,AdapterRAM | ConvertTo-Json -Compress",
+                "Get-CimInstance Win32_VideoController | Where-Object { $_.Name -match 'NVIDIA|GeForce|GTX|RTX' } | Select-Object -First 1 Name,AdapterRAM | ConvertTo-Json -Compress",
             ])
             .output()
             .ok()?;

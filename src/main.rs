@@ -3,6 +3,15 @@
 // EN: Zorya v3.0 — Sovereign Rust Daemon, MCP Server & Multimedia Coprocessor
 // AI: @llm-context Coordena inference (GGUF llama-cpp-2), hardware auto-tuning, agent autônomo, servidor MCP duplo, cluster e rede desacoplada
 
+// Exportação de símbolos nativos C reconhecidos pelos drivers NVIDIA Optimus e AMD PowerXpress/Enduro para despertar dGPU do estado D3
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub static NvOptimusEnablement: u32 = 0x00000001;
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub static AmdPowerXpressRequestHighPerformance: i32 = 1;
+
 pub mod agent;
 pub mod cluster;
 pub mod config;
@@ -213,7 +222,7 @@ async fn main() -> anyhow::Result<()> {
                 recommended_ctx_size: 8192,
                 recommended_batch_size: 512,
                 recommended_threads: 4,
-                recommended_gpu_layers: 28,
+                recommended_gpu_layers: 33,
             }
         }
     };
