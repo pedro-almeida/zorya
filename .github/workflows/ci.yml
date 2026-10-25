@@ -20,8 +20,10 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            cargo_flags: "--no-default-features"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            cargo_flags: ""
 
     steps:
       - name: Checkout Código
@@ -46,7 +48,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Executar Linter (cargo clippy)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy ${{ matrix.cargo_flags }} --all-targets -- -D warnings
 
       - name: Executar Testes Automatizados (cargo test)
-        run: cargo test --verbose
+        run: cargo test ${{ matrix.cargo_flags }} --verbose
