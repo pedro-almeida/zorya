@@ -5,9 +5,9 @@
 
 use axum::{extract::Json, http::StatusCode};
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+use std::process::Command;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TeaserSlide {
@@ -54,7 +54,9 @@ pub fn build_ken_burns_filter(slides: &[TeaserSlide], resolution: &str) -> (Stri
     (filter, total_dur)
 }
 
-pub async fn handle_video_teaser(Json(req): Json<VideoTeaserRequest>) -> Result<Json<VideoTeaserResponse>, (StatusCode, String)> {
+pub async fn handle_video_teaser(
+    Json(req): Json<VideoTeaserRequest>,
+) -> Result<Json<VideoTeaserResponse>, (StatusCode, String)> {
     let res = req.resolution.as_deref().unwrap_or("1920x1080");
     let (filter_graph, total_dur) = build_ken_burns_filter(&req.slides, res);
 
@@ -63,14 +65,23 @@ pub async fn handle_video_teaser(Json(req): Json<VideoTeaserRequest>) -> Result<
     cmd.creation_flags(0x08000000);
     cmd.arg("-y");
     for s in &req.slides {
-        cmd.arg("-loop").arg("1").arg("-t").arg(format!("{}", s.duration_sec)).arg("-i").arg(&s.image_path);
+        cmd.arg("-loop")
+            .arg("1")
+            .arg("-t")
+            .arg(format!("{}", s.duration_sec))
+            .arg("-i")
+            .arg(&s.image_path);
     }
     if let Some(audio) = &req.audio_path {
         cmd.arg("-i").arg(audio);
     }
     cmd.arg("-filter_complex").arg(&filter_graph);
     cmd.arg("-map").arg("[outv]");
-    cmd.arg("-c:v").arg("libx264").arg("-pix_fmt").arg("yuv420p").arg(&req.output_mp4_path);
+    cmd.arg("-c:v")
+        .arg("libx264")
+        .arg("-pix_fmt")
+        .arg("yuv420p")
+        .arg(&req.output_mp4_path);
 
     let rendered = cmd.output().map(|o| o.status.success()).unwrap_or(false);
 

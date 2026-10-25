@@ -5,8 +5,8 @@
 //! - Geração de proxies de streaming ultra-rápidos para o Svitanok.
 //! - Composição de vinhetas de abertura e monograma de encerramento (EffectCraft overlays).
 
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Configuração de LUT e Color Grading
 #[derive(Debug, Clone, Serialize, Deserialize)]

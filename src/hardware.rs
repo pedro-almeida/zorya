@@ -3,9 +3,9 @@
 // AI: @llm-context Detecta CPU (AVX2/AVX512/NPU), iGPU (OpenCL/wgpu), dGPU NVIDIA CUDA (GTX 1650 4GB dedicados) e dGPU AMD (ROCm/Vulkan)
 // AI: @llm-invariant Perfil Nitro (GTX 1650 4GB -> CUDA, Q4_K_M 7B, ctx 8192) e Perfil VPS (2 cores, 4GB RAM -> CPU-only, Q4_K_M 3B, ctx 2048)
 
-use std::process::Command;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 use sysinfo::System;
@@ -106,7 +106,11 @@ impl HardwareProfile {
         if nvidia_model.is_none() {
             if let Some((name, vram)) = Self::detect_windows_wmi_gpu() {
                 let lower = name.to_lowercase();
-                if lower.contains("nvidia") || lower.contains("geforce") || lower.contains("gtx") || lower.contains("rtx") {
+                if lower.contains("nvidia")
+                    || lower.contains("geforce")
+                    || lower.contains("gtx")
+                    || lower.contains("rtx")
+                {
                     nvidia_model = Some(name);
                     nvidia_vram_mb = vram;
                     nvidia_free_mb = vram;
@@ -119,13 +123,14 @@ impl HardwareProfile {
             None
         };
 
-        let (mut dgpu_model, mut dgpu_vram_mb, mut dgpu_vram_free_mb) = if let Some(nv) = nvidia_model {
-            (Some(nv), nvidia_vram_mb, nvidia_free_mb)
-        } else if let Some((amd_name, amd_vram)) = amd_dgpu {
-            (Some(amd_name), amd_vram, amd_vram)
-        } else {
-            (None, 0, 0)
-        };
+        let (mut dgpu_model, mut dgpu_vram_mb, mut dgpu_vram_free_mb) =
+            if let Some(nv) = nvidia_model {
+                (Some(nv), nvidia_vram_mb, nvidia_free_mb)
+            } else if let Some((amd_name, amd_vram)) = amd_dgpu {
+                (Some(amd_name), amd_vram, amd_vram)
+            } else {
+                (None, 0, 0)
+            };
 
         let display_offloaded_to_igpu = dgpu_model.is_some() && igpu_model.is_some();
         let compiled_features = Self::collect_compiled_features();
@@ -133,7 +138,11 @@ impl HardwareProfile {
         // Seleciona backend ativo respeitando feature flags e hardware real
         let mut active_backend = if dgpu_model
             .as_deref()
-            .map(|m| m.to_ascii_uppercase().contains("NVIDIA") || m.to_ascii_uppercase().contains("GTX") || m.to_ascii_uppercase().contains("RTX"))
+            .map(|m| {
+                m.to_ascii_uppercase().contains("NVIDIA")
+                    || m.to_ascii_uppercase().contains("GTX")
+                    || m.to_ascii_uppercase().contains("RTX")
+            })
             .unwrap_or(false)
             && cfg!(feature = "cuda")
         {
@@ -144,7 +153,9 @@ impl HardwareProfile {
             ComputeBackend::OpenCl
         } else if dgpu_model
             .as_deref()
-            .map(|m| m.to_ascii_uppercase().contains("NVIDIA") || m.to_ascii_uppercase().contains("GTX"))
+            .map(|m| {
+                m.to_ascii_uppercase().contains("NVIDIA") || m.to_ascii_uppercase().contains("GTX")
+            })
             .unwrap_or(false)
         {
             ComputeBackend::Cuda
@@ -402,7 +413,11 @@ impl HardwareProfile {
         let val: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
         let name = val.get("Name")?.as_str()?.trim().to_string();
         let ram_bytes = val.get("AdapterRAM").and_then(|v| v.as_u64()).unwrap_or(0);
-        let vram_mb = if ram_bytes > 0 { ram_bytes / (1024 * 1024) } else { 4096 };
+        let vram_mb = if ram_bytes > 0 {
+            ram_bytes / (1024 * 1024)
+        } else {
+            4096
+        };
         Some((name, vram_mb))
     }
 }

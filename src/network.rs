@@ -160,7 +160,8 @@ impl NetworkManager {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             loop {
                 interval.tick().await;
-                let next_state = Self::probe_network_state(&manager.http_client, &manager.config).await;
+                let next_state =
+                    Self::probe_network_state(&manager.http_client, &manager.config).await;
                 let mut current = manager.state.write().await;
                 if !current.tailscale_active && next_state.tailscale_active {
                     tracing::info!(

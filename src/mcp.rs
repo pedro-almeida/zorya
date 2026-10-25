@@ -240,7 +240,10 @@ pub async fn dispatch_mcp_method(
         "tools/call" => {
             let params = req.params.unwrap_or_else(|| json!({}));
             let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
 
             match execute_mcp_tool(state, tool_name, args).await {
                 Ok(output) => JsonRpcResponse {
@@ -267,7 +270,9 @@ pub async fn dispatch_mcp_method(
             jsonrpc: "2.0".to_string(),
             id: req_id,
             result: None,
-            error: Some(json!({ "code": -32601, "message": format!("Method not found: {}", req.method) })),
+            error: Some(
+                json!({ "code": -32601, "message": format!("Method not found: {}", req.method) }),
+            ),
         },
     }
 }
@@ -281,14 +286,25 @@ async fn execute_mcp_tool(state: &AppState, tool_name: &str, args: Value) -> any
                 .get("system")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Você é o coprocessador soberano Zorya v3.0.");
-            let model = args.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let model = args
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             state
                 .inference
                 .chat_completions(ChatCompletionRequest {
                     model,
                     messages: vec![
-                        ChatMessage { role: "system".to_string(), content: json!(system), tool_calls: None },
-                        ChatMessage { role: "user".to_string(), content: json!(prompt), tool_calls: None },
+                        ChatMessage {
+                            role: "system".to_string(),
+                            content: json!(system),
+                            tool_calls: None,
+                        },
+                        ChatMessage {
+                            role: "user".to_string(),
+                            content: json!(prompt),
+                            tool_calls: None,
+                        },
                     ],
                     temperature: Some(0.3),
                     top_p: None,
@@ -312,18 +328,32 @@ async fn execute_mcp_tool(state: &AppState, tool_name: &str, args: Value) -> any
             Ok(json!({ "svg": svg }))
         }
         "zorya_denoise" => {
-            let b64 = args.get("image_base64").and_then(|v| v.as_str()).unwrap_or("");
+            let b64 = args
+                .get("image_base64")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let bytes = BASE64.decode(b64.trim())?;
             let method = ClassicalDenoiseMethod::from_str_lossy(
-                args.get("method").and_then(|v| v.as_str()).unwrap_or("bilateral"),
+                args.get("method")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("bilateral"),
             );
-            let intensity = args.get("intensity").and_then(|v| v.as_f64()).unwrap_or(0.85) as f32;
+            let intensity = args
+                .get("intensity")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.85) as f32;
             let processed = denoise_image_classical(&bytes, method, intensity)?;
             Ok(json!({ "method": method.as_str(), "image_base64": BASE64.encode(processed) }))
         }
         "zorya_normalize_audio" => {
-            let b64 = args.get("wav_base64").and_then(|v| v.as_str()).unwrap_or("");
-            let target_lufs = args.get("target_lufs").and_then(|v| v.as_f64()).unwrap_or(-14.0) as f32;
+            let b64 = args
+                .get("wav_base64")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let target_lufs = args
+                .get("target_lufs")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(-14.0) as f32;
             let bytes = BASE64.decode(b64.trim())?;
             let report = master_audio_ebu_r128(&bytes, None, target_lufs)?;
             Ok(json!({
@@ -349,11 +379,27 @@ async fn execute_mcp_tool(state: &AppState, tool_name: &str, args: Value) -> any
             }))
         }
         "svitlo_generate" => {
-            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let student_text = args.get("student_text").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let system_prompt = args.get("system_prompt").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let topic = args.get("topic").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let mode = args.get("mode").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let content = args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let student_text = args
+                .get("student_text")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let system_prompt = args
+                .get("system_prompt")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let topic = args
+                .get("topic")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let mode = args
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             let res = state
                 .inference
                 .generate_svitlo_study(crate::inference::SvitloGenerateRequest {

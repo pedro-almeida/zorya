@@ -31,7 +31,10 @@ pub fn generate_lesson_script(title: &str, raw_markdown: &str) -> VideoLessonScr
 
     VideoLessonScript {
         title: title.to_string(),
-        description: format!("Aula gerada pelo ecossistema Svitlo + Zorya v3.0: {}", title),
+        description: format!(
+            "Aula gerada pelo ecossistema Svitlo + Zorya v3.0: {}",
+            title
+        ),
         tags: vec!["Psicologia".into(), "Svitlo".into(), "Educação".into()],
         scenes,
     }

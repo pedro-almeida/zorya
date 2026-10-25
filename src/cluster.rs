@@ -6,7 +6,12 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::{extract::State, http::StatusCode, response::{IntoResponse, Response}, Json};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::RwLock;
@@ -62,7 +67,11 @@ impl ClusterCoordinator {
         let role = match hw.profile_kind {
             NodeProfileKind::NitroGtx1650 => "nitro".to_string(),
             NodeProfileKind::VpsMini => "vps".to_string(),
-            NodeProfileKind::GenericWorkstation => config.node.role.clone().unwrap_or_else(|| "nitro".to_string()),
+            NodeProfileKind::GenericWorkstation => config
+                .node
+                .role
+                .clone()
+                .unwrap_or_else(|| "nitro".to_string()),
         };
 
         let local_capabilities = NodeCapabilities {
@@ -79,11 +88,19 @@ impl ClusterCoordinator {
             available_models: vec![hw.recommended_model.clone()],
             craft_modules: config.craft.enabled.clone(),
             listen_port: config.network.listen_port.unwrap_or(8085),
-            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
         };
 
         let peer_endpoint = if !config.cluster.peer_endpoint.trim().is_empty() {
-            config.cluster.peer_endpoint.trim().trim_end_matches('/').to_string()
+            config
+                .cluster
+                .peer_endpoint
+                .trim()
+                .trim_end_matches('/')
+                .to_string()
         } else if let Some(vps_ip) = &config.network.fallback_vps_ip {
             format!("http://{}:8085", vps_ip)
         } else {
@@ -129,7 +146,10 @@ impl ClusterCoordinator {
         let port = self.local_capabilities.listen_port;
         let peer_url = format!("http://{}:{}", net_snap.preferred_peer_endpoint, port);
         let cap_url = format!("{}/api/v1/cluster/capabilities", peer_url);
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
 
         let _net_guard = self.systray.begin_network_work();
 
@@ -138,7 +158,12 @@ impl ClusterCoordinator {
                 if let Ok(peer_caps) = resp.json::<NodeCapabilities>().await {
                     // Envia handshake informando nossas próprias capacidades ao peer
                     let hs_url = format!("{}/api/v1/cluster/handshake", peer_url);
-                    let _ = self.http_client.post(&hs_url).json(&self.local_capabilities).send().await;
+                    let _ = self
+                        .http_client
+                        .post(&hs_url)
+                        .json(&self.local_capabilities)
+                        .send()
+                        .await;
 
                     let next = PeerStatus {
                         online: true,
@@ -205,7 +230,10 @@ pub async fn handle_cluster_handshake(
     State(state): State<AppState>,
     Json(incoming_peer): Json<NodeCapabilities>,
 ) -> Response {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let mut peer = state.cluster.peer_status.write().await;
     peer.online = true;
     peer.capabilities = Some(incoming_peer);

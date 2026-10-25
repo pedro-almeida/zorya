@@ -19,8 +19,8 @@ pub struct AudioMasterRequest {
 pub struct AudioDenoiseRequest {
     pub input_path: String,
     pub output_path: String,
-    pub noise_floor_db: Option<f64>,   // Padrão: -48.0 dB
-    pub reduction_db: Option<f64>,     // Padrão: 12.0 dB
+    pub noise_floor_db: Option<f64>, // Padrão: -48.0 dB
+    pub reduction_db: Option<f64>,   // Padrão: 12.0 dB
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -130,7 +130,9 @@ pub fn master_audio_buffer(
     (input_lufs, output_lufs, gain_db)
 }
 
-pub async fn handle_audio_master(Json(req): Json<AudioMasterRequest>) -> Result<Json<AudioDspResponse>, (StatusCode, String)> {
+pub async fn handle_audio_master(
+    Json(req): Json<AudioMasterRequest>,
+) -> Result<Json<AudioDspResponse>, (StatusCode, String)> {
     let target_lufs = req.target_lufs.unwrap_or(-14.0);
     let max_tp = req.max_true_peak_db.unwrap_or(-1.0);
     let ratio = req.compressor_ratio.unwrap_or(3.0);
@@ -139,7 +141,8 @@ pub async fn handle_audio_master(Json(req): Json<AudioMasterRequest>) -> Result<
         .map(|i| 0.15 * ((i as f64 * 440.0 * std::f64::consts::TAU) / 48000.0).sin())
         .collect();
 
-    let (in_lufs, out_lufs, gain_db) = master_audio_buffer(&mut synth_samples, target_lufs, max_tp, ratio);
+    let (in_lufs, out_lufs, gain_db) =
+        master_audio_buffer(&mut synth_samples, target_lufs, max_tp, ratio);
 
     Ok(Json(AudioDspResponse {
         output_path: req.output_path,
@@ -151,7 +154,9 @@ pub async fn handle_audio_master(Json(req): Json<AudioMasterRequest>) -> Result<
     }))
 }
 
-pub async fn handle_audio_denoise(Json(req): Json<AudioDenoiseRequest>) -> Result<Json<AudioDspResponse>, (StatusCode, String)> {
+pub async fn handle_audio_denoise(
+    Json(req): Json<AudioDenoiseRequest>,
+) -> Result<Json<AudioDspResponse>, (StatusCode, String)> {
     let reduction = req.reduction_db.unwrap_or(12.0);
     Ok(Json(AudioDspResponse {
         output_path: req.output_path,

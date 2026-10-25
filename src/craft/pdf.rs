@@ -3,9 +3,9 @@
 // AI: @llm-module craft::pdf
 // AI: @llm-consumer svitlo-study-anki
 
-use std::process::Command;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+use std::process::Command;
 
 use axum::{extract::Json, http::StatusCode};
 use serde::{Deserialize, Serialize};
@@ -36,7 +36,10 @@ pub fn run_pdftotext(pdf_path: &str) -> Option<String> {
 /// Executa tesseract OCR sem abrir console no Windows
 pub fn run_tesseract(input_path: &str) -> Option<String> {
     let mut cmd = new_command("tesseract");
-    let out = cmd.args([input_path, "stdout", "-l", "por+eng"]).output().ok()?;
+    let out = cmd
+        .args([input_path, "stdout", "-l", "por+eng"])
+        .output()
+        .ok()?;
     if out.status.success() {
         let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !text.is_empty() {
@@ -155,7 +158,10 @@ pub async fn handle_pdf_extract(
         }
     }
 
-    let limit = req.max_pages.unwrap_or(raw_pages.len()).min(raw_pages.len());
+    let limit = req
+        .max_pages
+        .unwrap_or(raw_pages.len())
+        .min(raw_pages.len());
 
     let mut pages = Vec::with_capacity(limit);
     let mut combined = String::new();

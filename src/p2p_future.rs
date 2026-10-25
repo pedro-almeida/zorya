@@ -140,8 +140,16 @@ impl ZoryaSwarmTopology {
                     start_block: cursor_layer,
                     end_block,
                     quantization: "Q4_K_M".to_string(),
-                    throughput_tokens_per_sec: if peer.vram_available_mb > 0 { 42.0 } else { 11.5 },
-                    kv_cache_capacity_tokens: if peer.vram_available_mb > 0 { 8192 } else { 2048 },
+                    throughput_tokens_per_sec: if peer.vram_available_mb > 0 {
+                        42.0
+                    } else {
+                        11.5
+                    },
+                    kv_cache_capacity_tokens: if peer.vram_available_mb > 0 {
+                        8192
+                    } else {
+                        2048
+                    },
                 },
             ));
             cursor_layer = end_block;

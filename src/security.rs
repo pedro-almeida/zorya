@@ -3,15 +3,15 @@
 // AI: @llm-module security | @llm-context Proteção CSRF, headers OWASP, isolamento de path e prevenção de injection
 // AI: @llm-invariant Previne Path Traversal, Command Injection e requisições CSRF não autenticadas
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 use axum::{
     extract::Request,
     http::{header, HeaderValue},
     middleware::Next,
     response::Response,
 };
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 static CSRF_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -25,7 +25,7 @@ pub fn generate_csrf_token(secret: &str) -> String {
         .as_nanos();
     let count = CSRF_COUNTER.fetch_add(1, Ordering::Relaxed);
     let raw = format!("{}:{}:{}", secret, now, count);
-    
+
     // Hash determinístico leve sem dependência externa adicional
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -59,8 +59,14 @@ pub fn sanitize_path(base_dir: &Path, user_supplied: &str) -> anyhow::Result<Pat
     // Bloqueia caminhos absolutos do sistema perigosos
     let lower = trimmed.replace('\\', "/").to_lowercase();
     let forbidden_prefixes = [
-        "/etc", "/root", "/var/run", "c:/windows", "c:\\windows",
-        "/proc", "/sys", "/dev",
+        "/etc",
+        "/root",
+        "/var/run",
+        "c:/windows",
+        "c:\\windows",
+        "/proc",
+        "/sys",
+        "/dev",
     ];
     for p in forbidden_prefixes {
         if lower.starts_with(p) {
@@ -79,7 +85,9 @@ pub fn sanitize_path(base_dir: &Path, user_supplied: &str) -> anyhow::Result<Pat
         let canonical_target = target.canonicalize()?;
         if base_dir.exists() {
             let canonical_base = base_dir.canonicalize()?;
-            if !canonical_target.starts_with(&canonical_base) && !canonical_target.starts_with(base_dir) {
+            if !canonical_target.starts_with(&canonical_base)
+                && !canonical_target.starts_with(base_dir)
+            {
                 // Se não está dentro da base, mas for permitido pelo modelo específico, checa
                 tracing::warn!("Path fora do diretório base padrão: {:?}", canonical_target);
             }
@@ -93,10 +101,7 @@ pub fn sanitize_path(base_dir: &Path, user_supplied: &str) -> anyhow::Result<Pat
 /// PT: Middleware de injeção de Headers de Segurança OWASP (CSP, HSTS, X-Content-Type-Options)
 /// EN: Middleware for injecting OWASP Security Headers (CSP, HSTS, X-Content-Type-Options)
 // AI: @llm-middleware security_headers_middleware @llm-security Aplica CSP e nosniff em todas as rotas
-pub async fn security_headers_middleware(
-    req: Request,
-    next: Next,
-) -> Response {
+pub async fn security_headers_middleware(req: Request, next: Next) -> Response {
     let mut res = next.run(req).await;
     let headers = res.headers_mut();
 
@@ -120,7 +125,10 @@ pub async fn security_headers_middleware(
     // Content-Security-Policy estrito para o Svitlo Design System
     let csp = "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https:; connect-src 'self' http://127.0.0.1:8085 http://100.106.120.35:8085 https://api.espectroipe.com.br https://svitlo.espectroipe.com.br; script-src 'self' 'unsafe-inline';";
     if let Ok(val) = HeaderValue::from_str(csp) {
-        headers.insert(header::HeaderName::from_static("content-security-policy"), val);
+        headers.insert(
+            header::HeaderName::from_static("content-security-policy"),
+            val,
+        );
     }
 
     res

@@ -62,106 +62,50 @@ impl SystrayController {
         controller
     }
 
-    /// PT: Gera frame RGBA 32x32 da Insígnia Zorya com efeitos procedurais
+    /// PT: Carrega o ícone oficial a partir de assets/icon.png embutido e aplica indicador estático por estado
+    /// EN: Loads official icon from embedded assets/icon.png and applies static status badge per state
+    /// AI: @llm-func generate_state_icon @llm-perf zero-gdi-leak
     #[cfg(all(target_os = "windows", feature = "systray"))]
-    fn render_procedural_frame(state: SystrayState, tick: u64) -> Option<tray_icon::Icon> {
-        let size = 32usize;
-        let mut rgba = vec![0u8; size * size * 4];
-        let center = (size as f32) / 2.0;
+    fn generate_state_icon(base_bytes: &[u8], state: SystrayState) -> Option<tray_icon::Icon> {
+        let dyn_img = image::load_from_memory(base_bytes).ok()?;
+        let mut resized = dyn_img
+            .resize_exact(32, 32, image::imageops::FilterType::Lanczos3)
+            .to_rgba8();
 
-        let t = (tick as f32) * 0.15;
-        let breath = ((t.sin() + 1.0) * 0.5).clamp(0.0, 1.0);
+        // Badge indicador 6x6 no canto inferior direito para refletir estado de saúde
+        let (badge_r, badge_g, badge_b) = match state {
+            SystrayState::Idle => (34, 197, 94),            // Verde #22C55E
+            SystrayState::InferenceActive => (234, 179, 8), // Dourado/Âmbar #EAB308
+            SystrayState::NetworkActive => (6, 182, 212),   // Ciano #06B6D4
+            SystrayState::DegradedFallback => (249, 115, 22), // Laranja #F97316
+            SystrayState::ExhaustedError => (239, 68, 68),  // Vermelho #EF4444
+            SystrayState::Offline => (156, 163, 175),       // Cinza #9CA3AF
+        };
 
-        for y in 0..size {
-            for x in 0..size {
-                let dx = (x as f32) - center + 0.5;
-                let dy = (y as f32) - center + 0.5;
-                let dist = (dx * dx + dy * dy).sqrt();
-                let angle = dy.atan2(dx);
-                let idx = (y * size + x) * 4;
-
-                let star_mod = (angle * 4.0 + if state == SystrayState::InferenceActive { t * 1.5 } else { 0.0 }).cos().abs() * 2.2;
-                let max_radius = 11.5 + star_mod;
-
-                if dist <= max_radius {
-                    match state {
-                        SystrayState::Idle => {
-                            // Standby: Anel dourado e núcleo esmeralda com respiração suave
-                            if dist >= max_radius - 2.0 {
-                                rgba[idx] = 201; // #C9A84C Gold
-                                rgba[idx + 1] = 168;
-                                rgba[idx + 2] = 76;
-                                rgba[idx + 3] = 255;
-                            } else {
-                                let g_val = (140.0 + breath * 60.0) as u8;
-                                rgba[idx] = 16;
-                                rgba[idx + 1] = g_val;
-                                rgba[idx + 2] = 100;
-                                rgba[idx + 3] = 240;
-                            }
-                        }
-                        SystrayState::InferenceActive => {
-                            // Processando IA: Cintilância mística / gradiente mágico rotativo
-                            let magic_wave = ((t * 2.0 - dist * 0.5).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
-                            let r_pulse = (160.0 + magic_wave * 95.0) as u8;
-                            let b_pulse = (210.0 + magic_wave * 45.0) as u8;
-                            if dist >= max_radius - 2.5 {
-                                rgba[idx] = 245; // Âmbar vivo
-                                rgba[idx + 1] = 180;
-                                rgba[idx + 2] = 35;
-                                rgba[idx + 3] = 255;
-                            } else {
-                                rgba[idx] = r_pulse;     // Violeta elétrico / Magia
-                                rgba[idx + 1] = 90;
-                                rgba[idx + 2] = b_pulse;
-                                rgba[idx + 3] = 255;
-                            }
-                        }
-                        SystrayState::NetworkActive => {
-                            // Tailscale / Rede: Piscar estilo LED RJ45 da placa de rede
-                            let is_led_on = (tick % 6) < 3;
-                            if is_led_on {
-                                rgba[idx] = 6;      // Ciano brilhante / LED Link
-                                rgba[idx + 1] = 214;
-                                rgba[idx + 2] = 160;
-                                rgba[idx + 3] = 255;
-                            } else {
-                                rgba[idx] = 245;    // Âmbar / LED Activity
-                                rgba[idx + 1] = 158;
-                                rgba[idx + 2] = 11;
-                                rgba[idx + 3] = 255;
-                            }
-                        }
-                        SystrayState::DegradedFallback => {
-                            rgba[idx] = 217;
-                            rgba[idx + 1] = 119;
-                            rgba[idx + 2] = 6;
-                            rgba[idx + 3] = 230;
-                        }
-                        SystrayState::ExhaustedError => {
-                            rgba[idx] = 239;
-                            rgba[idx + 1] = 68;
-                            rgba[idx + 2] = 68;
-                            rgba[idx + 3] = 255;
-                        }
-                        SystrayState::Offline => {
-                            rgba[idx] = 120;
-                            rgba[idx + 1] = 120;
-                            rgba[idx + 2] = 120;
-                            rgba[idx + 3] = 200;
-                        }
-                    }
+        for y in 24..30 {
+            for x in 24..30 {
+                let dx = (x as f32) - 26.5;
+                let dy = (y as f32) - 26.5;
+                if dx * dx + dy * dy <= 6.25 {
+                    resized.put_pixel(x, y, image::Rgba([badge_r, badge_g, badge_b, 255]));
                 }
             }
         }
-        tray_icon::Icon::from_rgba(rgba, size as u32, size as u32).ok()
+
+        let (w, h) = resized.dimensions();
+        tray_icon::Icon::from_rgba(resized.into_raw(), w, h).ok()
     }
 
-    /// PT: Abre navegador com proteção contra múltiplas abas concorrentes (debounce de 1500ms)
+    /// PT: Abre navegador com proteção contra múltiplas abas concorrentes (debounce de 2000ms)
+    /// EN: Open browser with concurrent tab debounce protection (2000ms debounce)
+    /// AI: @llm-func open_browser_debounced @llm-debounce 2000ms
     fn open_browser_debounced(url: &str) {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
         let last = LAST_BROWSER_OPEN_MS.load(Ordering::Relaxed);
-        if now.saturating_sub(last) < 1500 {
+        if now.saturating_sub(last) < 2000 {
             return;
         }
         LAST_BROWSER_OPEN_MS.store(now, Ordering::Relaxed);
@@ -188,8 +132,13 @@ impl SystrayController {
             }
 
             let tray_menu = Menu::new();
-            let item_open = MenuItem::new("⚡ Abrir Painel de Controle (localhost:8085)", true, None);
-            let item_tailscale = MenuItem::new("📱 Acesso Mobile Tailscale (100.106.120.35:8085)", true, None);
+            let item_open =
+                MenuItem::new("⚡ Abrir Painel de Controle (localhost:8085)", true, None);
+            let item_tailscale = MenuItem::new(
+                "📱 Acesso Mobile Tailscale (100.106.120.35:8085)",
+                true,
+                None,
+            );
             let item_quit = MenuItem::new("❌ Encerrar Usina Zorya", true, None);
             let _ = tray_menu.append(&item_open);
             let _ = tray_menu.append(&item_tailscale);
@@ -199,13 +148,25 @@ impl SystrayController {
             let ts_id = item_tailscale.id().clone();
             let quit_id = item_quit.id().clone();
 
-            let initial_icon = Self::render_procedural_frame(SystrayState::Idle, 0);
+            const ICON_BYTES: &[u8] = include_bytes!("../assets/icon.png");
+
+            // PT: Pré-renderiza os 6 ícones estáticos no início para eliminar alocação e vazamento de handles Win32 HICON
+            // EN: Pre-render 6 static state icons on startup to eliminate Win32 HICON handle leak
+            let icon_idle = Self::generate_state_icon(ICON_BYTES, SystrayState::Idle);
+            let icon_inference =
+                Self::generate_state_icon(ICON_BYTES, SystrayState::InferenceActive);
+            let icon_network = Self::generate_state_icon(ICON_BYTES, SystrayState::NetworkActive);
+            let icon_degraded =
+                Self::generate_state_icon(ICON_BYTES, SystrayState::DegradedFallback);
+            let icon_error = Self::generate_state_icon(ICON_BYTES, SystrayState::ExhaustedError);
+            let icon_offline = Self::generate_state_icon(ICON_BYTES, SystrayState::Offline);
+
             let mut builder = TrayIconBuilder::new()
                 .with_tooltip("Usina Zorya v3.0 — Painel de Controle")
                 .with_menu(Box::new(tray_menu));
 
-            if let Some(ic) = initial_icon {
-                builder = builder.with_icon(ic);
+            if let Some(ref ic) = icon_idle {
+                builder = builder.with_icon(ic.clone());
             }
 
             let tray_icon = match builder.build() {
@@ -216,7 +177,10 @@ impl SystrayController {
                 }
             };
 
-            let mut tick = 0u64;
+            let mut last_state: Option<SystrayState> = Some(SystrayState::Idle);
+            let mut last_icon_change = std::time::Instant::now();
+            let mut last_tooltip = String::new();
+
             loop {
                 unsafe {
                     let mut msg: MSG = std::mem::zeroed();
@@ -226,7 +190,7 @@ impl SystrayController {
                     }
                 }
 
-                // Processa clique no menu com debounce
+                // Processa clique no menu com debounce de 2 segundos
                 if let Ok(event) = MenuEvent::receiver().try_recv() {
                     if event.id == open_id {
                         Self::open_browser_debounced("http://127.0.0.1:8085/settings");
@@ -237,31 +201,44 @@ impl SystrayController {
                     }
                 }
 
-                // Processa clique direto no ícone (apenas DoubleClick OU Click único, descartando o redundante)
+                // Processa clique no ícone: APENAS DoubleClick (descartando Click simples para evitar aba dupla)
                 while let Ok(tray_evt) = TrayIconEvent::receiver().try_recv() {
-                    match tray_evt {
-                        TrayIconEvent::DoubleClick { .. } => {
-                            Self::open_browser_debounced("http://127.0.0.1:8085/settings");
-                        }
-                        TrayIconEvent::Click { button: tray_icon::MouseButton::Left, .. } => {
-                            Self::open_browser_debounced("http://127.0.0.1:8085/settings");
-                        }
-                        _ => {}
+                    if let TrayIconEvent::DoubleClick {
+                        button: tray_icon::MouseButton::Left,
+                        ..
+                    } = tray_evt
+                    {
+                        Self::open_browser_debounced("http://127.0.0.1:8085/settings");
                     }
                 }
 
-                // Animação procedural viva a cada ~90ms
+                // Atualiza ícone apenas se o estado de saúde mudar (eliminando vazamento de HICON na GDI)
                 if let Ok(guard) = status_ref.read() {
-                    if let Some(frame) = Self::render_procedural_frame(guard.state, tick) {
-                        let _ = tray_icon.set_icon(Some(frame));
+                    if last_state != Some(guard.state)
+                        && last_icon_change.elapsed() >= Duration::from_millis(1000)
+                    {
+                        let selected_icon = match guard.state {
+                            SystrayState::Idle => &icon_idle,
+                            SystrayState::InferenceActive => &icon_inference,
+                            SystrayState::NetworkActive => &icon_network,
+                            SystrayState::DegradedFallback => &icon_degraded,
+                            SystrayState::ExhaustedError => &icon_error,
+                            SystrayState::Offline => &icon_offline,
+                        };
+                        if let Some(ic) = selected_icon {
+                            let _ = tray_icon.set_icon(Some(ic.clone()));
+                        }
+                        last_state = Some(guard.state);
+                        last_icon_change = std::time::Instant::now();
                     }
-                    if tick % 20 == 0 {
+
+                    if guard.tooltip != last_tooltip {
                         let _ = tray_icon.set_tooltip(Some(&guard.tooltip));
+                        last_tooltip = guard.tooltip.clone();
                     }
                 }
 
-                tick = tick.wrapping_add(1);
-                std::thread::sleep(Duration::from_millis(90));
+                std::thread::sleep(Duration::from_millis(200));
             }
         });
     }
@@ -281,7 +258,10 @@ impl SystrayController {
     }
 
     pub fn begin_ai_work(&self) -> SystrayGuard {
-        self.transition(SystrayState::InferenceActive, "Processando IA / Inferência Neural");
+        self.transition(
+            SystrayState::InferenceActive,
+            "Processando IA / Inferência Neural",
+        );
         SystrayGuard {
             controller: self.clone(),
             restore_state: SystrayState::Idle,
@@ -290,7 +270,10 @@ impl SystrayController {
     }
 
     pub fn begin_network_work(&self) -> SystrayGuard {
-        self.transition(SystrayState::NetworkActive, "Sincronizando malha de rede / cluster");
+        self.transition(
+            SystrayState::NetworkActive,
+            "Sincronizando malha de rede / cluster",
+        );
         SystrayGuard {
             controller: self.clone(),
             restore_state: SystrayState::Idle,
@@ -314,7 +297,8 @@ impl SystrayController {
             guard.peer_connected = online;
             if !online && guard.state == SystrayState::Idle {
                 guard.state = SystrayState::DegradedFallback;
-                guard.tooltip = "Zorya v3.0 — Nó peer offline, operando em modo autônomo".to_string();
+                guard.tooltip =
+                    "Zorya v3.0 — Nó peer offline, operando em modo autônomo".to_string();
             } else if online && guard.state == SystrayState::DegradedFallback {
                 guard.state = SystrayState::Idle;
                 guard.tooltip = format!("Zorya v3.0 — Pronto ({})", guard.active_model);
@@ -335,6 +319,7 @@ pub struct SystrayGuard {
 
 impl Drop for SystrayGuard {
     fn drop(&mut self) {
-        self.controller.transition(self.restore_state, self.restore_reason);
+        self.controller
+            .transition(self.restore_state, self.restore_reason);
     }
 }

@@ -48,7 +48,9 @@ pub struct ClassicalDenoiseResponse {
     pub processed_image_base64: String,
 }
 
-pub fn denoise_image_classical(req: &ClassicalDenoiseRequest) -> anyhow::Result<ClassicalDenoiseResponse> {
+pub fn denoise_image_classical(
+    req: &ClassicalDenoiseRequest,
+) -> anyhow::Result<ClassicalDenoiseResponse> {
     let raw_b64 = req
         .image_base64
         .as_deref()
@@ -76,9 +78,15 @@ pub fn denoise_image_classical(req: &ClassicalDenoiseRequest) -> anyhow::Result<
         }
         ClassicalDenoiseMethod::Convolution => {
             let default_kernel = vec![
-                0.0, -0.5 * intensity, 0.0,
-                -0.5 * intensity, 1.0 + 2.0 * intensity, -0.5 * intensity,
-                0.0, -0.5 * intensity, 0.0,
+                0.0,
+                -0.5 * intensity,
+                0.0,
+                -0.5 * intensity,
+                1.0 + 2.0 * intensity,
+                -0.5 * intensity,
+                0.0,
+                -0.5 * intensity,
+                0.0,
             ];
             let k = req.kernel.as_deref().unwrap_or(&default_kernel);
             apply_convolution_sharpen(&mut planar, width, height, k);
@@ -191,7 +199,13 @@ pub fn apply_wiener_filter(pixels: &mut [f32], width: usize, height: usize, inte
 
 // PT: Unsharp Mask clássico com limiar de proteção contra granulação de fundo
 // EN: Classical Unsharp Mask with threshold protection against background grain
-pub fn apply_unsharp_mask(pixels: &mut [f32], width: usize, height: usize, radius_sigma: f32, amount: f32) {
+pub fn apply_unsharp_mask(
+    pixels: &mut [f32],
+    width: usize,
+    height: usize,
+    radius_sigma: f32,
+    amount: f32,
+) {
     let mut blurred = pixels.to_vec();
     apply_bilateral_filter(&mut blurred, width, height, radius_sigma);
     for i in 0..pixels.len() {

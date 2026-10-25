@@ -39,7 +39,12 @@ pub struct CullResponse {
 // PT: Calcula a variância do operador Laplaciano 3x3 sobre um buffer em escala de cinza.
 // EN: Computes the 3x3 Laplacian operator variance over a grayscale buffer.
 // AI: @llm-func laplacian_variance
-pub fn laplacian_variance(gray: &[u8], width: usize, height: usize, roi: (usize, usize, usize, usize)) -> f64 {
+pub fn laplacian_variance(
+    gray: &[u8],
+    width: usize,
+    height: usize,
+    roi: (usize, usize, usize, usize),
+) -> f64 {
     let (rx, ry, rw, rh) = roi;
     if rw < 3 || rh < 3 || rx + rw > width || ry + rh > height {
         return 0.0;
@@ -72,7 +77,12 @@ pub fn laplacian_variance(gray: &[u8], width: usize, height: usize, roi: (usize,
 // PT: Estima a razão de abertura ocular (EAR) analisando o gradiente vertical vs horizontal nas pupilas.
 // EN: Estimates Eye Aspect Ratio (EAR) by analyzing vertical vs horizontal gradient in the pupil region.
 // AI: @llm-func estimate_eye_open_ratio
-pub fn estimate_eye_open_ratio(gray: &[u8], width: usize, height: usize, roi: (usize, usize, usize, usize)) -> f64 {
+pub fn estimate_eye_open_ratio(
+    gray: &[u8],
+    width: usize,
+    height: usize,
+    roi: (usize, usize, usize, usize),
+) -> f64 {
     let (rx, ry, rw, rh) = roi;
     if rw < 4 || rh < 4 || rx + rw > width || ry + rh > height {
         return 0.30;
@@ -118,7 +128,9 @@ pub fn compute_phash64(gray: &[u8], width: usize, height: usize) -> u64 {
     hash
 }
 
-pub async fn handle_cull(Json(req): Json<CullRequest>) -> Result<Json<CullResponse>, (StatusCode, String)> {
+pub async fn handle_cull(
+    Json(req): Json<CullRequest>,
+) -> Result<Json<CullResponse>, (StatusCode, String)> {
     let hamming_thresh = req.similarity_threshold_hamming.unwrap_or(10);
     let min_pupil_var = req.min_pupil_laplacian_var.unwrap_or(120.0);
 
@@ -186,9 +198,19 @@ pub async fn handle_cull(Json(req): Json<CullRequest>) -> Result<Json<CullRespon
             .enumerate()
             .filter(|(_, (_, s))| s.cluster_id == cid)
             .max_by(|(_, (_, a)), (_, (_, b))| {
-                let score_a = if a.eyes_closed_detected { a.pupil_sharpness * 0.1 } else { a.pupil_sharpness };
-                let score_b = if b.eyes_closed_detected { b.pupil_sharpness * 0.1 } else { b.pupil_sharpness };
-                score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
+                let score_a = if a.eyes_closed_detected {
+                    a.pupil_sharpness * 0.1
+                } else {
+                    a.pupil_sharpness
+                };
+                let score_b = if b.eyes_closed_detected {
+                    b.pupil_sharpness * 0.1
+                } else {
+                    b.pupil_sharpness
+                };
+                score_a
+                    .partial_cmp(&score_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|(idx, _)| idx);
 

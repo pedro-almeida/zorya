@@ -4,7 +4,10 @@
 
 use crate::video::{VideoLessonScript, YouTubeUploadConfig};
 
-pub fn build_youtube_metadata_payload(script: &VideoLessonScript, cfg: &YouTubeUploadConfig) -> serde_json::Value {
+pub fn build_youtube_metadata_payload(
+    script: &VideoLessonScript,
+    cfg: &YouTubeUploadConfig,
+) -> serde_json::Value {
     serde_json::json!({
         "snippet": {
             "title": script.title,

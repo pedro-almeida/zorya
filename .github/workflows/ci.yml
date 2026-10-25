@@ -1,0 +1,52 @@
+name: CI (Code Quality & Tests)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-and-test:
+    name: Check, Lint & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - name: Checkout Código
+        uses: actions/checkout@v4
+
+      - name: Instalar Dependências de Sistema (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev build-essential clang cmake
+
+      - name: Configurar Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+
+      - name: Cache de Compilação Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verificar Formatação (cargo fmt)
+        run: cargo fmt --all -- --check
+
+      - name: Executar Linter (cargo clippy)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Executar Testes Automatizados (cargo test)
+        run: cargo test --verbose

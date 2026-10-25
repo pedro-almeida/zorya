@@ -39,7 +39,9 @@ pub fn render_svitlo_dashboard_html(
     let craft_enabled_str = cfg.craft.enabled.join(",");
 
     let vram_total = telem.gpu_vram_total_mb.max(4096);
-    let vram_used = telem.gpu_vram_total_mb.saturating_sub(telem.gpu_vram_free_mb);
+    let vram_used = telem
+        .gpu_vram_total_mb
+        .saturating_sub(telem.gpu_vram_free_mb);
     let vram_pct = ((vram_used as f64 / vram_total as f64) * 100.0).clamp(0.0, 100.0) as u32;
 
     let ram_total = telem.ram_total_mb.max(16384);
@@ -48,24 +50,72 @@ pub fn render_svitlo_dashboard_html(
 
     // Renderiza os 11 cards dos módulos ArtCraft
     let craft_defs = [
-        ("lightcraft", "💡 LightCraft", "RAW & Denoise de alta fidelidade"),
-        ("photocraft", "📷 PhotoCraft", "Curadoria & Culling de imagens"),
-        ("vectorcraft", "📐 VectorCraft", "Diagramas e ilustrações vetoriais SVG"),
-        ("soundcraft", "🎙️ SoundCraft", "EBU R128, Voice Cloning & Áudio"),
-        ("pdfcraft", "📑 PdfCraft", "Extração estruturada, OCR & Parsing"),
-        ("wordcraft", "✍️ WordCraft", "Redação acadêmica e estilo Svitlo"),
-        ("effectcraft", "🎨 EffectCraft", "Shaders, LUTs e pós-processamento"),
-        ("filmcraft", "🎬 FilmCraft", "Timeline, sequenciamento e montagem"),
-        ("deckcraft", "📊 DeckCraft", "Apresentações e slides pedagógicos"),
-        ("figcraft", "🖼️ FigCraft", "Diagramação de figuras científicas"),
-        ("designcraft", "🏛️ DesignCraft", "Design System e layouts editoriais"),
+        (
+            "lightcraft",
+            "💡 LightCraft",
+            "RAW & Denoise de alta fidelidade",
+        ),
+        (
+            "photocraft",
+            "📷 PhotoCraft",
+            "Curadoria & Culling de imagens",
+        ),
+        (
+            "vectorcraft",
+            "📐 VectorCraft",
+            "Diagramas e ilustrações vetoriais SVG",
+        ),
+        (
+            "soundcraft",
+            "🎙️ SoundCraft",
+            "EBU R128, Voice Cloning & Áudio",
+        ),
+        (
+            "pdfcraft",
+            "📑 PdfCraft",
+            "Extração estruturada, OCR & Parsing",
+        ),
+        (
+            "wordcraft",
+            "✍️ WordCraft",
+            "Redação acadêmica e estilo Svitlo",
+        ),
+        (
+            "effectcraft",
+            "🎨 EffectCraft",
+            "Shaders, LUTs e pós-processamento",
+        ),
+        (
+            "filmcraft",
+            "🎬 FilmCraft",
+            "Timeline, sequenciamento e montagem",
+        ),
+        (
+            "deckcraft",
+            "📊 DeckCraft",
+            "Apresentações e slides pedagógicos",
+        ),
+        (
+            "figcraft",
+            "🖼️ FigCraft",
+            "Diagramação de figuras científicas",
+        ),
+        (
+            "designcraft",
+            "🏛️ DesignCraft",
+            "Design System e layouts editoriais",
+        ),
     ];
 
     let mut craft_cards_html = String::new();
     for (id, name, desc) in craft_defs {
         let is_checked = cfg.is_craft_enabled(id);
         let checked_attr = if is_checked { "checked" } else { "" };
-        let active_cls = if is_checked { "craft-card active" } else { "craft-card" };
+        let active_cls = if is_checked {
+            "craft-card active"
+        } else {
+            "craft-card"
+        };
         craft_cards_html.push_str(&format!(
             r#"<label class="{active_cls}" id="craft_card_{id}">
   <input type="checkbox" class="craft-checkbox" value="{id}" {checked_attr} onchange="toggleCraftModule(this)">
@@ -82,7 +132,8 @@ pub fn render_svitlo_dashboard_html(
         ));
     }
 
-    format!(r#"<!DOCTYPE html>
+    format!(
+        r#"<!DOCTYPE html>
 <html lang="pt-BR" data-theme="light">
 <head>
 <meta charset="utf-8">
@@ -1272,22 +1323,70 @@ document.addEventListener('DOMContentLoaded', () => {{
         gemini_keys = gemini_keys_str,
         openai_keys = openai_keys_str,
         openrouter_keys = openrouter_keys_str,
-        groq_primary = cfg.credentials.groq_primary_model.as_deref().unwrap_or("openai/gpt-oss-120b"),
-        groq_fast = cfg.credentials.groq_fast_model.as_deref().unwrap_or("openai/gpt-oss-20b"),
-        groq_multi = cfg.credentials.groq_multilingual_model.as_deref().unwrap_or("qwen/qwen3.8-27b"),
-        groq_whisper = cfg.credentials.groq_whisper_model.as_deref().unwrap_or("whisper-large-v3"),
-        gemini_model = cfg.credentials.gemini_model.as_deref().unwrap_or("gemini-2.5-flash"),
+        groq_primary = cfg
+            .credentials
+            .groq_primary_model
+            .as_deref()
+            .unwrap_or("openai/gpt-oss-120b"),
+        groq_fast = cfg
+            .credentials
+            .groq_fast_model
+            .as_deref()
+            .unwrap_or("openai/gpt-oss-20b"),
+        groq_multi = cfg
+            .credentials
+            .groq_multilingual_model
+            .as_deref()
+            .unwrap_or("qwen/qwen3.8-27b"),
+        groq_whisper = cfg
+            .credentials
+            .groq_whisper_model
+            .as_deref()
+            .unwrap_or("whisper-large-v3"),
+        gemini_model = cfg
+            .credentials
+            .gemini_model
+            .as_deref()
+            .unwrap_or("gemini-2.5-flash"),
         openrouter_model = cfg.credentials.openrouter_default_model,
         craft_cards = craft_cards_html,
         craft_enabled = craft_enabled_str,
-        checked_prefer_tailscale = if cfg.network.prefer_tailscale { "checked" } else { "" },
-        checked_reserve_display = if cfg.hardware.reserve_display_on_igpu { "checked" } else { "" },
-        checked_mcp_sse = if cfg.server.enable_mcp_sse { "checked" } else { "" },
+        checked_prefer_tailscale = if cfg.network.prefer_tailscale {
+            "checked"
+        } else {
+            ""
+        },
+        checked_reserve_display = if cfg.hardware.reserve_display_on_igpu {
+            "checked"
+        } else {
+            ""
+        },
+        checked_mcp_sse = if cfg.server.enable_mcp_sse {
+            "checked"
+        } else {
+            ""
+        },
         checked_cluster_enabled = if cfg.cluster.enabled { "checked" } else { "" },
-        checked_offload_vps = if cfg.cluster.offload_light_tasks_to_vps { "checked" } else { "" },
-        checked_enable_p2p = if cfg.cluster.enable_p2p { "checked" } else { "" },
-        checked_openrouter_enabled = if cfg.credentials.openrouter_enabled { "checked" } else { "" },
-        denoise_default_method = cfg.craft.denoise_default_method.as_deref().unwrap_or("bilateral"),
+        checked_offload_vps = if cfg.cluster.offload_light_tasks_to_vps {
+            "checked"
+        } else {
+            ""
+        },
+        checked_enable_p2p = if cfg.cluster.enable_p2p {
+            "checked"
+        } else {
+            ""
+        },
+        checked_openrouter_enabled = if cfg.credentials.openrouter_enabled {
+            "checked"
+        } else {
+            ""
+        },
+        denoise_default_method = cfg
+            .craft
+            .denoise_default_method
+            .as_deref()
+            .unwrap_or("bilateral"),
         audio_target_lufs = cfg.craft.audio_target_lufs.unwrap_or(-14.0),
         default_icc_profile = cfg.craft.default_icc_profile.as_deref().unwrap_or("sRGB"),
         csrf_token = csrf_token,

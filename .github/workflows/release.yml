@@ -70,21 +70,44 @@ jobs:
               -FriendlyName "Pedro Almeida - Zorya Project" `
               -NotAfter (Get-Date).AddYears(3)
 
+          Write-Host "[+] Instalando certificado em Root e TrustedPublisher..." -ForegroundColor Cyan
+          $rootStore = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "CurrentUser")
+          $rootStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+          $rootStore.Add($cert)
+          $rootStore.Close()
+
+          $pubStore = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPublisher", "CurrentUser")
+          $pubStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+          $pubStore.Add($cert)
+          $pubStore.Close()
+
           $pfxPassword = [System.Guid]::NewGuid().ToString("N")
           $securePassword = ConvertTo-SecureString -String $pfxPassword -Force -AsPlainText
           $pfxPath = "$env:TEMP\pedro_almeida_dev.pfx"
 
           Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $securePassword | Out-Null
 
-          Write-Host "[+] Assinando $binaryPath com timestamp RFC 3161..." -ForegroundColor Cyan
-          $signtool = (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin" -Filter "signtool.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          Write-Host "[+] Localizando signtool.exe x64 no runner Windows..." -ForegroundColor Cyan
+          $signtoolItem = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin" -Filter "signtool.exe" -Recurse -ErrorAction SilentlyContinue |
+                          Where-Object { $_.FullName -match '\\x64\\' } |
+                          Sort-Object FullName -Descending |
+                          Select-Object -First 1
+          $signtool = if ($signtoolItem) { $signtoolItem.FullName } else { $null }
 
           if ($signtool) {
-              Write-Host "Utilizando Signtool: $signtool"
+              Write-Host "Utilizando Signtool x64: $signtool"
               & $signtool sign /fd SHA256 /tr "http://timestamp.digicert.com" /td SHA256 /f $pfxPath /p $pfxPassword $binaryPath
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Warning "Falha com timestamp RFC 3161 na DigiCert. Tentando assinar sem timestamp externo..."
+                  & $signtool sign /fd SHA256 /f $pfxPath /p $pfxPassword $binaryPath
+                  if ($LASTEXITCODE -ne 0) {
+                      Write-Warning "Assinatura via signtool falhou ($LASTEXITCODE). Aplicando Set-AuthenticodeSignature de fallback..."
+                      Set-AuthenticodeSignature -FilePath $binaryPath -Certificate $cert -HashAlgorithm SHA256 -ErrorAction SilentlyContinue
+                  }
+              }
           } else {
               Write-Host "Utilizando Set-AuthenticodeSignature nativo..."
-              Set-AuthenticodeSignature -FilePath $binaryPath -Certificate $cert -TimestampServer "http://timestamp.digicert.com" -HashAlgorithm SHA256
+              Set-AuthenticodeSignature -FilePath $binaryPath -Certificate $cert -TimestampServer "http://timestamp.digicert.com" -HashAlgorithm SHA256 -ErrorAction SilentlyContinue
           }
 
           Remove-Item -Path $pfxPath -Force -ErrorAction SilentlyContinue

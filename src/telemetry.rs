@@ -1,6 +1,6 @@
 // Hardware and System Telemetry via sysinfo + NVIDIA GTX 1650 VRAM probe / Telemetria de Hardware e Sistema via sysinfo + sonda de VRAM NVIDIA GTX 1650
-use std::process::Command;
 use serde::{Deserialize, Serialize};
+use std::process::Command;
 use sysinfo::{Disks, System};
 
 // Compact health response required for GET /health & GET /api/status
@@ -54,6 +54,15 @@ pub struct DetailedSystemInfo {
     pub gpu_vram_total_mb: u64,
     pub gpu_vram_free_mb: u64,
     pub gpu_display_offloaded_to_igpu: bool,
+}
+
+// PT: Snapshot consolidado de telemetria para leitura instantânea O(1) sem contole de lock de escrita
+// EN: Consolidated telemetry snapshot for instantaneous O(1) reading without write lock contention
+// AI: @llm-struct DetailedSystemSnapshot @llm-perf zero-lock-contention
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetailedSystemSnapshot {
+    pub health: HealthResponse,
+    pub detailed: DetailedSystemInfo,
 }
 
 use std::time::{Duration, Instant};
@@ -123,8 +132,16 @@ impl TelemetryCollector {
         let ram_available_mb = self.sys.available_memory() / (1024 * 1024);
         let (gpu_name, vram_total_mb, _) = self.probe_nvidia_vram_cached();
 
-        let ram_mb = if ram_total_mb > 0 { ram_total_mb } else { 16384 };
-        let ram_avail = if ram_available_mb > 0 { ram_available_mb } else { 8192 };
+        let ram_mb = if ram_total_mb > 0 {
+            ram_total_mb
+        } else {
+            16384
+        };
+        let ram_avail = if ram_available_mb > 0 {
+            ram_available_mb
+        } else {
+            8192
+        };
 
         HealthResponse {
             status: "ok".to_string(),
@@ -140,7 +157,11 @@ impl TelemetryCollector {
             recommended_tier: "Medium3BTo7B".to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             online: true,
-            node: if self.node_name.is_empty() { "usina-zorya".to_string() } else { self.node_name.clone() },
+            node: if self.node_name.is_empty() {
+                "usina-zorya".to_string()
+            } else {
+                self.node_name.clone()
+            },
             cpu_usage,
             ram_mb,
         }
@@ -180,7 +201,11 @@ impl TelemetryCollector {
 
         let info = DetailedSystemInfo {
             status: "ok".to_string(),
-            node: if self.node_name.is_empty() { "usina-zorya".to_string() } else { self.node_name.clone() },
+            node: if self.node_name.is_empty() {
+                "usina-zorya".to_string()
+            } else {
+                self.node_name.clone()
+            },
             version: env!("CARGO_PKG_VERSION").to_string(),
             os_name: System::name().unwrap_or_else(|| std::env::consts::OS.to_string()),
             os_version: System::os_version().unwrap_or_else(|| "unknown".to_string()),
@@ -204,8 +229,20 @@ impl TelemetryCollector {
         info
     }
 
+    // PT: Coleta snapshot consolidado executado estritamente em thread bloqueante
+    // EN: Collect consolidated snapshot executed strictly on blocking thread
+    // AI: @llm-func collect_snapshot
+    pub fn collect_snapshot(&mut self) -> DetailedSystemSnapshot {
+        let health = self.collect_health();
+        let detailed = self.collect_detailed();
+        DetailedSystemSnapshot { health, detailed }
+    }
+
     // Query nvidia-smi without console window or fall back to hw_profile or CPU-Only
-    pub fn probe_nvidia_vram(default_vram_mb: u64, profile_gpu_name: Option<&str>) -> (String, u64, u64) {
+    pub fn probe_nvidia_vram(
+        default_vram_mb: u64,
+        profile_gpu_name: Option<&str>,
+    ) -> (String, u64, u64) {
         let mut cmd = Command::new("nvidia-smi");
         cmd.args([
             "--query-gpu=name,memory.total,memory.free",
@@ -240,10 +277,6 @@ impl TelemetryCollector {
             }
         }
 
-        (
-            "CPU-Only (No Dedicated GPU Detected)".to_string(),
-            0,
-            0,
-        )
+        ("CPU-Only (No Dedicated GPU Detected)".to_string(), 0, 0)
     }
 }

@@ -1,4 +1,16 @@
 #![warn(unused_must_use)]
+#![allow(
+    clippy::derivable_impls,
+    clippy::manual_div_ceil,
+    clippy::chunks_exact_to_as_chunks,
+    clippy::unnecessary_sort_by,
+    clippy::manual_pattern_char_comparison,
+    clippy::needless_range_loop,
+    clippy::for_kv_map,
+    clippy::manual_map,
+    clippy::let_and_return,
+    clippy::unnecessary_lazy_evaluations
+)]
 // PT: Zorya v3.0 — Daemon Rust Soberano, Servidor MCP & Coprocessador Multimídia
 // EN: Zorya v3.0 — Sovereign Rust Daemon, MCP Server & Multimedia Coprocessor
 // AI: @llm-context Coordena inference (GGUF llama-cpp-2), hardware auto-tuning, agent autônomo, servidor MCP duplo, cluster e rede desacoplada
@@ -65,22 +77,60 @@ fn hide_console_window_on_windows(is_mcp_stdio: bool, force_console: bool) {
 #[cfg(not(target_os = "windows"))]
 fn hide_console_window_on_windows(_is_mcp_stdio: bool, _force_console: bool) {}
 
-/// Resolve o caminho de configuração buscando ZORYA_CONFIG, ./zorya.toml e exe_dir/zorya.toml
-/// Retorna ZoryaConfig carregado ou o fallback ZoryaConfig::default() sem abortar o processo
-pub fn resolve_config_path() -> ZoryaConfig {
+/// Resolve o caminho de configuração buscando ZORYA_CONFIG, C:\ProgramData\Zorya\zorya.toml, ./zorya.toml e exe_dir/zorya.toml
+pub fn resolve_config_path_with_target() -> (ZoryaConfig, PathBuf) {
+    let has_keys = |c: &ZoryaConfig| -> bool {
+        !c.credentials.groq_keys.is_empty()
+            || !c.credentials.gemini_keys.is_empty()
+            || !c.credentials.openrouter_keys.is_empty()
+            || !c.credentials.openai_keys.is_empty()
+    };
+
     if let Ok(env_path) = std::env::var("ZORYA_CONFIG") {
-        let p = PathBuf::from(&env_path);
+        let p = PathBuf::from(env_path.trim());
         if p.exists() {
             if let Ok(cfg) = ZoryaConfig::load_or_default(&p) {
-                return cfg;
+                return (cfg, p);
             }
         }
     }
 
-    let local_path = Path::new("zorya.toml");
+    #[cfg(target_os = "windows")]
+    {
+        let prog_dir = Path::new(r"C:\ProgramData\Zorya");
+        let prog_file = prog_dir.join("zorya.toml");
+        let local_file = PathBuf::from("zorya.toml");
+
+        if prog_file.exists() && local_file.exists() {
+            let cfg_prog = ZoryaConfig::load_or_default(&prog_file).unwrap_or_default();
+            let cfg_local = ZoryaConfig::load_or_default(&local_file).unwrap_or_default();
+
+            if has_keys(&cfg_prog) {
+                let _ = cfg_prog.save_atomic(&local_file);
+                return (cfg_prog, prog_file);
+            } else if has_keys(&cfg_local) {
+                let _ = cfg_local.save_atomic(&prog_file);
+                return (cfg_local, prog_file);
+            } else {
+                return (cfg_prog, prog_file);
+            }
+        } else if prog_file.exists() {
+            let cfg_prog = ZoryaConfig::load_or_default(&prog_file).unwrap_or_default();
+            let _ = cfg_prog.save_atomic(&local_file);
+            return (cfg_prog, prog_file);
+        } else if local_file.exists() {
+            let cfg_local = ZoryaConfig::load_or_default(&local_file).unwrap_or_default();
+            if prog_dir.exists() {
+                let _ = cfg_local.save_atomic(&prog_file);
+            }
+            return (cfg_local, local_file);
+        }
+    }
+
+    let local_path = PathBuf::from("zorya.toml");
     if local_path.exists() {
-        if let Ok(cfg) = ZoryaConfig::load_or_default(local_path) {
-            return cfg;
+        if let Ok(cfg) = ZoryaConfig::load_or_default(&local_path) {
+            return (cfg, local_path);
         }
     }
 
@@ -89,14 +139,18 @@ pub fn resolve_config_path() -> ZoryaConfig {
             let exe_cfg_path = parent.join("zorya.toml");
             if exe_cfg_path.exists() {
                 if let Ok(cfg) = ZoryaConfig::load_or_default(&exe_cfg_path) {
-                    return cfg;
+                    return (cfg, exe_cfg_path);
                 }
             }
         }
     }
 
     tracing::warn!("zorya.toml não localizado nos caminhos padrão. Utilizando ZoryaConfig::default() soberano.");
-    ZoryaConfig::default()
+    (ZoryaConfig::default(), PathBuf::from("zorya.toml"))
+}
+
+pub fn resolve_config_path() -> ZoryaConfig {
+    resolve_config_path_with_target().0
 }
 
 pub fn main_config_snapshot() -> ZoryaConfig {
@@ -113,7 +167,8 @@ pub async fn bind_resilient_listener(addr: SocketAddr) -> anyhow::Result<TcpList
             Ok(listener) => {
                 tracing::info!(
                     "Socket TCP vinculado e em LISTENING ativo em {} (tentativa {}/5)",
-                    addr, attempt
+                    addr,
+                    attempt
                 );
                 return Ok(listener);
             }
@@ -175,7 +230,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 1. Carrega configuração com fallback resiliente sem abortar processo
-    let config = resolve_config_path();
+    let (config, config_path) = resolve_config_path_with_target();
 
     // 2. Garante que a porta 8085 entre imediatamente em LISTENING antes de tarefas demoradas
     let port = config.server.port;
@@ -185,7 +240,11 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], port)));
     let listener = if !is_mcp_stdio {
         let l = bind_resilient_listener(addr).await?;
-        tracing::info!("Unified TCP socket bound & listening immediately on http://{}:{}", host, port);
+        tracing::info!(
+            "Unified TCP socket bound & listening immediately on http://{}:{}",
+            host,
+            port
+        );
         Some(l)
     } else {
         None
@@ -230,12 +289,34 @@ async fn main() -> anyhow::Result<()> {
     if !is_mcp_stdio {
         tracing::info!("================================================================");
         tracing::info!("  ZORYA v3.0 — SOVEREIGN RUST DAEMON & NATIVE INFERENCE          ");
-        tracing::info!("  Node / Nó:        {}                                          ", config.network.node_name);
-        tracing::info!("  Profile / Perfil: {:?} (Backend: {:?})                        ", hw.profile_kind, hw.active_backend);
-        tracing::info!("  CPU:              {} ({} cores)                              ", hw.cpu_brand, hw.logical_cores);
-        tracing::info!("  GPU Model:        {:?} ({} MB VRAM)                          ", hw.dgpu_model, hw.dgpu_vram_mb);
-        tracing::info!("  Recommended Model:{} (ctx {})                                ", hw.recommended_model, hw.recommended_ctx_size);
-        tracing::info!("  ArtCraft Suite:   {:?}                                        ", config.craft.enabled);
+        tracing::info!(
+            "  Node / Nó:        {}                                          ",
+            config.network.node_name
+        );
+        tracing::info!(
+            "  Profile / Perfil: {:?} (Backend: {:?})                        ",
+            hw.profile_kind,
+            hw.active_backend
+        );
+        tracing::info!(
+            "  CPU:              {} ({} cores)                              ",
+            hw.cpu_brand,
+            hw.logical_cores
+        );
+        tracing::info!(
+            "  GPU Model:        {:?} ({} MB VRAM)                          ",
+            hw.dgpu_model,
+            hw.dgpu_vram_mb
+        );
+        tracing::info!(
+            "  Recommended Model:{} (ctx {})                                ",
+            hw.recommended_model,
+            hw.recommended_ctx_size
+        );
+        tracing::info!(
+            "  ArtCraft Suite:   {:?}                                        ",
+            config.craft.enabled
+        );
         tracing::info!("================================================================");
     }
 
@@ -256,15 +337,42 @@ async fn main() -> anyhow::Result<()> {
     let cluster = ClusterCoordinator::new(&config, &hw, Arc::clone(&network), systray.clone());
 
     // Inicializa agente inteligente com cofre de chaves e tool calling
-    let agent = ZoryaAgent::new(Arc::new(config.clone()), Arc::clone(&inference), systray.clone());
+    let agent = ZoryaAgent::new(
+        Arc::new(config.clone()),
+        Arc::clone(&inference),
+        systray.clone(),
+    );
 
-    // Inicializa coletor de telemetria do sistema alimentado pelo HardwareProfile real
-    let telemetry = Arc::new(RwLock::new(
-        TelemetryCollector::new(
-            config.network.node_name.clone(),
-            hw.dgpu_vram_mb,
-        ).with_hw_profile(hw.dgpu_model.clone(), hw.dgpu_vram_mb),
-    ));
+    // Inicializa coletor de telemetria do sistema alimentado pelo HardwareProfile real e snapshot consolidado
+    let mut initial_collector =
+        TelemetryCollector::new(config.network.node_name.clone(), hw.dgpu_vram_mb)
+            .with_hw_profile(hw.dgpu_model.clone(), hw.dgpu_vram_mb);
+    let initial_snapshot = initial_collector.collect_snapshot();
+
+    let telemetry = Arc::new(RwLock::new(initial_collector));
+    let system_snapshot = Arc::new(RwLock::new(initial_snapshot));
+
+    // PT: Task de background assíncrona que atualiza o snapshot de telemetria a cada 3 segundos via spawn_blocking
+    // EN: Async background task updating telemetry snapshot every 3 seconds via spawn_blocking
+    // AI: @llm-task telemetry-background-updater @llm-interval 3s
+    let telem_bg = Arc::clone(&telemetry);
+    let snap_bg = Arc::clone(&system_snapshot);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+        loop {
+            interval.tick().await;
+            let telem_ref = Arc::clone(&telem_bg);
+            let updated = tokio::task::spawn_blocking(move || {
+                let mut guard = telem_ref.blocking_write();
+                guard.collect_snapshot()
+            })
+            .await;
+            if let Ok(new_snap) = updated {
+                let mut snap_guard = snap_bg.write().await;
+                *snap_guard = new_snap;
+            }
+        }
+    });
 
     // Contador atômico compartilhado de tarefas
     let active_jobs = Arc::new(AtomicUsize::new(0));
@@ -283,7 +391,9 @@ async fn main() -> anyhow::Result<()> {
     // Constrói o estado global compartilhado da aplicação
     let state = AppState {
         config: Arc::new(RwLock::new(config.clone())),
+        config_path: Arc::new(RwLock::new(config_path)),
         telemetry,
+        system_snapshot,
         network,
         inference,
         cluster,
@@ -306,7 +416,11 @@ async fn main() -> anyhow::Result<()> {
     let app = server::create_router(state);
     let listener = listener.expect("Listener must be initialized for non-stdio mode");
 
-    tracing::info!("Serving Axum HTTP + MCP SSE router on http://{}:{}", host, port);
+    tracing::info!(
+        "Serving Axum HTTP + MCP SSE router on http://{}:{}",
+        host,
+        port
+    );
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

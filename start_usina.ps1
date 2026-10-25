@@ -23,7 +23,9 @@ if (-not (Test-Path $ReleaseExe) -or ((Get-ChildItem -Path "$RepoRoot\src" -Recu
 $InstallDir = "C:\ProgramData\Zorya"
 if (Test-Path $InstallDir) {
     Copy-Item -Path $ReleaseExe -Destination "$InstallDir\zorya.exe" -Force -ErrorAction SilentlyContinue
-    Copy-Item -Path "$RepoRoot\zorya.toml" -Destination "$InstallDir\zorya.toml" -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path "$InstallDir\zorya.toml")) {
+        Copy-Item -Path "$RepoRoot\zorya.toml" -Destination "$InstallDir\zorya.toml" -ErrorAction SilentlyContinue
+    }
 }
 
 $RegDirectX = "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences"

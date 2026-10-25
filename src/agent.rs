@@ -176,13 +176,18 @@ impl KeyVaultManager {
 
         *self.keys.write().await = map;
         *self.cursor.write().await = HashMap::new();
-        tracing::info!("KeyVaultManager recarregado com sucesso via hot-reload a partir de ZoryaConfig");
+        tracing::info!(
+            "KeyVaultManager recarregado com sucesso via hot-reload a partir de ZoryaConfig"
+        );
     }
 
     // PT: Seleciona chave saudável com cache de validação de 24h e rotação round-robin
     // EN: Selects a healthy key with 24h validation cache and round-robin rotation
     pub async fn acquire_key(&self, provider: &str) -> anyhow::Result<String> {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let mut keys_guard = self.keys.write().await;
         let entries = keys_guard
             .get_mut(provider)
@@ -248,7 +253,10 @@ impl KeyVaultManager {
                 .unwrap_or(false),
             "gemini" => self
                 .http_client
-                .get(format!("https://generativelanguage.googleapis.com/v1beta/models?key={}", key))
+                .get(format!(
+                    "https://generativelanguage.googleapis.com/v1beta/models?key={}",
+                    key
+                ))
                 .send()
                 .await
                 .map(|r| r.status().is_success())
@@ -360,14 +368,22 @@ impl ZoryaAgent {
 
     // PT: Roteamento inteligente em 5 níveis conforme disponibilidade de Nitro, VPS e chaves Cloud
     // EN: 5-tier intelligent routing based on Nitro, VPS and Cloud keys availability
-    pub async fn execute_routed(&self, req: AgentTaskRequest, nitro_peer_url: Option<String>, vps_peer_url: Option<String>) -> Value {
-        let is_heavy = req.heavy_task.unwrap_or_else(|| req.prompt.len() > 1200);
+    pub async fn execute_routed(
+        &self,
+        req: AgentTaskRequest,
+        nitro_peer_url: Option<String>,
+        vps_peer_url: Option<String>,
+    ) -> Value {
+        let is_heavy = req.heavy_task.unwrap_or(req.prompt.len() > 1200);
         let t0 = Instant::now();
 
         // 1. Nitro online via Tailscale ou IP direto -> usar para tarefas pesadas
         if is_heavy {
             if let Some(nitro_url) = nitro_peer_url.as_deref() {
-                if let Ok(res) = self.delegate_remote(nitro_url, "/v1/chat/completions", &req).await {
+                if let Ok(res) = self
+                    .delegate_remote(nitro_url, "/v1/chat/completions", &req)
+                    .await
+                {
                     return json!({
                         "status": "ok",
                         "routed_to": "zorya_nitro",
@@ -385,7 +401,9 @@ impl ZoryaAgent {
                 messages: vec![
                     ChatMessage {
                         role: "system".to_string(),
-                        content: json!(req.system.clone().unwrap_or_else(|| "Você é o cérebro Qwen 2.5 do Zorya v3.0.".to_string())),
+                        content: json!(req.system.clone().unwrap_or_else(|| {
+                            "Você é o cérebro Qwen 2.5 do Zorya v3.0.".to_string()
+                        })),
                         tool_calls: None,
                     },
                     ChatMessage {
@@ -414,7 +432,10 @@ impl ZoryaAgent {
 
         // 3. Nitro offline -> VPS com modelo menor (qwen2.5-3b-instruct-q4_k_m.gguf)
         if let Some(vps_url) = vps_peer_url.as_deref() {
-            if let Ok(res) = self.delegate_remote(vps_url, "/v1/chat/completions", &req).await {
+            if let Ok(res) = self
+                .delegate_remote(vps_url, "/v1/chat/completions", &req)
+                .await
+            {
                 return json!({
                     "status": "ok",
                     "routed_to": "mini_zorya_vps",
@@ -425,7 +446,14 @@ impl ZoryaAgent {
         }
 
         // 4. VPS e Nitro offline -> Groq / Gemini com chaves disponíveis e rotação automática
-        if let Ok(groq_res) = self.call_groq(&req.prompt, req.system.as_deref(), Some("openai/gpt-oss-120b")).await {
+        if let Ok(groq_res) = self
+            .call_groq(
+                &req.prompt,
+                req.system.as_deref(),
+                Some("openai/gpt-oss-120b"),
+            )
+            .await
+        {
             return json!({
                 "status": "ok",
                 "routed_to": "groq_cloud",
@@ -454,7 +482,12 @@ impl ZoryaAgent {
         })
     }
 
-    pub async fn call_groq(&self, prompt: &str, system: Option<&str>, model: Option<&str>) -> anyhow::Result<String> {
+    pub async fn call_groq(
+        &self,
+        prompt: &str,
+        system: Option<&str>,
+        model: Option<&str>,
+    ) -> anyhow::Result<String> {
         let chosen_model = model
             .filter(|m| VALID_GROQ_MODELS.contains(m))
             .unwrap_or("openai/gpt-oss-120b");
@@ -526,8 +559,17 @@ impl ZoryaAgent {
         Ok(text)
     }
 
-    async fn delegate_remote(&self, base_url: &str, endpoint: &str, req: &AgentTaskRequest) -> anyhow::Result<String> {
-        let url = format!("{}/{}", base_url.trim_end_matches('/'), endpoint.trim_start_matches('/'));
+    async fn delegate_remote(
+        &self,
+        base_url: &str,
+        endpoint: &str,
+        req: &AgentTaskRequest,
+    ) -> anyhow::Result<String> {
+        let url = format!(
+            "{}/{}",
+            base_url.trim_end_matches('/'),
+            endpoint.trim_start_matches('/')
+        );
         let resp = self
             .http_client
             .post(&url)

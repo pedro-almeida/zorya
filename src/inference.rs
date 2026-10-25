@@ -370,7 +370,9 @@ impl NativeInferenceEngine {
                         if let Some(g_obj) = val.get("groq").and_then(|v| v.as_object()) {
                             for (_, v) in g_obj {
                                 if let Some(s) = v.as_str() {
-                                    if s.trim().len() > 10 && !groq_keys.contains(&s.trim().to_string()) {
+                                    if s.trim().len() > 10
+                                        && !groq_keys.contains(&s.trim().to_string())
+                                    {
                                         groq_keys.push(s.trim().to_string());
                                     }
                                 }
@@ -379,7 +381,9 @@ impl NativeInferenceEngine {
                         if let Some(m_obj) = val.get("gemini").and_then(|v| v.as_object()) {
                             for (_, v) in m_obj {
                                 if let Some(s) = v.as_str() {
-                                    if s.trim().len() > 10 && !gemini_keys.contains(&s.trim().to_string()) {
+                                    if s.trim().len() > 10
+                                        && !gemini_keys.contains(&s.trim().to_string())
+                                    {
                                         gemini_keys.push(s.trim().to_string());
                                     }
                                 }
@@ -454,7 +458,8 @@ impl NativeInferenceEngine {
                         if let Some(txt) = body["choices"][0]["message"]["content"].as_str() {
                             if !txt.trim().is_empty() {
                                 if body.get("usage").is_none() {
-                                    let prompt_tokens = ((system_text.len() + user_text.len()) / 4).max(1);
+                                    let prompt_tokens =
+                                        ((system_text.len() + user_text.len()) / 4).max(1);
                                     let completion_tokens = (txt.len() / 4).max(1);
                                     body["usage"] = json!({
                                         "prompt_tokens": prompt_tokens,
@@ -507,7 +512,8 @@ impl NativeInferenceEngine {
                         let q_headers = headers.clone();
                         let q_code = status.as_u16();
                         tokio::spawn(async move {
-                            qr.parse_groq_ratelimit_headers(&q_model, &q_headers, q_code).await;
+                            qr.parse_groq_ratelimit_headers(&q_model, &q_headers, q_code)
+                                .await;
                         });
                     }
 
@@ -516,7 +522,8 @@ impl NativeInferenceEngine {
                             if let Some(txt) = body["choices"][0]["message"]["content"].as_str() {
                                 if !txt.trim().is_empty() {
                                     let elapsed_ms = start.elapsed().as_millis() as u64;
-                                    let prompt_tokens = ((system_text.len() + user_text.len()) / 4).max(1);
+                                    let prompt_tokens =
+                                        ((system_text.len() + user_text.len()) / 4).max(1);
                                     let completion_tokens = (txt.len() / 4).max(1);
                                     return Ok(json!({
                                         "id": format!("chatcmpl-zorya-groq-{}", elapsed_ms),
@@ -577,7 +584,13 @@ impl NativeInferenceEngine {
                         let q_body = body.clone();
                         let q_code = status.as_u16();
                         tokio::spawn(async move {
-                            qr.parse_gemini_quota_state("gemini-2.5-flash", &q_headers, Some(&q_body), q_code).await;
+                            qr.parse_gemini_quota_state(
+                                "gemini-2.5-flash",
+                                &q_headers,
+                                Some(&q_body),
+                                q_code,
+                            )
+                            .await;
                         });
                     }
 
@@ -585,13 +598,16 @@ impl NativeInferenceEngine {
                         if let Some(parts) = body["candidates"][0]["content"]["parts"].as_array() {
                             let combined: String = parts
                                 .iter()
-                                .filter(|p| !p.get("thought").and_then(|t| t.as_bool()).unwrap_or(false))
+                                .filter(|p| {
+                                    !p.get("thought").and_then(|t| t.as_bool()).unwrap_or(false)
+                                })
                                 .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
                                 .collect::<Vec<_>>()
                                 .join("");
                             if !combined.trim().is_empty() {
                                 let elapsed_ms = start.elapsed().as_millis() as u64;
-                                let prompt_tokens = ((system_text.len() + user_text.len()) / 4).max(1);
+                                let prompt_tokens =
+                                    ((system_text.len() + user_text.len()) / 4).max(1);
                                 let completion_tokens = (combined.len() / 4).max(1);
                                 return Ok(json!({
                                     "id": format!("chatcmpl-zorya-gemini-{}", elapsed_ms),
@@ -623,8 +639,15 @@ impl NativeInferenceEngine {
 
         // 4. Tenta Provedor OpenRouter Condicional (se chave configurada e ativa)
         let main_cfg = crate::main_config_snapshot();
-        if main_cfg.credentials.openrouter_enabled && !main_cfg.credentials.openrouter_keys.is_empty() {
-            let or_model = if !main_cfg.credentials.openrouter_default_model.trim().is_empty() {
+        if main_cfg.credentials.openrouter_enabled
+            && !main_cfg.credentials.openrouter_keys.is_empty()
+        {
+            let or_model = if !main_cfg
+                .credentials
+                .openrouter_default_model
+                .trim()
+                .is_empty()
+            {
                 main_cfg.credentials.openrouter_default_model.trim()
             } else {
                 "qwen/qwen3-32b:free"
@@ -657,7 +680,8 @@ impl NativeInferenceEngine {
                             if let Some(txt) = body["choices"][0]["message"]["content"].as_str() {
                                 if !txt.trim().is_empty() {
                                     let elapsed_ms = start.elapsed().as_millis() as u64;
-                                    let prompt_tokens = ((system_text.len() + user_text.len()) / 4).max(1);
+                                    let prompt_tokens =
+                                        ((system_text.len() + user_text.len()) / 4).max(1);
                                     let completion_tokens = (txt.len() / 4).max(1);
                                     return Ok(json!({
                                         "id": format!("chatcmpl-zorya-openrouter-{}", elapsed_ms),
@@ -695,7 +719,13 @@ impl NativeInferenceEngine {
     pub async fn fetch_and_triage_openalex(&self, clean_topic: &str) -> Vec<OpenAlexPaper> {
         let encoded_query: String = clean_topic
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == ' ' { c } else { ' ' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == ' ' {
+                    c
+                } else {
+                    ' '
+                }
+            })
             .collect::<String>()
             .split_whitespace()
             .collect::<Vec<_>>()
@@ -713,7 +743,10 @@ impl NativeInferenceEngine {
         let resp = match self
             .http_client
             .get(&url)
-            .header("User-Agent", "SvitloZoryaAgon/3.0 (mailto:pedro@espectroipe.com.br)")
+            .header(
+                "User-Agent",
+                "SvitloZoryaAgon/3.0 (mailto:pedro@espectroipe.com.br)",
+            )
             .timeout(Duration::from_secs(8))
             .send()
             .await
@@ -736,7 +769,12 @@ impl NativeInferenceEngine {
             .to_lowercase()
             .split_whitespace()
             .filter(|w| w.chars().count() >= 3)
-            .filter(|w| !["sobre", "para", "como", "qual", "quais", "fale", "explique", "estudo"].contains(w))
+            .filter(|w| {
+                ![
+                    "sobre", "para", "como", "qual", "quais", "fale", "explique", "estudo",
+                ]
+                .contains(w)
+            })
             .map(|w| w.to_string())
             .collect();
 
@@ -753,7 +791,8 @@ impl NativeInferenceEngine {
                 continue;
             }
 
-            let abstract_text = Self::reconstruct_inverted_abstract(work.get("abstract_inverted_index"));
+            let abstract_text =
+                Self::reconstruct_inverted_abstract(work.get("abstract_inverted_index"));
             if abstract_text.len() < 80 {
                 continue;
             }
@@ -880,11 +919,17 @@ impl NativeInferenceEngine {
         // 1. Tenta Wikipedia REST API (EN e PT)
         for lang in ["en", "pt"] {
             let slug = query.replace(' ', "_");
-            let wiki_url = format!("https://{}.wikipedia.org/api/rest_v1/page/summary/{}", lang, slug);
+            let wiki_url = format!(
+                "https://{}.wikipedia.org/api/rest_v1/page/summary/{}",
+                lang, slug
+            );
             if let Ok(resp) = self
                 .http_client
                 .get(&wiki_url)
-                .header("User-Agent", "SvitloZorya/3.0 (mailto:pedro@espectroipe.com.br)")
+                .header(
+                    "User-Agent",
+                    "SvitloZorya/3.0 (mailto:pedro@espectroipe.com.br)",
+                )
                 .timeout(Duration::from_secs(4))
                 .send()
                 .await
@@ -898,7 +943,11 @@ impl NativeInferenceEngine {
                             .unwrap_or("");
                         if !thumb.is_empty() {
                             if let Some(data_uri) = self.download_image_as_data_uri(thumb).await {
-                                return (data_uri, thumb.to_string(), format!("Wikipedia ({})", lang.to_uppercase()));
+                                return (
+                                    data_uri,
+                                    thumb.to_string(),
+                                    format!("Wikipedia ({})", lang.to_uppercase()),
+                                );
                             }
                         }
                     }
@@ -910,10 +959,13 @@ impl NativeInferenceEngine {
         let prompt_clean: String = if !ai_prompt.trim().is_empty() {
             ai_prompt.trim().chars().take(180).collect()
         } else {
-            format!("Detailed scientific textbook diagram of {}: {}", topic, front)
-                .chars()
-                .take(180)
-                .collect()
+            format!(
+                "Detailed scientific textbook diagram of {}: {}",
+                topic, front
+            )
+            .chars()
+            .take(180)
+            .collect()
         };
         let encoded_prompt: String = prompt_clean
             .chars()
@@ -930,7 +982,11 @@ impl NativeInferenceEngine {
             202610 + idx
         );
         if let Some(data_uri) = self.download_image_as_data_uri(&ai_url).await {
-            return (data_uri, ai_url, "IA Generativa (Flux Scientific)".to_string());
+            return (
+                data_uri,
+                ai_url,
+                "IA Generativa (Flux Scientific)".to_string(),
+            );
         }
 
         (String::new(), String::new(), String::new())
@@ -940,7 +996,10 @@ impl NativeInferenceEngine {
         let resp = self
             .http_client
             .get(url)
-            .header("User-Agent", "SvitloZorya/3.0 (mailto:pedro@espectroipe.com.br)")
+            .header(
+                "User-Agent",
+                "SvitloZorya/3.0 (mailto:pedro@espectroipe.com.br)",
+            )
             .timeout(Duration::from_secs(6))
             .send()
             .await
@@ -965,7 +1024,11 @@ impl NativeInferenceEngine {
         if bytes.len() < 512 {
             return None;
         }
-        Some(format!("data:{};base64,{}", ctype, BASE64_STD.encode(&bytes)))
+        Some(format!(
+            "data:{};base64,{}",
+            ctype,
+            BASE64_STD.encode(&bytes)
+        ))
     }
 
     /// Gera estudo estruturado completo Svitlo com triagem OpenAlex, síntese profunda, Feynman, Cornell, Mermaid v11.17.2 e VectorCraft SVG em cada card.
@@ -1051,15 +1114,16 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido.";
             }
             if let Some(content_str) = llm_resp["choices"][0]["message"]["content"].as_str() {
                 let trimmed = content_str.trim();
-                let json_slice = if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
-                    if start < end {
-                        &trimmed[start..=end]
+                let json_slice =
+                    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
+                        if start < end {
+                            &trimmed[start..=end]
+                        } else {
+                            trimmed
+                        }
                     } else {
                         trimmed
-                    }
-                } else {
-                    trimmed
-                };
+                    };
                 if let Ok(val) = serde_json::from_str::<Value>(json_slice) {
                     if val.is_object() {
                         parsed_json = Some(val);
@@ -1179,7 +1243,10 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido.";
                             .unwrap_or("")
                             .trim()
                             .to_string();
-                        if front.is_empty() || back.is_empty() || front.starts_with("TEMA ACADÊMICO:") {
+                        if front.is_empty()
+                            || back.is_empty()
+                            || front.starts_with("TEMA ACADÊMICO:")
+                        {
                             continue;
                         }
                         let teacher = c
@@ -1187,15 +1254,32 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido.";
                             .and_then(|v| v.as_str())
                             .filter(|s| !s.trim().is_empty())
                             .map(|s| s.to_string())
-                            .unwrap_or_else(|| format!("Fixação essencial sobre {}: {}", clean_topic, back));
+                            .unwrap_or_else(|| {
+                                format!("Fixação essencial sobre {}: {}", clean_topic, back)
+                            });
 
                         let card_svg = build_card_vectorcraft_svg(&clean_topic, &front, &back, idx);
-                        let card_data_url = format!("data:image/svg+xml;base64,{}", BASE64_STD.encode(card_svg.as_bytes()));
+                        let card_data_url = format!(
+                            "data:image/svg+xml;base64,{}",
+                            BASE64_STD.encode(card_svg.as_bytes())
+                        );
 
-                        let img_query = c.get("image_query").and_then(|v| v.as_str()).unwrap_or(&clean_topic);
-                        let ai_prompt = c.get("ai_image_prompt").and_then(|v| v.as_str()).unwrap_or(&front);
+                        let img_query = c
+                            .get("image_query")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&clean_topic);
+                        let ai_prompt = c
+                            .get("ai_image_prompt")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&front);
                         let (rich_data_uri, rich_url, rich_source) = self
-                            .resolve_card_wikimedia_or_ai_image(&clean_topic, &front, img_query, ai_prompt, idx)
+                            .resolve_card_wikimedia_or_ai_image(
+                                &clean_topic,
+                                &front,
+                                img_query,
+                                ai_prompt,
+                                idx,
+                            )
                             .await;
                         let final_data_url = if !rich_data_uri.is_empty() {
                             rich_data_uri
@@ -1209,15 +1293,18 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido.";
                         };
 
                         let citation_val = c.get("citation").cloned().or_else(|| {
-                            triaged_papers.get(idx % triaged_papers.len().max(1)).map(|p| {
-                                json!({
-                                    "authors": p.authors,
-                                    "year": p.year,
-                                    "title": p.title,
-                                    "doi": p.doi,
-                                    "url": p.url
+                            triaged_papers
+                                .get(idx % triaged_papers.len().max(1))
+                                .map(|p| {
+                                    json!({
+                                        "authors": p.authors,
+                                        "year": p.year,
+                                        "title": p.title,
+                                        "doi": p.doi,
+                                        "url": p.url
+                                    })
                                 })
-                            }).or_else(|| default_citation.clone())
+                                .or_else(|| default_citation.clone())
                         });
 
                         cards.push(json!({
@@ -1384,7 +1471,13 @@ pub fn extract_pure_student_text(raw: &str, explicit_student_text: Option<&str>)
 pub fn sanitize_mermaid_v11(raw: &str, fallback_topic: &str) -> String {
     let safe_topic: String = fallback_topic
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' { c } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -1405,7 +1498,8 @@ pub fn sanitize_mermaid_v11(raw: &str, fallback_topic: &str) -> String {
         .trim_end_matches("```")
         .trim();
 
-    if trimmed.is_empty() || (!trimmed.starts_with("graph ") && !trimmed.starts_with("flowchart ")) {
+    if trimmed.is_empty() || (!trimmed.starts_with("graph ") && !trimmed.starts_with("flowchart "))
+    {
         return format!(
             "graph TD\n  A[\"{}\"] --> B[\"Fundamentos e Mecanismos\"]\n  A --> C[\"Evidências Científicas\"]\n  A --> D[\"Aplicação Prática\"]",
             topic_label
@@ -1440,7 +1534,10 @@ pub fn sanitize_mermaid_v11(raw: &str, fallback_topic: &str) -> String {
                     .trim_matches('\'')
                     .chars()
                     .map(|c| {
-                        if matches!(c, '"' | '[' | ']' | '{' | '}' | '(' | ')' | ';' | '|' | '<' | '>' | ':') {
+                        if matches!(
+                            c,
+                            '"' | '[' | ']' | '{' | '}' | '(' | ')' | ';' | '|' | '<' | '>' | ':'
+                        ) {
                             ' '
                         } else {
                             c
@@ -1451,7 +1548,11 @@ pub fn sanitize_mermaid_v11(raw: &str, fallback_topic: &str) -> String {
                     .collect::<Vec<_>>()
                     .join(" ");
                 out.push('"');
-                out.push_str(if clean_inner.is_empty() { "Conceito" } else { &clean_inner });
+                out.push_str(if clean_inner.is_empty() {
+                    "Conceito"
+                } else {
+                    &clean_inner
+                });
                 out.push('"');
                 if i < chars.len() && chars[i] == ']' {
                     out.push(']');
@@ -1509,11 +1610,19 @@ fn xml_escape_card(s: &str) -> String {
 
 // PT: Extrai 3 cláusulas conceituais completas da resposta do card (evitando palavras soltas genéricas).
 // EN: Extracts 3 complete conceptual clauses from the card answer (avoiding generic single words).
-fn extract_three_analytical_pillars(back: &str, explanation: &str, topic: &str) -> Vec<(String, String)> {
+fn extract_three_analytical_pillars(
+    back: &str,
+    explanation: &str,
+    topic: &str,
+) -> Vec<(String, String)> {
     let combined = format!("{}. {}", back.trim(), explanation.trim());
     let mut clauses: Vec<String> = combined
         .split(|c| c == ';' || c == '.')
-        .map(|s| s.trim().trim_matches(|c: char| c == ',' || c == '-' || c == ':').to_string())
+        .map(|s| {
+            s.trim()
+                .trim_matches(|c: char| c == ',' || c == '-' || c == ':')
+                .to_string()
+        })
         .filter(|s| s.chars().count() >= 14)
         .collect();
 
@@ -1527,18 +1636,48 @@ fn extract_three_analytical_pillars(back: &str, explanation: &str, topic: &str) 
     }
 
     let stop = [
-        "existem", "três", "tres", "formas", "principais", "como", "para", "pelo", "pela",
-        "uma", "são", "sao", "que", "mais", "quase", "todos", "início", "inicio", "rápido",
-        "rapido", "qual", "quais", "este", "esta", "essas", "esses",
+        "existem",
+        "três",
+        "tres",
+        "formas",
+        "principais",
+        "como",
+        "para",
+        "pelo",
+        "pela",
+        "uma",
+        "são",
+        "sao",
+        "que",
+        "mais",
+        "quase",
+        "todos",
+        "início",
+        "inicio",
+        "rápido",
+        "rapido",
+        "qual",
+        "quais",
+        "este",
+        "esta",
+        "essas",
+        "esses",
     ];
-    let defaults = ["1. Conceito & Base", "2. Mecanismo & Achados", "3. Conduta & Implicação"];
+    let defaults = [
+        "1. Conceito & Base",
+        "2. Mecanismo & Achados",
+        "3. Conduta & Implicação",
+    ];
     let mut result = Vec::with_capacity(3);
 
     for i in 0..3 {
-        let clause = clauses
-            .get(i)
-            .cloned()
-            .unwrap_or_else(|| if i == 0 { back.to_string() } else { topic.to_string() });
+        let clause = clauses.get(i).cloned().unwrap_or_else(|| {
+            if i == 0 {
+                back.to_string()
+            } else {
+                topic.to_string()
+            }
+        });
         let meaningful: Vec<String> = clause
             .split_whitespace()
             .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
@@ -1638,10 +1777,7 @@ pub async fn handle_svitlo_generate(
     Json(mut req): Json<SvitloGenerateRequest>,
 ) -> Response {
     let _guard = state.systray.begin_ai_work();
-    let pure_student_content = extract_pure_student_text(
-        &req.content,
-        req.student_text.as_deref(),
-    );
+    let pure_student_content = extract_pure_student_text(&req.content, req.student_text.as_deref());
     req.content = pure_student_content.clone();
     req.student_text = Some(pure_student_content);
 
@@ -1665,7 +1801,10 @@ pub async fn handle_anki_generate_media(
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     let _guard = state.systray.begin_ai_work();
 
-    let pure_content = req.content.as_deref().map(|c| extract_pure_student_text(c, None));
+    let pure_content = req
+        .content
+        .as_deref()
+        .map(|c| extract_pure_student_text(c, None));
     let topic = req.topic.clone().unwrap_or_else(|| {
         req.front
             .as_deref()
@@ -1769,7 +1908,11 @@ pub async fn handle_load_model(
 ) -> Response {
     let _guard = state.systray.begin_ai_work();
     match state.inference.load_model(req).await {
-        Ok(info) => (StatusCode::OK, Json(json!({ "status": "loaded", "model": info }))).into_response(),
+        Ok(info) => (
+            StatusCode::OK,
+            Json(json!({ "status": "loaded", "model": info })),
+        )
+            .into_response(),
         Err(err) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "status": "error", "message": err.to_string() })),

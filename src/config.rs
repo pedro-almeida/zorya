@@ -3,10 +3,10 @@
 // AI: @llm-module config | @llm-context Compatibilidade total com seções [server], [vault]/[credentials], [inference]/[models], [cluster], [craft]
 // AI: @llm-invariant Persistência atômica via zorya.toml.tmp + fsync + rename; desserialização flexível de chaves e módulos
 
+use serde::{de, Deserialize, Deserializer, Serialize};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use serde::{de, Deserialize, Deserializer, Serialize};
 
 /// PT: Estrutura raiz de configuração do daemon Zorya v3.0
 /// EN: Root configuration structure for Zorya v3.0 daemon
@@ -60,15 +60,33 @@ pub struct ServerConfig {
     pub log_level: String,
 }
 
-fn default_host() -> String { "0.0.0.0".to_string() }
-fn default_port() -> u16 { 8085 }
-fn default_node_name() -> String { "Usina-Zorya-Nitro".to_string() }
-fn default_ts_ip() -> String { "100.106.120.35".to_string() }
-fn default_vps_endpoint() -> String { "https://svitlo.espectroipe.com.br".to_string() }
-fn default_csrf_secret() -> String { "zorya-csrf-secret-sovereign-2026".to_string() }
-fn default_true() -> bool { true }
-fn default_mcp_path() -> String { "/mcp/sse".to_string() }
-fn default_log_level() -> String { "info".to_string() }
+fn default_host() -> String {
+    "0.0.0.0".to_string()
+}
+fn default_port() -> u16 {
+    8085
+}
+fn default_node_name() -> String {
+    "Usina-Zorya-Nitro".to_string()
+}
+fn default_ts_ip() -> String {
+    "100.106.120.35".to_string()
+}
+fn default_vps_endpoint() -> String {
+    "https://svitlo.espectroipe.com.br".to_string()
+}
+fn default_csrf_secret() -> String {
+    "zorya-csrf-secret-sovereign-2026".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_mcp_path() -> String {
+    "/mcp/sse".to_string()
+}
+fn default_log_level() -> String {
+    "info".to_string()
+}
 
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -104,8 +122,12 @@ pub struct HardwareConfig {
     pub cpu_threads_override: usize,
 }
 
-fn default_auto() -> String { "auto".to_string() }
-fn default_vram() -> u64 { 4096 }
+fn default_auto() -> String {
+    "auto".to_string()
+}
+fn default_vram() -> u64 {
+    4096
+}
 
 impl Default for HardwareConfig {
     fn default() -> Self {
@@ -150,17 +172,39 @@ pub struct ModelsConfig {
     pub ttl_seconds: u64,
 }
 
-fn default_models_dir() -> String { "models".to_string() }
-fn default_nitro_model() -> String { "qwen2.5-7b-instruct-q4_k_m.gguf".to_string() }
-fn default_vps_model() -> String { "qwen2.5-3b-instruct-q4_k_m.gguf".to_string() }
-fn default_nitro_ctx() -> u32 { 8192 }
-fn default_vps_ctx() -> u32 { 2048 }
-fn default_batch() -> u32 { 512 }
-fn default_fast_model() -> String { "qwen2.5-3b-instruct-q4_k_m.gguf".to_string() }
-fn default_deep_model() -> String { "qwen2.5-7b-instruct-q4_k_m.gguf".to_string() }
-fn default_gpu_layers() -> u32 { 33 }
-fn default_max_tokens() -> u32 { 4096 }
-fn default_ttl_seconds() -> u64 { 3600 }
+fn default_models_dir() -> String {
+    "models".to_string()
+}
+fn default_nitro_model() -> String {
+    "qwen2.5-7b-instruct-q4_k_m.gguf".to_string()
+}
+fn default_vps_model() -> String {
+    "qwen2.5-3b-instruct-q4_k_m.gguf".to_string()
+}
+fn default_nitro_ctx() -> u32 {
+    8192
+}
+fn default_vps_ctx() -> u32 {
+    2048
+}
+fn default_batch() -> u32 {
+    512
+}
+fn default_fast_model() -> String {
+    "qwen2.5-3b-instruct-q4_k_m.gguf".to_string()
+}
+fn default_deep_model() -> String {
+    "qwen2.5-7b-instruct-q4_k_m.gguf".to_string()
+}
+fn default_gpu_layers() -> u32 {
+    33
+}
+fn default_max_tokens() -> u32 {
+    4096
+}
+fn default_ttl_seconds() -> u64 {
+    3600
+}
 
 impl Default for ModelsConfig {
     fn default() -> Self {
@@ -210,11 +254,21 @@ pub struct NetworkConfig {
     pub reconnect_interval_secs: u64,
 }
 
-fn default_headscale_url() -> String { "https://headscale.espectroipe.com.br".to_string() }
-fn default_hs_auth() -> String { "hskey-default".to_string() }
-fn default_allowed_ip() -> String { "0.0.0.0/0".to_string() }
-fn default_ts_api() -> String { "http://127.0.0.1:41112/localapi/v0/status".to_string() }
-fn default_30() -> u64 { 30 }
+fn default_headscale_url() -> String {
+    "https://headscale.espectroipe.com.br".to_string()
+}
+fn default_hs_auth() -> String {
+    "hskey-default".to_string()
+}
+fn default_allowed_ip() -> String {
+    "0.0.0.0/0".to_string()
+}
+fn default_ts_api() -> String {
+    "http://127.0.0.1:41112/localapi/v0/status".to_string()
+}
+fn default_30() -> u64 {
+    30
+}
 fn default_vps_ip() -> String {
     std::env::var("MRIYA_VPS_IP").unwrap_or_else(|_| "143.95.223.218".to_string())
 }
@@ -266,7 +320,9 @@ pub struct InferenceConfig {
     pub gpu_device_index: Option<u32>,
 }
 
-fn default_local_runtime_url() -> String { "http://127.0.0.1:8085".to_string() }
+fn default_local_runtime_url() -> String {
+    "http://127.0.0.1:8085".to_string()
+}
 
 impl Default for InferenceConfig {
     fn default() -> Self {
@@ -327,12 +383,24 @@ impl Default for CraftConfig {
     }
 }
 
-fn default_groq_primary_opt() -> Option<String> { Some("openai/gpt-oss-120b".to_string()) }
-fn default_groq_fast_opt() -> Option<String> { Some("openai/gpt-oss-20b".to_string()) }
-fn default_groq_multi_opt() -> Option<String> { Some("qwen/qwen3.8-27b".to_string()) }
-fn default_groq_whisper_opt() -> Option<String> { Some("whisper-large-v3".to_string()) }
-fn default_gemini_model_opt() -> Option<String> { Some("gemini-2.5-flash".to_string()) }
-fn default_openrouter_model() -> String { "qwen/qwen3-32b:free".to_string() }
+fn default_groq_primary_opt() -> Option<String> {
+    Some("openai/gpt-oss-120b".to_string())
+}
+fn default_groq_fast_opt() -> Option<String> {
+    Some("openai/gpt-oss-20b".to_string())
+}
+fn default_groq_multi_opt() -> Option<String> {
+    Some("qwen/qwen3.8-27b".to_string())
+}
+fn default_groq_whisper_opt() -> Option<String> {
+    Some("whisper-large-v3".to_string())
+}
+fn default_gemini_model_opt() -> Option<String> {
+    Some("gemini-2.5-flash".to_string())
+}
+fn default_openrouter_model() -> String {
+    "qwen/qwen3-32b:free".to_string()
+}
 
 /// PT: Cofre de chaves de API com desserializador tolerante a string/lista
 /// EN: API key vault with tolerant string/list deserializer
@@ -374,7 +442,9 @@ impl Default for CredentialsConfig {
             openrouter_keys: Vec::new(),
             openrouter_enabled: false,
             openrouter_default_model: default_openrouter_model(),
-            vps_credentials_path: Some("/var/www/mcp-server/credentials/credentials.json".to_string()),
+            vps_credentials_path: Some(
+                "/var/www/mcp-server/credentials/credentials.json".to_string(),
+            ),
             validation_cache_ttl_hours: Some(24),
             groq_primary_model: default_groq_primary_opt(),
             groq_fast_model: default_groq_fast_opt(),
@@ -398,7 +468,11 @@ impl CredentialsConfig {
     // PT: Mescla novas chaves enviadas pelo painel preservando chaves mascaradas (ex: gsk_...abcd) que já existem no cofre
     // EN: Merges new keys submitted from UI while preserving masked keys (e.g., gsk_...abcd) already present in vault
     // AI: @llm-func merge_submitted_keys @llm-invariant Nunca apaga chaves antigas quando o usuário envia linhas mascaradas junto com chaves novas
-    pub fn merge_submitted_keys(existing: &[String], submitted_raw: &str, force_clear: bool) -> Vec<String> {
+    pub fn merge_submitted_keys(
+        existing: &[String],
+        submitted_raw: &str,
+        force_clear: bool,
+    ) -> Vec<String> {
         if force_clear {
             return Vec::new();
         }
@@ -474,7 +548,9 @@ pub struct ClusterConfig {
     pub enable_p2p: bool,
 }
 
-fn default_role() -> String { "nitro".to_string() }
+fn default_role() -> String {
+    "nitro".to_string()
+}
 fn default_peer_endpoint() -> String {
     std::env::var("ZORYA_PEER_ENDPOINT")
         .unwrap_or_else(|_| "https://svitlo.espectroipe.com.br".to_string())
@@ -535,12 +611,14 @@ where
         {
             let is_comma_separated = value.contains(',') && !value.contains('\n');
             let items: Vec<String> = if is_comma_separated {
-                value.split(',')
+                value
+                    .split(',')
                     .map(|s| s.trim().to_string())
                     .filter(|s| is_valid_token(s))
                     .collect()
             } else {
-                value.lines()
+                value
+                    .lines()
                     .map(|s| s.trim().to_string())
                     .filter(|s| is_valid_token(s))
                     .collect()
@@ -571,9 +649,19 @@ fn is_valid_token(token: &str) -> bool {
         return false;
     }
     // Rejeita placeholders conhecidos
-    let placeholders = ["gsk_...", "aizasy...", "sk-...", "sk-or-v1-...", "********", "...", "hskey-default"];
+    let placeholders = [
+        "gsk_...",
+        "aizasy...",
+        "sk-...",
+        "sk-or-v1-...",
+        "********",
+        "...",
+        "hskey-default",
+    ];
     let lower = token.to_lowercase();
-    !placeholders.iter().any(|&p| lower == p || lower.ends_with("..."))
+    !placeholders
+        .iter()
+        .any(|&p| lower == p || lower.ends_with("..."))
 }
 
 impl ZoryaConfig {
@@ -633,7 +721,11 @@ impl ZoryaConfig {
 
         // Auto-ativação condicional do OpenRouter caso haja chave válida
         let env_or_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
-        let has_valid_or_key = parsed.credentials.openrouter_keys.iter().any(|k| k.starts_with("sk-or-v1-") && k.len() > 20)
+        let has_valid_or_key = parsed
+            .credentials
+            .openrouter_keys
+            .iter()
+            .any(|k| k.starts_with("sk-or-v1-") && k.len() > 20)
             || (env_or_key.starts_with("sk-or-v1-") && env_or_key.len() > 20);
 
         if has_valid_or_key {
@@ -651,7 +743,8 @@ impl ZoryaConfig {
             .enabled
             .iter()
             .any(|m| m.eq_ignore_ascii_case(module))
-            || self.cluster
+            || self
+                .cluster
                 .artcraft_modules
                 .iter()
                 .any(|m| m.eq_ignore_ascii_case(module))
@@ -663,7 +756,12 @@ impl ZoryaConfig {
     pub fn save_atomic(&self, path: &Path) -> anyhow::Result<()> {
         let serialized = toml::to_string_pretty(self)?;
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let tmp_path = parent.join(format!("{}.tmp", path.file_name().and_then(|f| f.to_str()).unwrap_or("zorya.toml")));
+        let tmp_path = parent.join(format!(
+            "{}.tmp",
+            path.file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or("zorya.toml")
+        ));
 
         {
             let mut file = File::create(&tmp_path)?;
@@ -679,7 +777,10 @@ impl ZoryaConfig {
         }
 
         if let Err(e) = std::fs::rename(&tmp_path, path) {
-            tracing::debug!("Rename direto falhou ({}), aplicando cópia resiliente...", e);
+            tracing::debug!(
+                "Rename direto falhou ({}), aplicando cópia resiliente...",
+                e
+            );
             std::fs::copy(&tmp_path, path)?;
             let _ = std::fs::remove_file(&tmp_path);
         }

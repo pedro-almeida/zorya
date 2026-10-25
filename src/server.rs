@@ -3,9 +3,6 @@
 // AI: @llm-context Expõe endpoints v3.0: /settings, /api/v1/settings, /api/v1/ai/quotas, /api/v1/ai/route, /api/v1/test/svitlo-openalex, ArtCraft e MCP SSE
 // AI: @llm-invariant Persistência atômica, sanitização contra Path Traversal, Headers OWASP e CSRF
 
-use std::net::SocketAddr;
-use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
 use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Multipart, State},
     http::{header, HeaderMap, Method, StatusCode},
@@ -14,6 +11,9 @@ use axum::{
     Json, Router,
 };
 use serde_json::json;
+use std::net::SocketAddr;
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use tower_http::cors::CorsLayer;
 
@@ -41,7 +41,9 @@ use crate::ui::render_svitlo_dashboard_html;
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<RwLock<ZoryaConfig>>,
+    pub config_path: Arc<RwLock<std::path::PathBuf>>,
     pub telemetry: Arc<RwLock<TelemetryCollector>>,
+    pub system_snapshot: Arc<RwLock<crate::telemetry::DetailedSystemSnapshot>>,
     pub network: Arc<NetworkManager>,
     pub inference: Arc<NativeInferenceEngine>,
     pub cluster: Arc<ClusterCoordinator>,
@@ -99,8 +101,7 @@ async fn sovereign_auth_middleware(
 
     let token_valid = (!expected_token.is_empty()
         && (bearer == expected_token || zorya_header == expected_token))
-        || (!hs_auth.is_empty()
-            && (bearer == hs_auth || zorya_header == hs_auth))
+        || (!hs_auth.is_empty() && (bearer == hs_auth || zorya_header == hs_auth))
         || (!shared_secret.is_empty()
             && (bearer == shared_secret || zorya_header == shared_secret))
         || (!csrf_header.is_empty() && validate_csrf_token(csrf_header));
@@ -151,20 +152,22 @@ pub fn is_safe_craft_path(raw_path: &str) -> bool {
 // Create unified Axum router with all mandatory endpoints / Cria roteador Axum unificado com todos os endpoints obrigatórios
 pub fn create_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
-        .allow_origin(tower_http::cors::AllowOrigin::predicate(|origin: &header::HeaderValue, _req_parts| {
-            if let Ok(s) = origin.to_str() {
-                s.ends_with(".espectroipe.com.br")
-                    || s == "https://espectroipe.com.br"
-                    || s.ends_with(".tenorio.fot.br")
-                    || s == "https://tenorio.fot.br"
-                    || s.starts_with("http://localhost")
-                    || s.starts_with("http://127.0.0.1")
-                    || s.starts_with("http://100.")
-                    || s.starts_with("https://100.")
-            } else {
-                false
-            }
-        }))
+        .allow_origin(tower_http::cors::AllowOrigin::predicate(
+            |origin: &header::HeaderValue, _req_parts| {
+                if let Ok(s) = origin.to_str() {
+                    s.ends_with(".espectroipe.com.br")
+                        || s == "https://espectroipe.com.br"
+                        || s.ends_with(".tenorio.fot.br")
+                        || s == "https://tenorio.fot.br"
+                        || s.starts_with("http://localhost")
+                        || s.starts_with("http://127.0.0.1")
+                        || s.starts_with("http://100.")
+                        || s.starts_with("https://100.")
+                } else {
+                    false
+                }
+            },
+        ))
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers([
             axum::http::header::CONTENT_TYPE,
@@ -175,7 +178,9 @@ pub fn create_router(state: AppState) -> Router {
             axum::http::HeaderName::from_static("x-requested-with"),
         ])
         .allow_credentials(true)
-        .expose_headers([header::HeaderName::from_static("access-control-allow-private-network")]);
+        .expose_headers([header::HeaderName::from_static(
+            "access-control-allow-private-network",
+        )]);
 
     let protected_routes = Router::new()
         // Settings Dashboard & Web UI (Svitlo Design System)
@@ -187,11 +192,26 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/config/save", post(handle_save_config_unified))
         .route("/settings", post(handle_save_config_unified))
         // Rotas Sensíveis ArtCraft
-        .route("/api/v1/image/cull", post(crate::craft::culling::handle_cull))
-        .route("/api/v1/image/colorspace", post(crate::craft::colorspace::handle_colorspace))
-        .route("/api/v1/voice/clone", post(crate::craft::voice::handle_voice_clone))
-        .route("/api/v1/pdf/extract", post(crate::craft::pdf::handle_pdf_extract))
-        .route_layer(axum::middleware::from_fn_with_state(state.clone(), sovereign_auth_middleware));
+        .route(
+            "/api/v1/image/cull",
+            post(crate::craft::culling::handle_cull),
+        )
+        .route(
+            "/api/v1/image/colorspace",
+            post(crate::craft::colorspace::handle_colorspace),
+        )
+        .route(
+            "/api/v1/voice/clone",
+            post(crate::craft::voice::handle_voice_clone),
+        )
+        .route(
+            "/api/v1/pdf/extract",
+            post(crate::craft::pdf::handle_pdf_extract),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            sovereign_auth_middleware,
+        ));
 
     Router::new()
         .merge(protected_routes)
@@ -209,9 +229,15 @@ pub fn create_router(state: AppState) -> Router {
         .route("/v1/models/unload", post(handle_unload_model))
         // Svitlo & Anki Cognitive Study Pipeline
         .route("/api/v1/svitlo/generate", post(handle_svitlo_generate))
-        .route("/api/v1/anki/generate-media", post(handle_anki_generate_media))
+        .route(
+            "/api/v1/anki/generate-media",
+            post(handle_anki_generate_media),
+        )
         // Diagnóstico e Teste Svitlo + OpenAlex
-        .route("/api/v1/test/svitlo-openalex", post(handle_test_svitlo_openalex))
+        .route(
+            "/api/v1/test/svitlo-openalex",
+            post(handle_test_svitlo_openalex),
+        )
         // Gestão de Cotas de IA (36 Modelos)
         .route("/api/v1/ai/quotas", get(handle_get_ai_quotas))
         .route("/api/v1/ai/quotas/reset", post(handle_reset_ai_quotas))
@@ -219,18 +245,45 @@ pub fn create_router(state: AppState) -> Router {
         // ZORYA-003: Agente Interno de IA com Tool Calling
         .route("/api/v1/agent/execute", post(handle_agent_execute))
         // ZORYA-006: Cluster Federado VPS + Nitro
-        .route("/api/v1/cluster/capabilities", get(handle_cluster_capabilities))
+        .route(
+            "/api/v1/cluster/capabilities",
+            get(handle_cluster_capabilities),
+        )
         .route("/api/v1/cluster/handshake", post(handle_cluster_handshake))
         // ArtCraft Suite (ZORYA-007 a ZORYA-014)
-        .route("/api/v1/image/denoise", post(crate::craft::denoise::handle_image_denoise))
-        .route("/api/v1/audio/master-dsp", post(crate::craft::audio_dsp::handle_audio_master))
-        .route("/api/v1/audio/denoise", post(crate::craft::audio_dsp::handle_audio_denoise))
-        .route("/api/v1/voice/tts", post(crate::craft::voice::handle_voice_tts))
-        .route("/api/v1/voice/embeddings", get(crate::craft::voice::handle_list_embeddings))
-        .route("/api/v1/vector/render", post(crate::craft::vector::handle_vector_diagram))
-        .route("/api/v1/video/teaser", post(crate::craft::video_teaser::handle_video_teaser))
+        .route(
+            "/api/v1/image/denoise",
+            post(crate::craft::denoise::handle_image_denoise),
+        )
+        .route(
+            "/api/v1/audio/master-dsp",
+            post(crate::craft::audio_dsp::handle_audio_master),
+        )
+        .route(
+            "/api/v1/audio/denoise",
+            post(crate::craft::audio_dsp::handle_audio_denoise),
+        )
+        .route(
+            "/api/v1/voice/tts",
+            post(crate::craft::voice::handle_voice_tts),
+        )
+        .route(
+            "/api/v1/voice/embeddings",
+            get(crate::craft::voice::handle_list_embeddings),
+        )
+        .route(
+            "/api/v1/vector/render",
+            post(crate::craft::vector::handle_vector_diagram),
+        )
+        .route(
+            "/api/v1/video/teaser",
+            post(crate::craft::video_teaser::handle_video_teaser),
+        )
         // Svitlo Video Pipeline (ZORYA-016)
-        .route("/api/v1/video/youtube-pipeline", post(crate::video::handle_youtube_pipeline))
+        .route(
+            "/api/v1/video/youtube-pipeline",
+            post(crate::video::handle_youtube_pipeline),
+        )
         // Endpoints Legados ArtCraft
         .route("/api/v1/raw/decode", post(raw_decode_handler))
         .route("/api/v1/vector/diagram", post(vector_diagram_handler))
@@ -247,16 +300,19 @@ pub fn create_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-// GET /health e GET /api/status -> {"status":"ok","online":true,"node":"usina-zorya","version":"3.0.0","port":8085,...}
-async fn health_handler(
-    State(state): State<AppState>,
-) -> Response {
-    let mut telemetry = state.telemetry.write().await;
-    let payload = telemetry.collect_health();
+// GET /health e GET /api/status -> {"status":"ok","online":true,"node":"usina-zorya","version":"1.0.0","port":8085,...}
+// PT: Responde instantaneamente em O(1) lendo o snapshot do background sem disputar lock de escrita com sysinfo
+// EN: Responds instantly in O(1) reading background snapshot without write lock contention against sysinfo
+// AI: @llm-route GET /health @llm-perf zero-lock-contention
+async fn health_handler(State(state): State<AppState>) -> Response {
+    let payload = state.system_snapshot.read().await.health.clone();
     Json(payload).into_response()
 }
 
 // GET /api/v1/system/info -> Full telemetry via sysinfo
+// PT: Responde com telemetria detalhada lendo o snapshot consolidado em memória sem travar thread assíncrona
+// EN: Responds with detailed telemetry reading consolidated memory snapshot without blocking async thread
+// AI: @llm-route GET /api/v1/system/info @llm-perf zero-blocking
 async fn system_info_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
@@ -269,16 +325,12 @@ async fn system_info_handler(
             .into_response();
     }
 
-    let mut telemetry = state.telemetry.write().await;
-    let info = telemetry.collect_detailed();
+    let info = state.system_snapshot.read().await.detailed.clone();
     Json(info).into_response()
 }
 
 // POST /api/v1/raw/decode -> Multipart RAW -> LightCraft -> JPEG/PNG
-async fn raw_decode_handler(
-    State(state): State<AppState>,
-    mut multipart: Multipart,
-) -> Response {
+async fn raw_decode_handler(State(state): State<AppState>, mut multipart: Multipart) -> Response {
     let _guard = state.systray.begin_work();
     let cfg = state.config.read().await;
 
@@ -381,10 +433,7 @@ async fn vector_diagram_handler(
 }
 
 // POST /api/v1/audio/master -> WAV/MP3 -> SoundCraft EBU R128 -> Mastered WAV file
-async fn audio_master_handler(
-    State(state): State<AppState>,
-    mut multipart: Multipart,
-) -> Response {
+async fn audio_master_handler(State(state): State<AppState>, mut multipart: Multipart) -> Response {
     let _guard = state.systray.begin_work();
     let cfg = state.config.read().await;
 
@@ -474,12 +523,12 @@ async fn audio_master_handler(
 }
 
 // Handler do Painel de Configurações Web HTML/CSS no padrão Svitlo Design System
+// PT: Renderiza o painel lendo a telemetria em O(1) do snapshot em background sem bloquear o runtime
+// EN: Renders dashboard reading telemetry in O(1) from background snapshot without blocking runtime
+// AI: @llm-route GET /settings @llm-perf zero-blocking
 pub async fn handle_settings_dashboard(State(state): State<AppState>) -> impl IntoResponse {
     let cfg = state.config.read().await.clone();
-    let telem = {
-        let mut t = state.telemetry.write().await;
-        t.collect_detailed()
-    };
+    let telem = state.system_snapshot.read().await.detailed.clone();
     let net_snap = state.network.status_snapshot().await;
     let tray_snap = state.systray.snapshot();
 
@@ -517,10 +566,30 @@ pub async fn handle_get_settings(State(state): State<AppState>) -> impl IntoResp
     let mut safe_cfg = cfg.clone();
 
     // Mascara chaves para segurança padrão
-    safe_cfg.credentials.groq_keys = safe_cfg.credentials.groq_keys.iter().map(|_| "********".to_string()).collect();
-    safe_cfg.credentials.gemini_keys = safe_cfg.credentials.gemini_keys.iter().map(|_| "********".to_string()).collect();
-    safe_cfg.credentials.openai_keys = safe_cfg.credentials.openai_keys.iter().map(|_| "********".to_string()).collect();
-    safe_cfg.credentials.openrouter_keys = safe_cfg.credentials.openrouter_keys.iter().map(|_| "********".to_string()).collect();
+    safe_cfg.credentials.groq_keys = safe_cfg
+        .credentials
+        .groq_keys
+        .iter()
+        .map(|_| "********".to_string())
+        .collect();
+    safe_cfg.credentials.gemini_keys = safe_cfg
+        .credentials
+        .gemini_keys
+        .iter()
+        .map(|_| "********".to_string())
+        .collect();
+    safe_cfg.credentials.openai_keys = safe_cfg
+        .credentials
+        .openai_keys
+        .iter()
+        .map(|_| "********".to_string())
+        .collect();
+    safe_cfg.credentials.openrouter_keys = safe_cfg
+        .credentials
+        .openrouter_keys
+        .iter()
+        .map(|_| "********".to_string())
+        .collect();
 
     (
         StatusCode::OK,
@@ -574,13 +643,26 @@ pub async fn handle_save_config_unified(
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     // 1. Validação de CSRF ou Bearer token
-    let csrf_header = headers.get("x-zorya-csrf").and_then(|v| v.to_str().ok()).unwrap_or("");
-    let csrf_body = payload.get("csrf_token").and_then(|v| v.as_str()).unwrap_or("");
-    let csrf = if !csrf_header.is_empty() { csrf_header } else { csrf_body };
+    let csrf_header = headers
+        .get("x-zorya-csrf")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let csrf_body = payload
+        .get("csrf_token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let csrf = if !csrf_header.is_empty() {
+        csrf_header
+    } else {
+        csrf_body
+    };
 
     if !validate_csrf_token(csrf) {
         // Checa se há autorização via Bearer antes de rejeitar
-        let auth = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).unwrap_or("");
+        let auth = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
         if !auth.starts_with("Bearer ") {
             tracing::warn!("Tentativa de salvamento sem CSRF válido ou Bearer token");
         }
@@ -593,7 +675,9 @@ pub async fn handle_save_config_unified(
         cfg.server.host = host.trim().to_string();
     }
     if let Some(port) = payload.get("port").and_then(|v| {
-        v.as_u64().map(|n| n as u16).or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        v.as_u64()
+            .map(|n| n as u16)
+            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
     }) {
         cfg.server.port = port;
     }
@@ -601,12 +685,24 @@ pub async fn handle_save_config_unified(
         cfg.server.node_name = nn.trim().to_string();
         cfg.network.node_name = nn.trim().to_string();
     }
-    if let Some(ts_ip) = payload.get("tailscale_ip").and_then(|v| v.as_str()).or_else(|| payload.get("tailscale_peer_hostname").and_then(|v| v.as_str())) {
+    if let Some(ts_ip) = payload
+        .get("tailscale_ip")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            payload
+                .get("tailscale_peer_hostname")
+                .and_then(|v| v.as_str())
+        })
+    {
         cfg.server.tailscale_ip = ts_ip.trim().to_string();
         cfg.network.tailscale_peer_hostname = Some(ts_ip.trim().to_string());
         cfg.network.fallback_nitro_ip = Some(ts_ip.trim().to_string());
     }
-    if let Some(ve) = payload.get("vps_endpoint").and_then(|v| v.as_str()).or_else(|| payload.get("peer_endpoint").and_then(|v| v.as_str())) {
+    if let Some(ve) = payload
+        .get("vps_endpoint")
+        .and_then(|v| v.as_str())
+        .or_else(|| payload.get("peer_endpoint").and_then(|v| v.as_str()))
+    {
         cfg.server.vps_endpoint = ve.trim().to_string();
         cfg.cluster.peer_endpoint = ve.trim().to_string();
     }
@@ -617,34 +713,49 @@ pub async fn handle_save_config_unified(
     if let Some(lru) = payload.get("local_runtime_url").and_then(|v| v.as_str()) {
         cfg.inference.local_runtime_url = lru.trim().to_string();
     }
-    if let Some(fm) = payload.get("fast_model").and_then(|v| v.as_str()).or_else(|| payload.get("fast_gguf").and_then(|v| v.as_str())) {
+    if let Some(fm) = payload
+        .get("fast_model")
+        .and_then(|v| v.as_str())
+        .or_else(|| payload.get("fast_gguf").and_then(|v| v.as_str()))
+    {
         cfg.models.fast_model = fm.trim().to_string();
         cfg.inference.fast_gguf = fm.trim().to_string();
     }
-    if let Some(dm) = payload.get("deep_model").and_then(|v| v.as_str()).or_else(|| payload.get("deep_gguf").and_then(|v| v.as_str())) {
+    if let Some(dm) = payload
+        .get("deep_model")
+        .and_then(|v| v.as_str())
+        .or_else(|| payload.get("deep_gguf").and_then(|v| v.as_str()))
+    {
         cfg.models.deep_model = dm.trim().to_string();
         cfg.inference.deep_gguf = dm.trim().to_string();
     }
     if let Some(gl) = payload.get("gpu_layers").and_then(|v| {
-        v.as_u64().map(|n| n as u32).or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        v.as_u64()
+            .map(|n| n as u32)
+            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
     }) {
         cfg.models.gpu_layers = gl;
         cfg.inference.gpu_layers = gl;
     }
     if let Some(ctx) = payload.get("context_size").and_then(|v| {
-        v.as_u64().map(|n| n as u32).or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        v.as_u64()
+            .map(|n| n as u32)
+            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
     }) {
         cfg.models.context_size = ctx;
         cfg.inference.ctx_size = ctx;
     }
     if let Some(mt) = payload.get("max_tokens").and_then(|v| {
-        v.as_u64().map(|n| n as u32).or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        v.as_u64()
+            .map(|n| n as u32)
+            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
     }) {
         cfg.models.max_tokens = mt;
         cfg.inference.max_output_tokens = mt;
     }
     if let Some(ttl) = payload.get("ttl_seconds").and_then(|v| {
-        v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        v.as_u64()
+            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
     }) {
         cfg.models.ttl_seconds = ttl;
         cfg.inference.vram_ttl_secs = ttl;
@@ -674,43 +785,94 @@ pub async fn handle_save_config_unified(
     if clear_groq {
         cfg.credentials.groq_keys = Vec::new();
     } else if let Some(s) = payload.get("groq_keys").and_then(|v| v.as_str()) {
-        cfg.credentials.groq_keys = crate::config::CredentialsConfig::merge_submitted_keys(&cfg.credentials.groq_keys, s, false);
+        cfg.credentials.groq_keys = crate::config::CredentialsConfig::merge_submitted_keys(
+            &cfg.credentials.groq_keys,
+            s,
+            false,
+        );
     } else if let Some(arr) = payload.get("groq_keys").and_then(|v| v.as_array()) {
-        let s = arr.iter().filter_map(|el| el.as_str()).collect::<Vec<_>>().join("\n");
-        cfg.credentials.groq_keys = crate::config::CredentialsConfig::merge_submitted_keys(&cfg.credentials.groq_keys, &s, false);
+        let s = arr
+            .iter()
+            .filter_map(|el| el.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        cfg.credentials.groq_keys = crate::config::CredentialsConfig::merge_submitted_keys(
+            &cfg.credentials.groq_keys,
+            &s,
+            false,
+        );
     }
 
     if clear_gemini {
         cfg.credentials.gemini_keys = Vec::new();
     } else if let Some(s) = payload.get("gemini_keys").and_then(|v| v.as_str()) {
-        cfg.credentials.gemini_keys = crate::config::CredentialsConfig::merge_submitted_keys(&cfg.credentials.gemini_keys, s, false);
+        cfg.credentials.gemini_keys = crate::config::CredentialsConfig::merge_submitted_keys(
+            &cfg.credentials.gemini_keys,
+            s,
+            false,
+        );
     } else if let Some(arr) = payload.get("gemini_keys").and_then(|v| v.as_array()) {
-        let s = arr.iter().filter_map(|el| el.as_str()).collect::<Vec<_>>().join("\n");
-        cfg.credentials.gemini_keys = crate::config::CredentialsConfig::merge_submitted_keys(&cfg.credentials.gemini_keys, &s, false);
+        let s = arr
+            .iter()
+            .filter_map(|el| el.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        cfg.credentials.gemini_keys = crate::config::CredentialsConfig::merge_submitted_keys(
+            &cfg.credentials.gemini_keys,
+            &s,
+            false,
+        );
     }
 
     if clear_openai {
         cfg.credentials.openai_keys = Vec::new();
     } else if let Some(s) = payload.get("openai_keys").and_then(|v| v.as_str()) {
-        cfg.credentials.openai_keys = crate::config::CredentialsConfig::merge_submitted_keys(&cfg.credentials.openai_keys, s, false);
+        cfg.credentials.openai_keys = crate::config::CredentialsConfig::merge_submitted_keys(
+            &cfg.credentials.openai_keys,
+            s,
+            false,
+        );
     } else if let Some(arr) = payload.get("openai_keys").and_then(|v| v.as_array()) {
-        let s = arr.iter().filter_map(|el| el.as_str()).collect::<Vec<_>>().join("\n");
-        cfg.credentials.openai_keys = crate::config::CredentialsConfig::merge_submitted_keys(&cfg.credentials.openai_keys, &s, false);
+        let s = arr
+            .iter()
+            .filter_map(|el| el.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        cfg.credentials.openai_keys = crate::config::CredentialsConfig::merge_submitted_keys(
+            &cfg.credentials.openai_keys,
+            &s,
+            false,
+        );
     }
 
     if clear_openrouter {
         cfg.credentials.openrouter_keys = Vec::new();
         cfg.credentials.auto_activate_openrouter();
     } else if let Some(s) = payload.get("openrouter_keys").and_then(|v| v.as_str()) {
-        cfg.credentials.openrouter_keys = crate::config::CredentialsConfig::merge_submitted_keys(&cfg.credentials.openrouter_keys, s, false);
+        cfg.credentials.openrouter_keys = crate::config::CredentialsConfig::merge_submitted_keys(
+            &cfg.credentials.openrouter_keys,
+            s,
+            false,
+        );
         cfg.credentials.auto_activate_openrouter();
     } else if let Some(arr) = payload.get("openrouter_keys").and_then(|v| v.as_array()) {
-        let s = arr.iter().filter_map(|el| el.as_str()).collect::<Vec<_>>().join("\n");
-        cfg.credentials.openrouter_keys = crate::config::CredentialsConfig::merge_submitted_keys(&cfg.credentials.openrouter_keys, &s, false);
+        let s = arr
+            .iter()
+            .filter_map(|el| el.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        cfg.credentials.openrouter_keys = crate::config::CredentialsConfig::merge_submitted_keys(
+            &cfg.credentials.openrouter_keys,
+            &s,
+            false,
+        );
         cfg.credentials.auto_activate_openrouter();
     }
 
-    if let Some(ordm) = payload.get("openrouter_default_model").and_then(|v| v.as_str()) {
+    if let Some(ordm) = payload
+        .get("openrouter_default_model")
+        .and_then(|v| v.as_str())
+    {
         if !ordm.trim().is_empty() {
             cfg.credentials.openrouter_default_model = ordm.trim().to_string();
         }
@@ -722,7 +884,10 @@ pub async fn handle_save_config_unified(
     if let Some(gf) = payload.get("groq_fast_model").and_then(|v| v.as_str()) {
         cfg.credentials.groq_fast_model = Some(gf.trim().to_string());
     }
-    if let Some(gm) = payload.get("groq_multilingual_model").and_then(|v| v.as_str()) {
+    if let Some(gm) = payload
+        .get("groq_multilingual_model")
+        .and_then(|v| v.as_str())
+    {
         cfg.credentials.groq_multilingual_model = Some(gm.trim().to_string());
     }
     if let Some(gw) = payload.get("groq_whisper_model").and_then(|v| v.as_str()) {
@@ -758,13 +923,18 @@ pub async fn handle_save_config_unified(
     }
 
     // Parâmetros de ArtCraft
-    if let Some(ddm) = payload.get("denoise_default_method").and_then(|v| v.as_str()) {
+    if let Some(ddm) = payload
+        .get("denoise_default_method")
+        .and_then(|v| v.as_str())
+    {
         if !ddm.trim().is_empty() {
             cfg.craft.denoise_default_method = Some(ddm.trim().to_string());
         }
     }
     if let Some(lufs) = payload.get("audio_target_lufs").and_then(|v| {
-        v.as_f64().map(|n| n as f32).or_else(|| v.as_str().and_then(|s| s.parse::<f32>().ok()))
+        v.as_f64()
+            .map(|n| n as f32)
+            .or_else(|| v.as_str().and_then(|s| s.parse::<f32>().ok()))
     }) {
         cfg.craft.audio_target_lufs = Some(lufs);
     }
@@ -775,15 +945,25 @@ pub async fn handle_save_config_unified(
     }
 
     // Módulos ArtCraft (array JSON ou string separada por vírgula)
-    let craft_mods: Option<Vec<String>> = if let Some(arr) = payload.get("craft_enabled").and_then(|v| v.as_array()) {
-        let list: Vec<String> = arr.iter().filter_map(|el| el.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-        Some(list)
-    } else if let Some(ce) = payload.get("craft_enabled").and_then(|v| v.as_str()) {
-        let list: Vec<String> = ce.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-        Some(list)
-    } else {
-        None
-    };
+    let craft_mods: Option<Vec<String>> =
+        if let Some(arr) = payload.get("craft_enabled").and_then(|v| v.as_array()) {
+            let list: Vec<String> = arr
+                .iter()
+                .filter_map(|el| el.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            Some(list)
+        } else if let Some(ce) = payload.get("craft_enabled").and_then(|v| v.as_str()) {
+            let list: Vec<String> = ce
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            Some(list)
+        } else {
+            None
+        };
     if let Some(mods) = craft_mods {
         if !mods.is_empty() {
             cfg.craft.enabled = mods.clone();
@@ -797,58 +977,151 @@ pub async fn handle_save_config_unified(
     let cfg_snapshot = cfg.clone();
     drop(cfg);
 
-    let save_path = std::path::Path::new("zorya.toml");
-    let canonical_path = save_path.canonicalize()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "zorya.toml".to_string());
-
-    // PT: Executa gravação em disco dentro de spawn_blocking para não travar a runtime assíncrona do Tokio
-    // EN: Run disk write inside spawn_blocking to prevent blocking Tokio async runtime
-    // AI: @llm-perf spawn-blocking-disk-io
     let cfg_to_save = cfg_snapshot.clone();
-    tokio::task::spawn_blocking(move || {
-        if let Err(e) = cfg_to_save.save_default() {
-            tracing::error!("Falha ao gravar zorya.toml em disco: {}", e);
+    let current_cfg_path = state.config_path.read().await.clone();
+
+    // PT: Grava atomicamente no config_path principal e nos caminhos espelho aguardando spawn_blocking antes do HTTP 200
+    // EN: Atomically save to primary config_path and mirror paths awaiting spawn_blocking before HTTP 200
+    // AI: @llm-func save_config_atomic_sync @llm-perf spawn-blocking-await
+    let save_res = tokio::task::spawn_blocking(move || -> anyhow::Result<std::path::PathBuf> {
+        let mut save_errors = Vec::new();
+        let mut saved_any = false;
+
+        // 1. Salva no caminho canônico atual do daemon
+        if let Err(e) = cfg_to_save.save_atomic(&current_cfg_path) {
+            save_errors.push(format!("{:?}: {}", current_cfg_path, e));
+        } else {
+            saved_any = true;
         }
-    });
 
-    let now_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+        // 2. Salva no caminho espelho local (./zorya.toml)
+        let local_path = std::path::PathBuf::from("zorya.toml");
+        if local_path != current_cfg_path {
+            if let Err(e) = cfg_to_save.save_atomic(&local_path) {
+                tracing::warn!("Falha ao espelhar configuração em {:?}: {}", local_path, e);
+            } else {
+                saved_any = true;
+            }
+        }
 
-    // PT: Dispara sincronização do OpenRouter e hot-reload de chaves em tokio::spawn assíncrono
-    // EN: Trigger OpenRouter sync and key reload in background asynchronous tokio::spawn
-    // AI: @llm-async background-key-reload
-    let or_keys = cfg_snapshot.credentials.openrouter_keys.clone();
-    let qr = Arc::clone(&state.quota_router);
-    let agent = Arc::clone(&state.agent);
-    let cfg_for_agent = cfg_snapshot.clone();
-    tokio::spawn(async move {
-        qr.sync_openrouter_status(&or_keys).await;
-        agent.key_vault.reload_from_config(&cfg_for_agent).await;
-    });
+        // 3. Salva no caminho espelho de sistema no Windows (C:\ProgramData\Zorya\zorya.toml)
+        #[cfg(target_os = "windows")]
+        {
+            let prog_data_dir = std::path::Path::new(r"C:\ProgramData\Zorya");
+            if prog_data_dir.exists() {
+                let prog_data = prog_data_dir.join("zorya.toml");
+                if prog_data != current_cfg_path {
+                    if let Err(e) = cfg_to_save.save_atomic(&prog_data) {
+                        tracing::warn!("Falha ao espelhar configuração em {:?}: {}", prog_data, e);
+                    } else {
+                        saved_any = true;
+                    }
+                }
+            }
+        }
 
-    // Feedback visual no systray
-    state.systray.transition(crate::systray::SystrayState::Idle, "Configurações sincronizadas em zorya.toml");
+        if saved_any {
+            Ok(current_cfg_path)
+        } else {
+            Err(anyhow::anyhow!(
+                "Falha ao persistir em todos os destinos: {}",
+                save_errors.join(", ")
+            ))
+        }
+    })
+    .await;
 
-    let mut sanitized = cfg_snapshot;
-    sanitized.credentials.groq_keys = sanitized.credentials.groq_keys.iter().map(|_| "********".to_string()).collect();
-    sanitized.credentials.gemini_keys = sanitized.credentials.gemini_keys.iter().map(|_| "********".to_string()).collect();
-    sanitized.credentials.openai_keys = sanitized.credentials.openai_keys.iter().map(|_| "********".to_string()).collect();
-    sanitized.credentials.openrouter_keys = sanitized.credentials.openrouter_keys.iter().map(|_| "********".to_string()).collect();
+    match save_res {
+        Ok(Ok(saved_path)) => {
+            let canonical_path = saved_path
+                .canonicalize()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| saved_path.to_string_lossy().to_string());
 
-    (
-        StatusCode::OK,
-        Json(json!({
-            "status": "ok",
-            "saved_at": now_epoch,
-            "config_path": canonical_path,
-            "config": sanitized,
-            "message": "Configurações gravadas atomicamente em zorya.toml com hot-reload ativo!"
-        })),
-    )
-        .into_response()
+            let now_epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            // PT: Dispara sincronização do OpenRouter e hot-reload de chaves em tokio::spawn assíncrono
+            // EN: Trigger OpenRouter sync and key reload in background asynchronous tokio::spawn
+            // AI: @llm-async background-key-reload
+            let or_keys = cfg_snapshot.credentials.openrouter_keys.clone();
+            let qr = Arc::clone(&state.quota_router);
+            let agent = Arc::clone(&state.agent);
+            let cfg_for_agent = cfg_snapshot.clone();
+            tokio::spawn(async move {
+                qr.sync_openrouter_status(&or_keys).await;
+                agent.key_vault.reload_from_config(&cfg_for_agent).await;
+            });
+
+            // Feedback visual no systray
+            state.systray.transition(
+                crate::systray::SystrayState::Idle,
+                "Configurações sincronizadas em zorya.toml",
+            );
+
+            let mut sanitized = cfg_snapshot;
+            sanitized.credentials.groq_keys = sanitized
+                .credentials
+                .groq_keys
+                .iter()
+                .map(|_| "********".to_string())
+                .collect();
+            sanitized.credentials.gemini_keys = sanitized
+                .credentials
+                .gemini_keys
+                .iter()
+                .map(|_| "********".to_string())
+                .collect();
+            sanitized.credentials.openai_keys = sanitized
+                .credentials
+                .openai_keys
+                .iter()
+                .map(|_| "********".to_string())
+                .collect();
+            sanitized.credentials.openrouter_keys = sanitized
+                .credentials
+                .openrouter_keys
+                .iter()
+                .map(|_| "********".to_string())
+                .collect();
+
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "status": "ok",
+                    "saved_at": now_epoch,
+                    "config_path": canonical_path,
+                    "config": sanitized,
+                    "message": "Configurações gravadas atomicamente em zorya.toml com hot-reload ativo!"
+                })),
+            )
+                .into_response()
+        }
+        Ok(Err(err)) => {
+            tracing::error!("Erro ao gravar zorya.toml: {}", err);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "message": format!("Erro ao salvar zorya.toml atomicamente: {}", err)
+                })),
+            )
+                .into_response()
+        }
+        Err(join_err) => {
+            tracing::error!("Erro na tarefa de salvamento em disco: {}", join_err);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "message": format!("Erro na tarefa de salvamento em disco: {}", join_err)
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 // PT: Handler que serve o favicon oficial (.ico) embutido diretamente no binário.
@@ -868,7 +1141,10 @@ pub async fn handle_test_svitlo_openalex(
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let start = std::time::Instant::now();
-    let topic = payload.get("topic").and_then(|v| v.as_str()).unwrap_or("Afasia de Broca");
+    let topic = payload
+        .get("topic")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Afasia de Broca");
 
     // Realiza roteamento e triagem
     let route = state.quota_router.route_task("summary", topic, 1500).await;
@@ -932,10 +1208,19 @@ pub async fn handle_route_ai_task(
     State(state): State<AppState>,
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let task_type = payload.get("task_type").and_then(|v| v.as_str()).unwrap_or("general_tasks");
+    let task_type = payload
+        .get("task_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("general_tasks");
     let prompt = payload.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-    let tokens = payload.get("approx_tokens").and_then(|v| v.as_u64()).unwrap_or(500) as u32;
+    let tokens = payload
+        .get("approx_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(500) as u32;
 
-    let decision = state.quota_router.route_task(task_type, prompt, tokens).await;
+    let decision = state
+        .quota_router
+        .route_task(task_type, prompt, tokens)
+        .await;
     Json(decision)
 }

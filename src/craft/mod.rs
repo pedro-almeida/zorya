@@ -10,10 +10,10 @@ pub mod vector;
 pub mod video_teaser;
 pub mod voice;
 
-use std::io::Cursor;
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::io::Cursor;
 
 // Output image format for RAW decoding / Formato de saída de imagem para decodificação RAW
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,8 +143,10 @@ pub fn decode_raw_with_lightcraft(
     let mut out_buf = Cursor::new(Vec::new());
     match format {
         RawOutputFormat::Jpeg => {
-            let mut encoder =
-                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out_buf, jpeg_quality.clamp(1, 100));
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+                &mut out_buf,
+                jpeg_quality.clamp(1, 100),
+            );
             encoder.encode_image(&enhanced)?;
         }
         RawOutputFormat::Png => {
@@ -253,25 +255,23 @@ fn apply_photocraft_classical_enhance(img: DynamicImage) -> DynamicImage {
     let raw = rgb.into_raw();
     let mut out = vec![0u8; raw.len()];
 
-    out.par_chunks_mut(3)
-        .enumerate()
-        .for_each(|(i, px_out)| {
-            let base = i * 3;
-            let r = raw[base] as f32 / 255.0;
-            let g = raw[base + 1] as f32 / 255.0;
-            let b = raw[base + 2] as f32 / 255.0;
+    out.par_chunks_mut(3).enumerate().for_each(|(i, px_out)| {
+        let base = i * 3;
+        let r = raw[base] as f32 / 255.0;
+        let g = raw[base + 1] as f32 / 255.0;
+        let b = raw[base + 2] as f32 / 255.0;
 
-            // Gentle S-curve tone mapping preserving skin texture / Curva S suave preservando textura de pele
-            let map_tone = |v: f32| -> u8 {
-                let c = v.clamp(0.0, 1.0);
-                let contrasted = (c - 0.5) * 1.04 + 0.5;
-                (contrasted.clamp(0.0, 1.0) * 255.0).round() as u8
-            };
+        // Gentle S-curve tone mapping preserving skin texture / Curva S suave preservando textura de pele
+        let map_tone = |v: f32| -> u8 {
+            let c = v.clamp(0.0, 1.0);
+            let contrasted = (c - 0.5) * 1.04 + 0.5;
+            (contrasted.clamp(0.0, 1.0) * 255.0).round() as u8
+        };
 
-            px_out[0] = map_tone(r);
-            px_out[1] = map_tone(g);
-            px_out[2] = map_tone(b);
-        });
+        px_out[0] = map_tone(r);
+        px_out[1] = map_tone(g);
+        px_out[2] = map_tone(b);
+    });
 
     DynamicImage::ImageRgb8(
         ImageBuffer::from_raw(width, height, out)
@@ -296,11 +296,15 @@ pub fn render_vector_diagram_svg(spec: &VectorDiagramSpec) -> anyhow::Result<Str
         h = height
     ));
     svg.push_str("  <defs>\n");
-    svg.push_str("    <linearGradient id=\"zoryaBg\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n");
+    svg.push_str(
+        "    <linearGradient id=\"zoryaBg\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n",
+    );
     svg.push_str("      <stop offset=\"0%\" stop-color=\"#FDFBF7\"/>\n");
     svg.push_str("      <stop offset=\"100%\" stop-color=\"#F4EFE6\"/>\n");
     svg.push_str("    </linearGradient>\n");
-    svg.push_str("    <filter id=\"nodeShadow\" x=\"-10%\" y=\"-10%\" width=\"120%\" height=\"120%\">\n");
+    svg.push_str(
+        "    <filter id=\"nodeShadow\" x=\"-10%\" y=\"-10%\" width=\"120%\" height=\"120%\">\n",
+    );
     svg.push_str("      <feDropShadow dx=\"0\" dy=\"4\" stdDeviation=\"6\" flood-color=\"#2C1F14\" flood-opacity=\"0.10\"/>\n");
     svg.push_str("    </filter>\n");
     svg.push_str("    <marker id=\"arrowHead\" viewBox=\"0 0 10 10\" refX=\"8\" refY=\"5\" markerWidth=\"6\" markerHeight=\"6\" orient=\"auto-start-reverse\">\n");
@@ -328,7 +332,11 @@ pub fn render_vector_diagram_svg(spec: &VectorDiagramSpec) -> anyhow::Result<Str
     let cols = cols.max(1);
     let card_w = 240.0f32;
     let card_h = 110.0f32;
-    let start_y = if spec.subtitle.is_some() { 140.0f32 } else { 120.0f32 };
+    let start_y = if spec.subtitle.is_some() {
+        140.0f32
+    } else {
+        120.0f32
+    };
     let gap_x = ((width as f32 - 64.0) / (cols as f32)).max(card_w + 24.0);
     let gap_y = 145.0f32;
 
@@ -369,10 +377,7 @@ pub fn render_vector_diagram_svg(spec: &VectorDiagramSpec) -> anyhow::Result<Str
 
     // Render nodes / Renderiza os nós
     for node in &spec.nodes {
-        let (nx, ny) = positions
-            .get(&node.id)
-            .copied()
-            .unwrap_or((48.0, start_y));
+        let (nx, ny) = positions.get(&node.id).copied().unwrap_or((48.0, start_y));
         let accent = node.color.as_deref().unwrap_or("#10B981");
 
         svg.push_str(&format!(
@@ -439,8 +444,10 @@ pub fn master_audio_ebu_r128(
     {
         // Real SoundCraft crate path: soundcraft_audio_io::decode + soundcraft_dsp::meter::LoudnessMeter + soundcraft_audio_io::encode / Caminho real das crates SoundCraft
         let (info, mut buf) = soundcraft_audio_io::decode(audio_bytes, ext_hint)?;
-        let mut meter =
-            soundcraft_dsp::meter::LoudnessMeter::new(info.sample_rate as f32, info.channels as usize);
+        let mut meter = soundcraft_dsp::meter::LoudnessMeter::new(
+            info.sample_rate as f32,
+            info.channels as usize,
+        );
         let frames = buf.frames();
         meter.process(&buf.channels, frames);
         let initial_lufs = meter.integrated_lufs();
@@ -459,8 +466,10 @@ pub fn master_audio_ebu_r128(
             }
         }
 
-        let mut post_meter =
-            soundcraft_dsp::meter::LoudnessMeter::new(info.sample_rate as f32, info.channels as usize);
+        let mut post_meter = soundcraft_dsp::meter::LoudnessMeter::new(
+            info.sample_rate as f32,
+            info.channels as usize,
+        );
         post_meter.process(&buf.channels, frames);
         let opts = soundcraft_audio_io::EncodeOptions::default();
         let wav_bytes = soundcraft_audio_io::encode(&buf, &opts)?;
@@ -525,7 +534,8 @@ pub fn master_audio_ebu_r128(
 fn parse_or_synthesize_pcm_f32(bytes: &[u8]) -> (u32, u16, Vec<f32>) {
     if bytes.len() > 44 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
         let channels = u16::from_le_bytes([bytes[22], bytes[23]]).clamp(1, 8);
-        let sample_rate = u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]).clamp(8000, 192000);
+        let sample_rate =
+            u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]).clamp(8000, 192000);
         let bits_per_sample = u16::from_le_bytes([bytes[34], bytes[35]]);
         let data_slice = &bytes[44..];
 
@@ -664,7 +674,10 @@ pub fn extract_pdf_document(
     let source_desc = file_path.unwrap_or("document.pdf");
     Ok(PdfExtractReport {
         page_count: 1,
-        extracted_text: format!("Conteúdo extraído fielmente de {} via PdfCraft (OCR={}).", source_desc, ocr),
+        extracted_text: format!(
+            "Conteúdo extraído fielmente de {} via PdfCraft (OCR={}).",
+            source_desc, ocr
+        ),
         ocr_applied: ocr,
         tables_found: 0,
     })
@@ -693,7 +706,10 @@ pub fn clone_and_synthesize_voice(
     let dummy_wav = encode_pcm16_wav(&[0.0; 16000], 16000, 1);
     Ok(VoiceSynthesizeResponse {
         status: "synthesized".to_string(),
-        profile_id: req.profile_id.clone().unwrap_or_else(|| "default_speaker".to_string()),
+        profile_id: req
+            .profile_id
+            .clone()
+            .unwrap_or_else(|| "default_speaker".to_string()),
         duration_seconds: 1.0,
         sample_rate: 16000,
         audio_base64: BASE64.encode(&dummy_wav),
@@ -729,28 +745,39 @@ pub fn render_deckcraft_presentation(title: &str, slides: &[String]) -> anyhow::
 /// EN: Video timeline orchestration and cutting via FilmCraft
 // AI: @llm-func process_filmcraft_timeline
 pub fn process_filmcraft_timeline(clips: &[String], output_path: &str) -> anyhow::Result<String> {
-    Ok(format!("FilmCraft timeline com {} clipes configurada para {}", clips.len(), output_path))
+    Ok(format!(
+        "FilmCraft timeline com {} clipes configurada para {}",
+        clips.len(),
+        output_path
+    ))
 }
 
 /// PT: Processamento de efeitos visuais e shaders via EffectCraft
 /// EN: Visual effects and shader processing via EffectCraft
 // AI: @llm-func apply_effectcraft_pipeline
 pub fn apply_effectcraft_pipeline(effect_name: &str, intensity: f32) -> anyhow::Result<String> {
-    Ok(format!("EffectCraft pipeline: {} com intensidade {:.2}", effect_name, intensity))
+    Ok(format!(
+        "EffectCraft pipeline: {} com intensidade {:.2}",
+        effect_name, intensity
+    ))
 }
 
 /// PT: Exportação de componentes e wireframes via FigCraft
 /// EN: Component and wireframe export via FigCraft
 // AI: @llm-func export_figcraft_components
 pub fn export_figcraft_components(component_id: &str) -> anyhow::Result<String> {
-    Ok(format!("FigCraft componente '{}' renderizado em SVG vetorial", component_id))
+    Ok(format!(
+        "FigCraft componente '{}' renderizado em SVG vetorial",
+        component_id
+    ))
 }
 
 /// PT: Gestão de tokens de design e temas via DesignCraft
 /// EN: Design token and theme management via DesignCraft
 // AI: @llm-func compile_designcraft_tokens
 pub fn compile_designcraft_tokens(theme_name: &str) -> anyhow::Result<String> {
-    Ok(format!("DesignCraft tokens compilados com sucesso para o tema '{}' (Svitlo Design System)", theme_name))
+    Ok(format!(
+        "DesignCraft tokens compilados com sucesso para o tema '{}' (Svitlo Design System)",
+        theme_name
+    ))
 }
-
-

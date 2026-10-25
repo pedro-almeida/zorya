@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/repo-icon.png" width="128" height="128" alt="Zorya Logo" />
+</p>
+
 # Zorya (Зоря)
 
 > *Зоря — a deusa eslava da aurora que abre as portas para o sol nascente.*

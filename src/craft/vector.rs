@@ -107,7 +107,13 @@ pub fn render_rich_svg(req: &VectorDiagramRequest) -> (String, u32, u32) {
             if let Some(rel) = &edge.relation {
                 let mx = (x1 + x2) / 2;
                 let my = (y1 + y2) / 2 - 8;
-                let rel_color = if is_kindle { "#000000" } else if is_dark { "#CBD5E1" } else { "#5C3D1E" };
+                let rel_color = if is_kindle {
+                    "#000000"
+                } else if is_dark {
+                    "#CBD5E1"
+                } else {
+                    "#5C3D1E"
+                };
                 body.push_str(&format!(
                     r##"<text x="{mx}" y="{my}" text-anchor="middle" fill="{rel_color}" font-family="Inter, Georgia, sans-serif" font-size="12" font-weight="700">{}</text>"##,
                     escape_xml(rel)
@@ -156,9 +162,27 @@ pub fn render_rich_svg(req: &VectorDiagramRequest) -> (String, u32, u32) {
         }
     }
 
-    let bg_fill = if is_kindle { "#FFFFFF" } else if is_dark { "#0F172A" } else { "#FAF7F2" };
-    let border_col = if is_kindle { "#000000" } else if is_dark { "#334155" } else { "#C9A84C" };
-    let title_col = if is_kindle { "#000000" } else if is_dark { "#F8FAFC" } else { "#5C3D1E" };
+    let bg_fill = if is_kindle {
+        "#FFFFFF"
+    } else if is_dark {
+        "#0F172A"
+    } else {
+        "#FAF7F2"
+    };
+    let border_col = if is_kindle {
+        "#000000"
+    } else if is_dark {
+        "#334155"
+    } else {
+        "#C9A84C"
+    };
+    let title_col = if is_kindle {
+        "#000000"
+    } else if is_dark {
+        "#F8FAFC"
+    } else {
+        "#5C3D1E"
+    };
 
     let svg = format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}">

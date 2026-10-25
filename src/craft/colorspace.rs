@@ -99,19 +99,19 @@ pub fn rgb_to_xyz_d65(r: f64, g: f64, b: f64, profile: ColorProfile) -> (f64, f6
 pub fn xyz_d65_to_rgb(x: f64, y: f64, z: f64, profile: ColorProfile) -> (f64, f64, f64) {
     match profile {
         ColorProfile::SRGB | ColorProfile::CMYK => (
-             3.2404542 * x - 1.5371385 * y - 0.4985314 * z,
+            3.2404542 * x - 1.5371385 * y - 0.4985314 * z,
             -0.9692660 * x + 1.8760108 * y + 0.0415560 * z,
-             0.0556434 * x - 0.2040259 * y + 1.0572252 * z,
+            0.0556434 * x - 0.2040259 * y + 1.0572252 * z,
         ),
         ColorProfile::AdobeRGB => (
-             2.0413690 * x - 0.5649464 * y - 0.3446944 * z,
+            2.0413690 * x - 0.5649464 * y - 0.3446944 * z,
             -0.9692660 * x + 1.8760108 * y + 0.0415560 * z,
-             0.0134474 * x - 0.1183897 * y + 1.0154096 * z,
+            0.0134474 * x - 0.1183897 * y + 1.0154096 * z,
         ),
         ColorProfile::DisplayP3 => (
-             2.4934969 * x - 0.9313836 * y - 0.4027108 * z,
+            2.4934969 * x - 0.9313836 * y - 0.4027108 * z,
             -0.8294890 * x + 1.7626641 * y + 0.0236247 * z,
-             0.0358458 * x - 0.0761724 * y + 0.9568845 * z,
+            0.0358458 * x - 0.0761724 * y + 0.9568845 * z,
         ),
     }
 }
@@ -140,7 +140,9 @@ pub fn srgb_to_cmyk_fogra39(r: f64, g: f64, b: f64) -> [f64; 4] {
     [c, m, y, k]
 }
 
-pub async fn handle_colorspace(Json(req): Json<ColorspaceRequest>) -> Result<Json<ColorspaceResponse>, (StatusCode, String)> {
+pub async fn handle_colorspace(
+    Json(req): Json<ColorspaceRequest>,
+) -> Result<Json<ColorspaceResponse>, (StatusCode, String)> {
     let rl = to_linear(0.85, req.source_profile);
     let gl = to_linear(0.42, req.source_profile);
     let bl = to_linear(0.21, req.source_profile);

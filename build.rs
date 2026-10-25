@@ -8,7 +8,10 @@ fn main() {
         let mut res = winres::WindowsResource::new();
         res.set_icon("assets/icon.ico");
         res.set("ProductName", "Zorya");
-        res.set("FileDescription", "Zorya Sovereign Rust AI & Multimedia Coprocessor Daemon");
+        res.set(
+            "FileDescription",
+            "Zorya Sovereign Rust AI & Multimedia Coprocessor Daemon",
+        );
         res.set("CompanyName", "Pedro Almeida");
         res.set("LegalCopyright", "Copyright (c) 2026 Pedro Almeida");
         if let Err(e) = res.compile() {
