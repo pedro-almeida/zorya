@@ -3,10 +3,13 @@
 // AI: @llm-module systray | @llm-context Ícone procedural vivo com respiração em standby, cintilância mística em IA e LED RJ45 em rede
 
 use serde::{Deserialize, Serialize};
+#[cfg(all(target_os = "windows", feature = "systray"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+#[cfg(all(target_os = "windows", feature = "systray"))]
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(all(target_os = "windows", feature = "systray"))]
 static LAST_BROWSER_OPEN_MS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +102,7 @@ impl SystrayController {
     /// PT: Abre navegador com proteção contra múltiplas abas concorrentes (debounce de 2000ms)
     /// EN: Open browser with concurrent tab debounce protection (2000ms debounce)
     /// AI: @llm-func open_browser_debounced @llm-debounce 2000ms
+    #[cfg(all(target_os = "windows", feature = "systray"))]
     fn open_browser_debounced(url: &str) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
