@@ -33,17 +33,10 @@ pub mod ui;
 pub mod video;
 
 use crate::config::ZoryaConfig;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Resolve o caminho de configuração buscando ZORYA_CONFIG, C:\ProgramData\Zorya\zorya.toml, ./zorya.toml e exe_dir/zorya.toml
 pub fn resolve_config_path_with_target() -> (ZoryaConfig, PathBuf) {
-    let has_keys = |c: &ZoryaConfig| -> bool {
-        !c.credentials.groq_keys.is_empty()
-            || !c.credentials.gemini_keys.is_empty()
-            || !c.credentials.openrouter_keys.is_empty()
-            || !c.credentials.openai_keys.is_empty()
-    };
-
     if let Ok(env_path) = std::env::var("ZORYA_CONFIG") {
         let p = PathBuf::from(env_path.trim());
         if p.exists() {
@@ -55,6 +48,15 @@ pub fn resolve_config_path_with_target() -> (ZoryaConfig, PathBuf) {
 
     #[cfg(target_os = "windows")]
     {
+        use std::path::Path;
+
+        let has_keys = |c: &ZoryaConfig| -> bool {
+            !c.credentials.groq_keys.is_empty()
+                || !c.credentials.gemini_keys.is_empty()
+                || !c.credentials.openrouter_keys.is_empty()
+                || !c.credentials.openai_keys.is_empty()
+        };
+
         let prog_dir = Path::new(r"C:\ProgramData\Zorya");
         let prog_file = prog_dir.join("zorya.toml");
         let local_file = PathBuf::from("zorya.toml");

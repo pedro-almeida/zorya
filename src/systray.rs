@@ -2,6 +2,8 @@
 // EN: Zorya v3.0 Dynamic Systray Manager with Procedural Animations and Browser Launch Debouncing
 // AI: @llm-module systray | @llm-context Ícone procedural vivo com respiração em standby, cintilância mística em IA e LED RJ45 em rede
 
+#![allow(dead_code, unused_imports)]
+
 use serde::{Deserialize, Serialize};
 #[cfg(all(target_os = "windows", feature = "systray"))]
 use std::sync::atomic::{AtomicU64, Ordering};

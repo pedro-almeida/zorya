@@ -101,6 +101,7 @@ impl HardwareProfile {
 
         let npu_detected = Self::probe_npu(&cpu_brand);
         let igpu_model = Self::probe_igpu();
+        #[allow(unused_mut)]
         let (mut nvidia_model, mut nvidia_vram_mb, mut nvidia_free_mb) = Self::probe_nvidia_cuda();
         #[cfg(target_os = "windows")]
         if nvidia_model.is_none() {
