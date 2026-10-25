@@ -48,8 +48,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Executar Linter (cargo clippy)
+        shell: bash
         run: |
-          cargo clippy --target ${{ matrix.target }} ${{ matrix.cargo_flags }} --all-targets || true
+          cargo clippy --target ${{ matrix.target }} ${{ matrix.cargo_flags }} --all-targets 2>&1 | tee output.txt || true
+          echo "### Clippy Output" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat output.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
           cargo clippy --target ${{ matrix.target }} ${{ matrix.cargo_flags }} --all-targets -- -D warnings
 
       - name: Executar Testes Automatizados (cargo test)
