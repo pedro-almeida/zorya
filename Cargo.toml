@@ -1,6 +1,6 @@
 [package]
 name = "zorya"
-version = "3.0.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["Pedro Luís Tenório <pedro@espectroipe.com.br>"]
 description = "Sovereign Rust AI & Multimedia Coprocessor Daemon (Axum + boringtun + Headscale + ArtCraft + MCP SSE)"
@@ -50,6 +50,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell"
 ] }
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winres = "0.1"
 
 [profile.release]
 opt-level = 3

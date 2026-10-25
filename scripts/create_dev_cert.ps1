@@ -56,6 +56,42 @@ try {
     $Store.Close()
     Write-Host "[OK] Registrado com sucesso em TrustedPublisher!" -ForegroundColor Green
 } catch {
+    Write-Host "[!] Aviso ao registrar em TrustedPublisher: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
+# Adicionar às Autoridades de Certificação Raiz Confiáveis do Usuário (Root)
+Write-Host "[+] Registrando em Autoridades de Certificação Raiz Confiáveis (Root)..." -ForegroundColor Yellow
+try {
+    $RootStore = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "CurrentUser")
+    $RootStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+    $RootStore.Add($Cert)
+    $RootStore.Close()
+    Write-Host "[OK] Registrado com sucesso em Root!" -ForegroundColor Green
+} catch {
+    Write-Host "[!] Aviso ao registrar em Root: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
+# Exclusão no Windows Defender se executado com privilégios de Administrador
+$IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if ($IsAdmin) {
+    Write-Host "[+] Configurando exclusões no Windows Defender para prevenir falso-positivos..." -ForegroundColor Cyan
+    $Exclusions = @(
+        "C:\Zorya",
+        "C:\ProgramData\Zorya",
+        "$env:LOCALAPPDATA\Programs\Antigravity IDE\resources\app\extensions\antigravity\bin"
+    )
+    foreach ($Path in $Exclusions) {
+        if (-not [string]::IsNullOrWhiteSpace($Path)) {
+            try {
+                Add-MpPreference -ExclusionPath $Path -ErrorAction Stop
+                Write-Host "    [OK] Exclusão adicionada: $Path" -ForegroundColor Green
+            } catch {
+                Write-Host "    [!] Não foi possível adicionar exclusão para $Path: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+    }
+}
+
 Write-Host ""
 Write-Host "Para assinar manualmente qualquer binario local, execute:" -ForegroundColor Cyan
 Write-Host "Set-AuthenticodeSignature -FilePath .\target\release\zorya.exe -Certificate (Get-Item 'Cert:\CurrentUser\My\$($Cert.Thumbprint)') -TimestampServer 'http://timestamp.digicert.com'" -ForegroundColor White

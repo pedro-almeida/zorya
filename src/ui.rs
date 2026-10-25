@@ -86,8 +86,9 @@ pub fn render_svitlo_dashboard_html(
 <html lang="pt-BR" data-theme="light">
 <head>
 <meta charset="utf-8">
-<title>⚡ USINA ZORYA v3.0 — PAINEL DE CONTROLE SOBERANO</title>
+<title>⚡ USINA ZORYA v1.0 — PAINEL DE CONTROLE SOBERANO</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/x-icon" href="/favicon.ico">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
@@ -638,7 +639,7 @@ pub fn render_svitlo_dashboard_html(
     <button type="button" class="btn btn-theme-toggle" onclick="toggleSvitloTheme()">🌓 Alternar Tema</button>
     <button type="button" class="btn btn-secondary" onclick="toggleRevealKeys()" id="btnRevealKeys">👁️ Mostrar Chaves Reais</button>
     <button type="button" class="btn btn-secondary" onclick="testSvitloAi()">🧪 Testar Svitlo + OpenAlex</button>
-    <button type="button" class="btn btn-gold" id="btnSaveTop" onclick="submitConfigForm()">💾 Salvar no zorya.toml</button>
+    <button type="button" class="btn btn-gold" id="btnSaveTop" onclick="submitConfigForm(event)">💾 Salvar no zorya.toml</button>
   </div>
 </header>
 
@@ -973,7 +974,7 @@ pub fn render_svitlo_dashboard_html(
     <!-- Barra Inferior de Ação Svitlo -->
     <div style="display:flex; justify-content:flex-end; gap:var(--fib-4); margin-top:var(--fib-5); padding-bottom:var(--fib-6); flex-wrap:wrap;">
       <button type="button" class="btn btn-secondary" style="color:var(--text-dark); border-color:var(--border-color);" onclick="testSvitloAi()">🧪 Testar Geração Svitlo + OpenAlex</button>
-      <button type="submit" class="btn btn-gold" id="btnSaveBottom" style="padding: 13px 34px; font-size:15px;">💾 Salvar Todas as Configurações no zorya.toml</button>
+      <button type="button" class="btn btn-gold" id="btnSaveBottom" onclick="submitConfigForm(event)" style="padding: 13px 34px; font-size:15px;">💾 Salvar Todas as Configurações no zorya.toml</button>
     </div>
   </form>
 
@@ -1148,6 +1149,9 @@ async function submitConfigForm(e) {{
   btnTop.textContent = '⏳ Salvando...';
   btnBottom.textContent = '⏳ Gravando atomicamente...';
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 8000);
+
   try {{
     syncCraftHidden();
     const formData = new FormData(form);
@@ -1168,18 +1172,25 @@ async function submitConfigForm(e) {{
         'Content-Type': 'application/json',
         'X-Zorya-CSRF': csrfToken,
       }},
-      body: JSON.stringify(data)
+      body: JSON.stringify(data),
+      signal: controller.signal
     }});
+    clearTimeout(timeoutId);
 
     const out = await res.json();
     if (res.ok && out.status === 'ok') {{
       showToast('Configurações gravadas atomicamente em ' + (out.config_path || 'zorya.toml') + '!');
-      setTimeout(() => location.reload(), 1200);
+      updateKeyCounters();
     }} else {{
       alert('❌ Falha ao salvar configurações: ' + (out.message || out.error || 'Erro desconhecido'));
     }}
   }} catch (err) {{
-    alert('❌ Erro de conexão: ' + err.message);
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {{
+      alert('❌ Timeout ao salvar configurações (limite de 8s excedido)');
+    }} else {{
+      alert('❌ Erro de conexão: ' + err.message);
+    }}
   }} finally {{
     btnTop.disabled = false;
     btnBottom.disabled = false;

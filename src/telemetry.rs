@@ -56,12 +56,25 @@ pub struct DetailedSystemInfo {
     pub gpu_display_offloaded_to_igpu: bool,
 }
 
+use std::time::{Duration, Instant};
+
 // Stateful collector wrapping sysinfo::System / Coletor com estado encapsulando sysinfo::System
+// PT: Coletor de métricas do sistema com cache em memória para evitar gargalos de I/O e refresh excessivo.
+// EN: System metrics collector with in-memory cache to prevent I/O bottlenecks and excessive refresh calls.
+// AI: @llm-struct TelemetryCollector @llm-cache in-memory-ttl
 pub struct TelemetryCollector {
     sys: System,
     node_name: String,
     default_vram_mb: u64,
     gpu_name: Option<String>,
+    // PT: Cache em memória da telemetria detalhada (TTL 10s).
+    // EN: In-memory cache for detailed telemetry (TTL 10s).
+    // AI: @llm-cache detailed-telemetry
+    cached_detailed: Option<(DetailedSystemInfo, Instant)>,
+    // PT: Cache em memória da sonda nvidia-smi (TTL 30s).
+    // EN: In-memory cache for nvidia-smi probe (TTL 30s).
+    // AI: @llm-cache nvidia-vram
+    cached_gpu: Option<((String, u64, u64), Instant)>,
 }
 
 impl TelemetryCollector {
@@ -74,6 +87,8 @@ impl TelemetryCollector {
             node_name,
             default_vram_mb,
             gpu_name: None,
+            cached_detailed: None,
+            cached_gpu: None,
         }
     }
 
@@ -81,6 +96,21 @@ impl TelemetryCollector {
         self.gpu_name = gpu_name;
         self.default_vram_mb = vram_mb;
         self
+    }
+
+    // PT: Retorna o resultado da sonda de VRAM com cache de 30 segundos.
+    // EN: Returns VRAM probe result with a 30-second in-memory cache.
+    // AI: @llm-func probe_nvidia_vram_cached @llm-cache 30s
+    pub fn probe_nvidia_vram_cached(&mut self) -> (String, u64, u64) {
+        if let Some((ref gpu, inst)) = self.cached_gpu {
+            if inst.elapsed() < Duration::from_secs(30) {
+                return gpu.clone();
+            }
+        }
+
+        let res = Self::probe_nvidia_vram(self.default_vram_mb, self.gpu_name.as_deref());
+        self.cached_gpu = Some((res.clone(), Instant::now()));
+        res
     }
 
     // Collect compact metrics for GET /health / Coleta métricas compactas para GET /health
@@ -91,7 +121,7 @@ impl TelemetryCollector {
         let cpu_usage = (self.sys.global_cpu_usage() * 10.0).round() / 10.0;
         let ram_total_mb = self.sys.total_memory() / (1024 * 1024);
         let ram_available_mb = self.sys.available_memory() / (1024 * 1024);
-        let (gpu_name, vram_total_mb, _) = Self::probe_nvidia_vram(self.default_vram_mb, self.gpu_name.as_deref());
+        let (gpu_name, vram_total_mb, _) = self.probe_nvidia_vram_cached();
 
         let ram_mb = if ram_total_mb > 0 { ram_total_mb } else { 16384 };
         let ram_avail = if ram_available_mb > 0 { ram_available_mb } else { 8192 };
@@ -117,7 +147,16 @@ impl TelemetryCollector {
     }
 
     // Collect full telemetry for GET /api/v1/system/info / Coleta telemetria completa para GET /api/v1/system/info
+    // PT: Coleta telemetria detalhada utilizando cache de 10s para eliminar overhead em threads assíncronas do Axum.
+    // EN: Collects detailed telemetry using a 10s cache to eliminate overhead on Axum async threads.
+    // AI: @llm-func collect_detailed @llm-cache 10s
     pub fn collect_detailed(&mut self) -> DetailedSystemInfo {
+        if let Some((ref info, inst)) = self.cached_detailed {
+            if inst.elapsed() < Duration::from_secs(10) {
+                return info.clone();
+            }
+        }
+
         self.sys.refresh_all();
 
         let cpu_usage = (self.sys.global_cpu_usage() * 10.0).round() / 10.0;
@@ -137,12 +176,12 @@ impl TelemetryCollector {
             .map(|c| c.brand().to_string())
             .unwrap_or_else(|| "x86_64 Processor".to_string());
 
-        let (gpu_model, vram_total_mb, vram_free_mb) = Self::probe_nvidia_vram(self.default_vram_mb, self.gpu_name.as_deref());
+        let (gpu_model, vram_total_mb, vram_free_mb) = self.probe_nvidia_vram_cached();
 
-        DetailedSystemInfo {
+        let info = DetailedSystemInfo {
             status: "ok".to_string(),
             node: if self.node_name.is_empty() { "usina-zorya".to_string() } else { self.node_name.clone() },
-            version: "3.0.0".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
             os_name: System::name().unwrap_or_else(|| std::env::consts::OS.to_string()),
             os_version: System::os_version().unwrap_or_else(|| "unknown".to_string()),
             host_name: System::host_name().unwrap_or_else(|| self.node_name.clone()),
@@ -159,7 +198,10 @@ impl TelemetryCollector {
             gpu_vram_total_mb: vram_total_mb,
             gpu_vram_free_mb: vram_free_mb,
             gpu_display_offloaded_to_igpu: true,
-        }
+        };
+
+        self.cached_detailed = Some((info.clone(), Instant::now()));
+        info
     }
 
     // Query nvidia-smi without console window or fall back to hw_profile or CPU-Only

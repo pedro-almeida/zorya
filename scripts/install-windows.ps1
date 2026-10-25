@@ -23,10 +23,16 @@ if (Test-Path ".\zorya.toml") {
 $RegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 Set-ItemProperty -Path $RegPath -Name "Zorya" -Value "`"$InstallDir\zorya.exe`" --background" -ErrorAction SilentlyContinue
 
-# Se executado como Administrador, configura Firewall e Servico/Task
+# Executa configuracao de certificados de desenvolvimento e registro em TrustedPublisher e Root
+$CertScript = Join-Path $PSScriptRoot "create_dev_cert.ps1"
+if (Test-Path $CertScript) {
+    & $CertScript
+}
+
+# Se executado como Administrador, configura Firewall, Exclusões do Defender e Servico/Task
 $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if ($IsAdmin) {
-    Write-Host "[Zorya] Privilegios de administrador detectados: configurando Firewall..." -ForegroundColor Cyan
+    Write-Host "[Zorya] Privilegios de administrador detectados: configurando Firewall e Windows Defender..." -ForegroundColor Cyan
     Remove-NetFirewallRule -DisplayName "Zorya Edge AI 8085" -ErrorAction SilentlyContinue
     New-NetFirewallRule -DisplayName "Zorya Edge AI 8085" `
         -Direction Inbound `
@@ -34,6 +40,20 @@ if ($IsAdmin) {
         -Protocol TCP `
         -LocalPort 8085 `
         -Profile Any -ErrorAction SilentlyContinue | Out-Null
+
+    $Exclusions = @(
+        "C:\Zorya",
+        "C:\ProgramData\Zorya",
+        "$env:LOCALAPPDATA\Programs\Antigravity IDE\resources\app\extensions\antigravity\bin"
+    )
+    foreach ($ExPath in $Exclusions) {
+        if (-not [string]::IsNullOrWhiteSpace($ExPath)) {
+            try {
+                Add-MpPreference -ExclusionPath $ExPath -ErrorAction SilentlyContinue
+                Write-Host "    [OK] Exclusao Defender: $ExPath" -ForegroundColor Green
+            } catch {}
+        }
+    }
 
     sc.exe stop ZoryaDaemon 2>$null | Out-Null
     sc.exe delete ZoryaDaemon 2>$null | Out-Null

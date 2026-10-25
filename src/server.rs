@@ -195,6 +195,8 @@ pub fn create_router(state: AppState) -> Router {
 
     Router::new()
         .merge(protected_routes)
+        // Favicon Oficial Zorya
+        .route("/favicon.ico", get(handle_favicon))
         // Health & System Info (Compatibilidade Frontend Svitlo & Private Network Access)
         .route("/health", get(health_handler))
         .route("/api/status", get(health_handler))
@@ -789,58 +791,75 @@ pub async fn handle_save_config_unified(
         }
     }
 
+    // PT: Clona o snapshot da configuração atualizada e libera o RwLock de escrita imediatamente
+    // EN: Clone updated configuration snapshot and release write RwLock immediately
+    // AI: @llm-concurrency instant-rwlock-release
+    let cfg_snapshot = cfg.clone();
+    drop(cfg);
+
     let save_path = std::path::Path::new("zorya.toml");
     let canonical_path = save_path.canonicalize()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "zorya.toml".to_string());
 
-    match cfg.save_default() {
-        Ok(_) => {
-            let now_epoch = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-
-            // Sincroniza status do OpenRouter no quota router
-            let or_keys = cfg.credentials.openrouter_keys.clone();
-            let qr = Arc::clone(&state.quota_router);
-            tokio::spawn(async move {
-                qr.sync_openrouter_status(&or_keys).await;
-            });
-
-            // Hot-reload imediato no agente e cofre em memória
-            state.agent.key_vault.reload_from_config(&cfg).await;
-
-            // Feedback visual no systray
-            state.systray.transition(crate::systray::SystrayState::Idle, "Configurações sincronizadas em zorya.toml");
-
-            let mut sanitized = cfg.clone();
-            sanitized.credentials.groq_keys = sanitized.credentials.groq_keys.iter().map(|_| "********".to_string()).collect();
-            sanitized.credentials.gemini_keys = sanitized.credentials.gemini_keys.iter().map(|_| "********".to_string()).collect();
-            sanitized.credentials.openai_keys = sanitized.credentials.openai_keys.iter().map(|_| "********".to_string()).collect();
-            sanitized.credentials.openrouter_keys = sanitized.credentials.openrouter_keys.iter().map(|_| "********".to_string()).collect();
-
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "status": "ok",
-                    "saved_at": now_epoch,
-                    "config_path": canonical_path,
-                    "config": sanitized,
-                    "message": "Configurações gravadas atomicamente em zorya.toml com hot-reload ativo!"
-                })),
-            )
-                .into_response()
+    // PT: Executa gravação em disco dentro de spawn_blocking para não travar a runtime assíncrona do Tokio
+    // EN: Run disk write inside spawn_blocking to prevent blocking Tokio async runtime
+    // AI: @llm-perf spawn-blocking-disk-io
+    let cfg_to_save = cfg_snapshot.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = cfg_to_save.save_default() {
+            tracing::error!("Falha ao gravar zorya.toml em disco: {}", e);
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "status": "error",
-                "message": format!("Erro ao salvar zorya.toml atomicamente: {}", e)
-            })),
-        )
-            .into_response(),
-    }
+    });
+
+    let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // PT: Dispara sincronização do OpenRouter e hot-reload de chaves em tokio::spawn assíncrono
+    // EN: Trigger OpenRouter sync and key reload in background asynchronous tokio::spawn
+    // AI: @llm-async background-key-reload
+    let or_keys = cfg_snapshot.credentials.openrouter_keys.clone();
+    let qr = Arc::clone(&state.quota_router);
+    let agent = Arc::clone(&state.agent);
+    let cfg_for_agent = cfg_snapshot.clone();
+    tokio::spawn(async move {
+        qr.sync_openrouter_status(&or_keys).await;
+        agent.key_vault.reload_from_config(&cfg_for_agent).await;
+    });
+
+    // Feedback visual no systray
+    state.systray.transition(crate::systray::SystrayState::Idle, "Configurações sincronizadas em zorya.toml");
+
+    let mut sanitized = cfg_snapshot;
+    sanitized.credentials.groq_keys = sanitized.credentials.groq_keys.iter().map(|_| "********".to_string()).collect();
+    sanitized.credentials.gemini_keys = sanitized.credentials.gemini_keys.iter().map(|_| "********".to_string()).collect();
+    sanitized.credentials.openai_keys = sanitized.credentials.openai_keys.iter().map(|_| "********".to_string()).collect();
+    sanitized.credentials.openrouter_keys = sanitized.credentials.openrouter_keys.iter().map(|_| "********".to_string()).collect();
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "saved_at": now_epoch,
+            "config_path": canonical_path,
+            "config": sanitized,
+            "message": "Configurações gravadas atomicamente em zorya.toml com hot-reload ativo!"
+        })),
+    )
+        .into_response()
+}
+
+// PT: Handler que serve o favicon oficial (.ico) embutido diretamente no binário.
+// EN: Handler serving the official favicon (.ico) embedded directly in the binary.
+// AI: @llm-route GET /favicon.ico
+pub async fn handle_favicon() -> impl IntoResponse {
+    const FAVICON_BYTES: &[u8] = include_bytes!("../assets/icon.ico");
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/x-icon")],
+        FAVICON_BYTES,
+    )
 }
 
 // POST /api/v1/test/svitlo-openalex -> Teste de Diagnóstico completo

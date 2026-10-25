@@ -9,6 +9,7 @@ on:
 permissions:
   contents: write
   id-token: write
+  attestations: write
 
 jobs:
   build-and-sign:
@@ -120,6 +121,12 @@ jobs:
           if [ -f LICENSE ]; then cp LICENSE dist/; fi
 
           tar -czvf ${{ matrix.archive_name }} -C dist .
+
+      # ----------------- ATESTADO OFICIAL DE PROVENIÊNCIA GITHUB -----------------
+      - name: Gerar Atestado Oficial de Proveniência GitHub
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ matrix.archive_name }}
 
       - name: Upload de Artefato para o Job de Release
         uses: actions/upload-artifact@v4
