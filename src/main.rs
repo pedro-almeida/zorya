@@ -42,7 +42,7 @@ pub mod ui;
 pub mod video;
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -90,6 +90,8 @@ pub fn resolve_config_path_with_target() -> (ZoryaConfig, PathBuf) {
 
     #[cfg(target_os = "windows")]
     {
+        use std::path::Path;
+
         let has_keys = |c: &ZoryaConfig| -> bool {
             !c.credentials.groq_keys.is_empty()
                 || !c.credentials.gemini_keys.is_empty()

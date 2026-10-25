@@ -60,6 +60,7 @@ pub async fn handle_video_teaser(
     let res = req.resolution.as_deref().unwrap_or("1920x1080");
     let (filter_graph, total_dur) = build_ken_burns_filter(&req.slides, res);
 
+    #[allow(unused_mut)]
     let mut cmd = Command::new("ffmpeg");
     #[cfg(target_os = "windows")]
     cmd.creation_flags(0x08000000);

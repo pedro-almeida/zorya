@@ -15,6 +15,7 @@ pub fn compose_lesson_video(
     subtitles_path: &Path,
     output_path: &Path,
 ) -> anyhow::Result<()> {
+    #[allow(unused_mut)]
     let mut cmd = Command::new("ffmpeg");
     #[cfg(target_os = "windows")]
     cmd.creation_flags(0x08000000);

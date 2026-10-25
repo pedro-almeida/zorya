@@ -98,6 +98,7 @@ pub fn execute_video_proxy(req: &VideoProxyRequest) -> anyhow::Result<VideoJobRe
     let crf = req.crf.unwrap_or(24);
 
     // Tenta invocar ffmpeg do sistema se presente para aceleração por hardware
+    #[allow(unused_mut)]
     let mut cmd = std::process::Command::new("ffmpeg");
     #[cfg(target_os = "windows")]
     {

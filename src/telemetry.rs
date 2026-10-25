@@ -243,6 +243,7 @@ impl TelemetryCollector {
         default_vram_mb: u64,
         profile_gpu_name: Option<&str>,
     ) -> (String, u64, u64) {
+        #[allow(unused_mut)]
         let mut cmd = Command::new("nvidia-smi");
         cmd.args([
             "--query-gpu=name,memory.total,memory.free",
