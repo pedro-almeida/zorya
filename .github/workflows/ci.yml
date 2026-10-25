@@ -48,7 +48,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Executar Linter (cargo clippy)
-        run: cargo clippy ${{ matrix.cargo_flags }} --all-targets -- -D warnings
+        run: cargo clippy --target ${{ matrix.target }} ${{ matrix.cargo_flags }} --all-targets -- -D warnings
 
       - name: Executar Testes Automatizados (cargo test)
-        run: cargo test ${{ matrix.cargo_flags }} --verbose
+        run: cargo test --target ${{ matrix.target }} ${{ matrix.cargo_flags }} --verbose
