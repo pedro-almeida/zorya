@@ -1,5 +1,9 @@
 #![warn(unused_must_use)]
 #![allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    unused_mut,
     clippy::derivable_impls,
     clippy::manual_div_ceil,
     clippy::chunks_exact_to_as_chunks,
@@ -42,6 +46,8 @@ pub mod ui;
 pub mod video;
 
 use std::net::SocketAddr;
+#[cfg(target_os = "windows")]
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -90,8 +96,6 @@ pub fn resolve_config_path_with_target() -> (ZoryaConfig, PathBuf) {
 
     #[cfg(target_os = "windows")]
     {
-        use std::path::Path;
-
         let has_keys = |c: &ZoryaConfig| -> bool {
             !c.credentials.groq_keys.is_empty()
                 || !c.credentials.gemini_keys.is_empty()

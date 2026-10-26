@@ -3,6 +3,10 @@
 // AI: @llm-module lib | @llm-context Exporta módulos para binários e testes de integração
 
 #![allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    unused_mut,
     clippy::derivable_impls,
     clippy::manual_div_ceil,
     clippy::chunks_exact_to_as_chunks,
@@ -33,6 +37,8 @@ pub mod ui;
 pub mod video;
 
 use crate::config::ZoryaConfig;
+#[cfg(target_os = "windows")]
+use std::path::Path;
 use std::path::PathBuf;
 
 /// Resolve o caminho de configuração buscando ZORYA_CONFIG, C:\ProgramData\Zorya\zorya.toml, ./zorya.toml e exe_dir/zorya.toml
@@ -48,8 +54,6 @@ pub fn resolve_config_path_with_target() -> (ZoryaConfig, PathBuf) {
 
     #[cfg(target_os = "windows")]
     {
-        use std::path::Path;
-
         let has_keys = |c: &ZoryaConfig| -> bool {
             !c.credentials.groq_keys.is_empty()
                 || !c.credentials.gemini_keys.is_empty()
