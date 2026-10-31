@@ -27,6 +27,15 @@ impl ClassicalDenoiseMethod {
             _ => Self::Bilateral,
         }
     }
+
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Bilateral => "bilateral",
+            Self::Wiener => "wiener",
+            Self::Unsharp => "unsharp",
+            Self::Convolution => "convolution",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

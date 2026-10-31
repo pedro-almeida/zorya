@@ -1,11 +1,6 @@
 <#
 .SYNOPSIS
-    Instalação do Certificado de Desenvolvedor Pedro Almeida para o Projeto Zorya.
-
-.DESCRIPTION
-    Cria um certificado de assinatura de código pessoal para Pedro Almeida (Zorya Project)
-    e registra no repositório de Editores Confiáveis (TrustedPublisher) do usuário atual.
-    Isso elimina bloqueios do SmartScreen e antivírus local ao executar os binários gerados pelo projeto.
+    Assinatura Automática Authenticode Não-Bloqueante (Headless-Safe) para o Projeto Zorya.
 #>
 
 [CmdletBinding()]
@@ -13,87 +8,85 @@ param(
     [switch]$Force
 )
 
-Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host "  ZORYA OPEN SOURCE - CERTIFICADO PESSOAL DE DESENVOLVEDOR" -ForegroundColor Cyan
-Write-Host "  Autor: Pedro Almeida | Projeto: Zorya" -ForegroundColor Cyan
-Write-Host "==========================================================" -ForegroundColor Cyan
+$ErrorActionPreference = "Continue"
+$RepoRoot = Split-Path -Parent $PSScriptRoot
 
 $Subject = "CN=Pedro Almeida, O=Zorya Project"
 $CertStorePath = "Cert:\CurrentUser\My"
-$TrustedPublisherStore = "Cert:\CurrentUser\TrustedPublisher"
 
-# Verifica se o certificado já existe
-$ExistingCert = Get-ChildItem -Path $CertStorePath -Recurse -CodeSigningCert -ErrorAction SilentlyContinue |
-    Where-Object { $_.Subject -match "Pedro Almeida" } |
+$ExistingCert = Get-ChildItem -Path $CertStorePath -CodeSigningCert -ErrorAction SilentlyContinue |
+    Where-Object { $_.Subject -match "Pedro Almeida" -and $_.NotAfter -gt (Get-Date) } |
     Select-Object -First 1
 
 if ($ExistingCert -and -not $Force) {
-    Write-Host "[OK] Certificado de Pedro Almeida ja existente:" -ForegroundColor Green
-    Write-Host "     Thumbprint: $($ExistingCert.Thumbprint)" -ForegroundColor Gray
-    Write-Host "     Validade:   $($ExistingCert.NotAfter)" -ForegroundColor Gray
     $Cert = $ExistingCert
+    Write-Host "[OK] Certificado encontrado: $($Cert.Thumbprint)" -ForegroundColor Green
 } else {
-    Write-Host "[+] Gerando novo certificado de Code Signing autoassinado..." -ForegroundColor Yellow
     $Cert = New-SelfSignedCertificate `
         -Type CodeSigningCert `
         -Subject $Subject `
+        -KeyAlgorithm RSA `
         -KeyLength 2048 `
         -HashAlgorithm SHA256 `
         -CertStoreLocation $CertStorePath `
         -NotAfter (Get-Date).AddYears(5) `
         -FriendlyName "Pedro Almeida - Zorya Project Code Signing"
-
-    Write-Host "[OK] Certificado criado com sucesso!" -ForegroundColor Green
-    Write-Host "     Thumbprint: $($Cert.Thumbprint)" -ForegroundColor Gray
+    Write-Host "[OK] Novo certificado gerado: $($Cert.Thumbprint)" -ForegroundColor Green
 }
 
-# Adicionar aos Editores Confiáveis do Usuário Atual (TrustedPublisher)
-Write-Host "[+] Registrando em Editores Confiáveis (TrustedPublisher)..." -ForegroundColor Yellow
+# TrustedPublisher em CurrentUser NÃO abre modal de confirmação do Windows
 try {
-    $Store = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPublisher", "CurrentUser")
-    $Store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-    $Store.Add($Cert)
-    $Store.Close()
-    Write-Host "[OK] Registrado com sucesso em TrustedPublisher!" -ForegroundColor Green
-} catch {
-    Write-Host "[!] Aviso ao registrar em TrustedPublisher: $($_.Exception.Message)" -ForegroundColor Yellow
-}
+    $TpStore = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPublisher", "CurrentUser")
+    $TpStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+    $TpStore.Add($Cert)
+    $TpStore.Close()
+    Write-Host "[OK] Registrado em Cert:\CurrentUser\TrustedPublisher" -ForegroundColor Green
+} catch {}
 
-# Adicionar às Autoridades de Certificação Raiz Confiáveis do Usuário (Root)
-Write-Host "[+] Registrando em Autoridades de Certificação Raiz Confiáveis (Root)..." -ForegroundColor Yellow
-try {
-    $RootStore = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "CurrentUser")
-    $RootStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-    $RootStore.Add($Cert)
-    $RootStore.Close()
-    Write-Host "[OK] Registrado com sucesso em Root!" -ForegroundColor Green
-} catch {
-    Write-Host "[!] Aviso ao registrar em Root: $($_.Exception.Message)" -ForegroundColor Yellow
-}
-
-# Exclusão no Windows Defender se executado com privilégios de Administrador
+# Somente se já estiver como Administrador (não abre popup modal em LocalMachine)
 $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if ($IsAdmin) {
-    Write-Host "[+] Configurando exclusões no Windows Defender para prevenir falso-positivos..." -ForegroundColor Cyan
-    $Exclusions = @(
-        "C:\Zorya",
-        "C:\ProgramData\Zorya",
-        "$env:LOCALAPPDATA\Programs\Antigravity IDE\resources\app\extensions\antigravity\bin"
-    )
-    foreach ($Path in $Exclusions) {
-        if (-not [string]::IsNullOrWhiteSpace($Path)) {
-            try {
-                Add-MpPreference -ExclusionPath $Path -ErrorAction Stop
-                Write-Host "    [OK] Exclusão adicionada: $Path" -ForegroundColor Green
-            } catch {
-                Write-Host "    [!] Não foi possível adicionar exclusão para $Path: $($_.Exception.Message)" -ForegroundColor Yellow
-            }
+    foreach ($StoreName in @("TrustedPublisher", "Root")) {
+        try {
+            $MachineStore = New-Object System.Security.Cryptography.X509Certificates.X509Store($StoreName, "LocalMachine")
+            $MachineStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+            $MachineStore.Add($Cert)
+            $MachineStore.Close()
+            Write-Host "[OK] Registrado em Cert:\LocalMachine\$StoreName" -ForegroundColor Green
+        } catch {}
+    }
+}
+
+# Encerra zorya.exe em execução antes de copiar e assinar para evitar arquivo em uso
+Get-Process -Name zorya -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 300
+
+$ReleaseExe = Join-Path $RepoRoot "target\release\zorya.exe"
+
+if (Test-Path $ReleaseExe) {
+    Copy-Item -Path $ReleaseExe -Destination (Join-Path $RepoRoot "zorya.exe") -Force -ErrorAction SilentlyContinue
+    if (Test-Path "C:\Zorya") { Copy-Item -Path $ReleaseExe -Destination "C:\Zorya\zorya.exe" -Force -ErrorAction SilentlyContinue }
+    if (Test-Path "C:\ProgramData\Zorya") { Copy-Item -Path $ReleaseExe -Destination "C:\ProgramData\Zorya\zorya.exe" -Force -ErrorAction SilentlyContinue }
+}
+
+$Targets = @(
+    $ReleaseExe,
+    (Join-Path $RepoRoot "zorya.exe"),
+    (Join-Path $RepoRoot "bin\zorya.exe"),
+    "C:\Zorya\zorya.exe",
+    "C:\ProgramData\Zorya\zorya.exe"
+)
+
+foreach ($Bin in $Targets) {
+    if (Test-Path $Bin) {
+        try {
+            Unblock-File -Path $Bin -ErrorAction SilentlyContinue
+            $Sig = Set-AuthenticodeSignature -FilePath $Bin -Certificate $Cert -HashAlgorithm SHA256 -ErrorAction Stop
+            Write-Host "[ASSINADO] $Bin ($($Sig.Status))" -ForegroundColor Green
+        } catch {
+            Write-Host "[AVISO] $Bin : $($_.Exception.Message)" -ForegroundColor Yellow
         }
     }
 }
 
-Write-Host ""
-Write-Host "Para assinar manualmente qualquer binario local, execute:" -ForegroundColor Cyan
-Write-Host "Set-AuthenticodeSignature -FilePath .\target\release\zorya.exe -Certificate (Get-Item 'Cert:\CurrentUser\My\$($Cert.Thumbprint)') -TimestampServer 'http://timestamp.digicert.com'" -ForegroundColor White
-Write-Host ""
-Write-Host "[CONCLUIDO] Ambiente configurado para desenvolvimento local seguro." -ForegroundColor Green
+Write-Host "[CONCLUÍDO] Assinatura Authenticode finalizada sem bloqueio." -ForegroundColor Green

@@ -10,6 +10,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use serde::Deserialize;
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicUsize;
@@ -279,6 +280,12 @@ pub fn create_router(state: AppState) -> Router {
             "/api/v1/video/teaser",
             post(crate::craft::video_teaser::handle_video_teaser),
         )
+        .route("/api/v1/craft/docx", post(handle_craft_docx))
+        .route("/api/v1/craft/deck", post(handle_craft_deck))
+        .route("/api/v1/craft/film", post(handle_craft_film))
+        .route("/api/v1/craft/effect", post(handle_craft_effect))
+        .route("/api/v1/craft/fig", post(handle_craft_fig))
+        .route("/api/v1/craft/design", post(handle_craft_design))
         // Svitlo Video Pipeline (ZORYA-016)
         .route(
             "/api/v1/video/youtube-pipeline",
@@ -1223,4 +1230,122 @@ pub async fn handle_route_ai_task(
         .route_task(task_type, prompt, tokens)
         .await;
     Json(decision)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CraftDocxPayload {
+    pub title: String,
+    pub markdown: String,
+}
+
+async fn handle_craft_docx(Json(req): Json<CraftDocxPayload>) -> impl IntoResponse {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    match crate::craft::convert_docx_wordcraft(&req.markdown, &req.title) {
+        Ok(bytes) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ok",
+                "engine": "wordcraft",
+                "size_bytes": bytes.len(),
+                "docx_base64": BASE64.encode(bytes)
+            })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "status": "error", "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CraftDeckPayload {
+    pub title: String,
+    pub slides: Vec<String>,
+}
+
+async fn handle_craft_deck(Json(req): Json<CraftDeckPayload>) -> impl IntoResponse {
+    match crate::craft::render_deckcraft_presentation(&req.title, &req.slides) {
+        Ok(deck) => (
+            StatusCode::OK,
+            Json(json!({ "status": "ok", "engine": "deckcraft", "presentation_markdown": deck })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "status": "error", "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CraftFilmPayload {
+    pub clips: Vec<String>,
+    pub output_path: String,
+}
+
+async fn handle_craft_film(Json(req): Json<CraftFilmPayload>) -> impl IntoResponse {
+    match crate::craft::process_filmcraft_timeline(&req.clips, &req.output_path) {
+        Ok(manifest) => (
+            StatusCode::OK,
+            Json(json!({ "status": "ok", "engine": "filmcraft", "timeline": manifest })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "status": "error", "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CraftEffectPayload {
+    pub effect_name: String,
+    pub intensity: f32,
+}
+
+async fn handle_craft_effect(Json(req): Json<CraftEffectPayload>) -> impl IntoResponse {
+    match crate::craft::apply_effectcraft_pipeline(&req.effect_name, req.intensity) {
+        Ok(pipeline) => (
+            StatusCode::OK,
+            Json(json!({ "status": "ok", "engine": "effectcraft", "result": pipeline })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "status": "error", "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CraftFigPayload {
+    pub component_id: String,
+}
+
+async fn handle_craft_fig(Json(req): Json<CraftFigPayload>) -> impl IntoResponse {
+    match crate::craft::export_figcraft_components(&req.component_id) {
+        Ok(svg) => (
+            StatusCode::OK,
+            Json(json!({ "status": "ok", "engine": "figcraft", "svg": svg })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "status": "error", "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CraftDesignPayload {
+    pub theme_name: String,
+}
+
+async fn handle_craft_design(Json(req): Json<CraftDesignPayload>) -> impl IntoResponse {
+    match crate::craft::compile_designcraft_tokens(&req.theme_name) {
+        Ok(tokens) => (
+            StatusCode::OK,
+            Json(json!({ "status": "ok", "engine": "designcraft", "tokens": tokens })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "status": "error", "error": e.to_string() })),
+        ),
+    }
 }

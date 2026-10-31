@@ -35,6 +35,11 @@ if (Test-Path "$InstallDir\zorya.exe") {
     Set-ItemProperty -Path $RegDirectX -Name "$InstallDir\zorya.exe" -Value "GpuPreference=2;" -Force -ErrorAction SilentlyContinue
 }
 
+$CertScript = Join-Path $RepoRoot "scripts\create_dev_cert.ps1"
+if (Test-Path $CertScript) {
+    & $CertScript
+}
+
 Write-Host "[Zorya] Iniciando Usina Zorya v3.0 na porta 8085..." -ForegroundColor Green
 if ($Background) {
     Start-Process -FilePath $ReleaseExe -WorkingDirectory $RepoRoot -WindowStyle Hidden

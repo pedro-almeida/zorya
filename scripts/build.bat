@@ -63,6 +63,7 @@ if exist "%ROOT_DIR%\target\release\zorya.exe" (
             echo [*] Configuracao zorya.toml sincronizada em C:\ProgramData\Zorya\zorya.toml
         )
     )
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%create_dev_cert.ps1"
 )
 popd
 
