@@ -1358,69 +1358,67 @@ pub struct CraftUpscalePayload {
     pub scale: Option<u32>,
 }
 
-async fn handle_craft_upscale(
-    State(state): State<AppState>,
-    Json(req): Json<CraftUpscalePayload>,
-) -> impl IntoResponse {
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+async fn handle_craft_upscale(Json(req): Json<CraftUpscalePayload>) -> impl IntoResponse {
+    let scale = req.scale.unwrap_or(4).clamp(2, 4);
 
-    let scale = req.scale.unwrap_or(4);
-    let mut image_bytes: Option<Vec<u8>> = None;
-
-    if let Some(ref b64) = req.base64 {
-        let clean = b64.split(',').last().unwrap_or(b64);
-        if let Ok(bytes) = BASE64.decode(clean.trim()) {
-            image_bytes = Some(bytes);
-        }
-    }
-
-    if image_bytes.is_none() {
-        if let Some(ref url) = req.image_url {
-            if url.starts_with("data:") {
-                let clean = url.split(',').last().unwrap_or(url);
-                if let Ok(bytes) = BASE64.decode(clean.trim()) {
-                    image_bytes = Some(bytes);
-                }
-            } else if url.starts_with("http://") || url.starts_with("https://") {
-                if let Ok(resp) = state.http_client.get(url).send().await {
-                    if let Ok(bytes) = resp.bytes().await {
-                        image_bytes = Some(bytes.to_vec());
-                    }
-                }
+    let raw_bytes: Vec<u8> = if let Some(b64) = req.base64.as_deref() {
+        let clean = b64.split(',').next_back().unwrap_or(b64).trim();
+        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, clean) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "success": false, "error": format!("Base64 inválido: {e}") })),
+                );
             }
         }
-    }
-
-    let input_data = match image_bytes {
-        Some(b) if !b.is_empty() => b,
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "success": false,
-                    "error": "URL ou payload Base64 da imagem não fornecido ou inválido."
-                })),
-            );
+    } else if let Some(url) = req.image_url.as_deref() {
+        match reqwest::get(url).await {
+            Ok(resp) => match resp.bytes().await {
+                Ok(b) => b.to_vec(),
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(
+                            json!({ "success": false, "error": format!("Erro ao ler bytes da imagem: {e}") }),
+                        ),
+                    );
+                }
+            },
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(
+                        json!({ "success": false, "error": format!("Erro ao baixar image_url: {e}") }),
+                    ),
+                );
+            }
         }
+    } else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": "Informe image_url ou base64" })),
+        );
     };
 
-    match crate::craft::upscale_image_bytes(&input_data, scale) {
-        Ok(out_bytes) => (
-            StatusCode::OK,
-            Json(json!({
-                "success": true,
-                "engine": "Zorya ArtCraft 4K (Real-ESRGAN / Lanczos3)",
-                "size_bytes": out_bytes.len(),
-                "base64": BASE64.encode(&out_bytes),
-                "upscaled_url": format!("data:image/png;base64,{}", BASE64.encode(&out_bytes))
-            })),
-        ),
+    match crate::craft::upscale_image_bytes(&raw_bytes, scale) {
+        Ok(upscaled_png) => {
+            let encoded =
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &upscaled_png);
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "success": true,
+                    "status": "ok",
+                    "engine": "Zorya ArtCraft 4K Upscaler",
+                    "scale": scale,
+                    "base64": encoded
+                })),
+            )
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "success": false,
-                "error": e
-            })),
+            Json(json!({ "success": false, "error": e })),
         ),
     }
 }
