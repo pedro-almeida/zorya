@@ -983,3 +983,67 @@ pub fn compile_designcraft_tokens(theme_name: &str) -> anyhow::Result<String> {
         theme_name, tokens
     ))
 }
+
+/// PT: Realiza super-resolução / Upscale 4K IA via Real-ESRGAN Vulkan ou filtro Lanczos3 + Unsharp Mask
+/// EN: Performs AI 4K Upscale via Real-ESRGAN Vulkan or Lanczos3 + Unsharp Mask filter
+// AI: @llm-func upscale_image_bytes
+pub fn upscale_image_bytes(input_bytes: &[u8], scale: u32) -> Result<Vec<u8>, String> {
+    let scale = scale.clamp(2, 4);
+
+    // 1. Tenta executar realesrgan-ncnn-vulkan acelerado por hardware (GTX 1650 Vulkan)
+    let candidates = [
+        std::path::PathBuf::from("./bin/realesrgan-ncnn-vulkan.exe"),
+        std::path::PathBuf::from("./bin/realesrgan-ncnn-vulkan"),
+        std::path::PathBuf::from("realesrgan-ncnn-vulkan.exe"),
+        std::path::PathBuf::from("realesrgan-ncnn-vulkan"),
+    ];
+
+    for bin in &candidates {
+        if bin.exists() {
+            let tmp_dir = std::env::temp_dir();
+            let in_path = tmp_dir.join(format!("zorya_up_in_{}.png", std::process::id()));
+            let out_path = tmp_dir.join(format!("zorya_up_out_{}.png", std::process::id()));
+
+            if std::fs::write(&in_path, input_bytes).is_ok() {
+                let cmd_res = std::process::Command::new(bin)
+                    .args([
+                        "-i", in_path.to_str().unwrap_or(""),
+                        "-o", out_path.to_str().unwrap_or(""),
+                        "-s", &scale.to_string(),
+                        "-m", "models",
+                        "-n", "realesrgan-x4plus",
+                    ])
+                    .output();
+
+                let _ = std::fs::remove_file(&in_path);
+
+                if let Ok(output) = cmd_res {
+                    if output.status.success() && out_path.exists() {
+                        if let Ok(bytes) = std::fs::read(&out_path) {
+                            let _ = std::fs::remove_file(&out_path);
+                            return Ok(bytes);
+                        }
+                    }
+                }
+                let _ = std::fs::remove_file(&out_path);
+            }
+            break;
+        }
+    }
+
+    // 2. Fallback determinístico em Rust puro: Lanczos3 + Unsharp Mask
+    let img = image::load_from_memory(input_bytes).map_err(|e| format!("Falha ao decodificar imagem: {}", e))?;
+    let new_w = img.width().saturating_mul(scale);
+    let new_h = img.height().saturating_mul(scale);
+
+    let upscaled = img.resize(new_w, new_h, image::imageops::FilterType::Lanczos3);
+    let unsharpened = upscaled.unsharpen(1.2, 3);
+
+    let mut buf = Vec::new();
+    let mut cursor = Cursor::new(&mut buf);
+    unsharpened
+        .write_to(&mut cursor, ImageFormat::Png)
+        .map_err(|e| format!("Falha ao codificar PNG: {}", e))?;
+
+    Ok(buf)
+}

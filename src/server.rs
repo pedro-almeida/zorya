@@ -286,6 +286,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/craft/effect", post(handle_craft_effect))
         .route("/api/v1/craft/fig", post(handle_craft_fig))
         .route("/api/v1/craft/design", post(handle_craft_design))
+        .route("/api/v1/craft/upscale", post(handle_craft_upscale))
         // Svitlo Video Pipeline (ZORYA-016)
         .route(
             "/api/v1/video/youtube-pipeline",
@@ -1346,6 +1347,80 @@ async fn handle_craft_design(Json(req): Json<CraftDesignPayload>) -> impl IntoRe
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "status": "error", "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CraftUpscalePayload {
+    pub image_url: Option<String>,
+    pub base64: Option<String>,
+    pub scale: Option<u32>,
+}
+
+async fn handle_craft_upscale(
+    State(state): State<AppState>,
+    Json(req): Json<CraftUpscalePayload>,
+) -> impl IntoResponse {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+    let scale = req.scale.unwrap_or(4);
+    let mut image_bytes: Option<Vec<u8>> = None;
+
+    if let Some(ref b64) = req.base64 {
+        let clean = b64.split(',').last().unwrap_or(b64);
+        if let Ok(bytes) = BASE64.decode(clean.trim()) {
+            image_bytes = Some(bytes);
+        }
+    }
+
+    if image_bytes.is_none() {
+        if let Some(ref url) = req.image_url {
+            if url.starts_with("data:") {
+                let clean = url.split(',').last().unwrap_or(url);
+                if let Ok(bytes) = BASE64.decode(clean.trim()) {
+                    image_bytes = Some(bytes);
+                }
+            } else if url.starts_with("http://") || url.starts_with("https://") {
+                if let Ok(resp) = state.http_client.get(url).send().await {
+                    if let Ok(bytes) = resp.bytes().await {
+                        image_bytes = Some(bytes.to_vec());
+                    }
+                }
+            }
+        }
+    }
+
+    let input_data = match image_bytes {
+        Some(b) if !b.is_empty() => b,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "success": false,
+                    "error": "URL ou payload Base64 da imagem não fornecido ou inválido."
+                })),
+            );
+        }
+    };
+
+    match crate::craft::upscale_image_bytes(&input_data, scale) {
+        Ok(out_bytes) => (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "engine": "Zorya ArtCraft 4K (Real-ESRGAN / Lanczos3)",
+                "size_bytes": out_bytes.len(),
+                "base64": BASE64.encode(&out_bytes),
+                "upscaled_url": format!("data:image/png;base64,{}", BASE64.encode(&out_bytes))
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "success": false,
+                "error": e
+            })),
         ),
     }
 }
