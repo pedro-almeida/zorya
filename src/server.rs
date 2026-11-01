@@ -287,6 +287,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/craft/fig", post(handle_craft_fig))
         .route("/api/v1/craft/design", post(handle_craft_design))
         .route("/api/v1/craft/upscale", post(handle_craft_upscale))
+        .route(
+            "/api/v1/social/instagram-ghost",
+            get(handle_instagram_ghost),
+        )
         // Svitlo Video Pipeline (ZORYA-016)
         .route(
             "/api/v1/video/youtube-pipeline",
@@ -1421,4 +1425,134 @@ async fn handle_craft_upscale(Json(req): Json<CraftUpscalePayload>) -> impl Into
             Json(json!({ "success": false, "error": e })),
         ),
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InstagramGhostQuery {
+    pub username: String,
+}
+
+/// PT: Ponte Residencial Zorya para consultar perfis públicos do Instagram usando o IP residencial do Nitro 5.
+/// EN: Zorya Residential Bridge to query public Instagram profiles using the Nitro 5 residential IP.
+async fn handle_instagram_ghost(
+    axum::extract::Query(q): axum::extract::Query<InstagramGhostQuery>,
+) -> impl IntoResponse {
+    let username = q.username.trim().trim_start_matches('@').to_string();
+    if username.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": "Username vazio" })),
+        );
+    }
+
+    let api_url = format!(
+        "https://www.instagram.com/api/v1/users/web_profile_info/?username={}",
+        username
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+
+    let resp = client
+        .get(&api_url)
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        )
+        .header("X-IG-App-ID", "936619743392459")
+        .header("X-ASBD-ID", "129477")
+        .header("X-Requested-With", "XMLHttpRequest")
+        .header("Accept", "*/*")
+        .header("Referer", format!("https://www.instagram.com/{username}/"))
+        .send()
+        .await;
+
+    if let Ok(r) = resp {
+        if r.status().is_success() {
+            if let Ok(raw_json) = r.json::<serde_json::Value>().await {
+                if let Some(u) = raw_json.pointer("/data/user") {
+                    let edges = u
+                        .pointer("/edge_owner_to_timeline_media/edges")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+
+                    let mut posts = Vec::new();
+                    for edge in edges {
+                        if let Some(node) = edge.get("node") {
+                            let sc = node
+                                .get("shortcode")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default();
+                            let disp_url = node
+                                .get("display_url")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default();
+                            let is_video = node
+                                .get("is_video")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            let video_url = node.get("video_url").and_then(|v| v.as_str());
+                            let likes = node
+                                .pointer("/edge_liked_by/count")
+                                .or_else(|| node.pointer("/edge_media_preview_like/count"))
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let comments = node
+                                .pointer("/edge_media_to_comment/count")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let caption = node
+                                .pointer("/edge_media_to_caption/edges/0/node/text")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default();
+
+                            posts.push(json!({
+                                "id": node.get("id").and_then(|v| v.as_str()).unwrap_or(sc),
+                                "shortcode": sc,
+                                "permalink": format!("https://www.instagram.com/p/{sc}/"),
+                                "display_url": disp_url,
+                                "custom_thumbnail_url": disp_url,
+                                "is_video": is_video,
+                                "video_url": video_url,
+                                "likes_count": likes,
+                                "comments_count": comments,
+                                "taken_at": "Recente",
+                                "caption": caption
+                            }));
+                        }
+                    }
+
+                    return (
+                        StatusCode::OK,
+                        Json(json!({
+                            "success": true,
+                            "source": "zorya_residential_bridge",
+                            "username": u.get("username").and_then(|v| v.as_str()).unwrap_or(&username),
+                            "full_name": u.get("full_name").and_then(|v| v.as_str()).unwrap_or_default(),
+                            "biography": u.get("biography").and_then(|v| v.as_str()).unwrap_or_default(),
+                            "profile_pic_url": u.get("profile_pic_url_hd").or_else(|| u.get("profile_pic_url")).and_then(|v| v.as_str()).unwrap_or_default(),
+                            "is_private": u.get("is_private").and_then(|v| v.as_bool()).unwrap_or(false),
+                            "is_verified": u.get("is_verified").and_then(|v| v.as_bool()).unwrap_or(false),
+                            "posts_count": u.pointer("/edge_owner_to_timeline_media/count").and_then(|v| v.as_u64()).unwrap_or(posts.len() as u64),
+                            "followers_count": u.pointer("/edge_followed_by/count").and_then(|v| v.as_u64()).unwrap_or(0),
+                            "following_count": u.pointer("/edge_follow/count").and_then(|v| v.as_u64()).unwrap_or(0),
+                            "stories": [],
+                            "posts": posts
+                        })),
+                    );
+                }
+            }
+        }
+    }
+
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(json!({
+            "success": false,
+            "error": "Instagram bloqueou consulta direta sem cookies ou perfil privado"
+        })),
+    )
 }
