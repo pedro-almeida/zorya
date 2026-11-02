@@ -30,6 +30,8 @@ pub struct HealthResponse {
     pub cpu_usage: f32,
     #[serde(default)]
     pub ram_mb: u64,
+    #[serde(default)]
+    pub git_sha: String,
 }
 
 // Detailed system telemetry for GET /api/v1/system/info / Telemetria detalhada do sistema para GET /api/v1/system/info
@@ -164,6 +166,7 @@ impl TelemetryCollector {
             },
             cpu_usage,
             ram_mb,
+            git_sha: env!("ZORYA_GIT_SHA").to_string(),
         }
     }
 

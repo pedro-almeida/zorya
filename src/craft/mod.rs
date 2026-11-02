@@ -9,6 +9,7 @@ pub mod pdf;
 pub mod vector;
 pub mod video_teaser;
 pub mod voice;
+pub mod voice_trainer;
 
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
 use rayon::prelude::*;

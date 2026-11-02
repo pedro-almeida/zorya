@@ -240,3 +240,15 @@ pub async fn handle_list_embeddings() -> Json<Vec<SpeakerEmbedding>> {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     Json(guard.values().cloned().collect())
 }
+
+pub use crate::craft::voice_trainer::{
+    get_mining_job, list_mining_jobs, start_voice_corpus_mining, VoiceCorpusMinerJob,
+    VoiceCorpusMinerRequest,
+};
+
+pub async fn handle_mine_voice_corpus(
+    Json(req): Json<VoiceCorpusMinerRequest>,
+) -> (StatusCode, Json<VoiceCorpusMinerJob>) {
+    let job = start_voice_corpus_mining(req).await;
+    (StatusCode::ACCEPTED, Json(job))
+}

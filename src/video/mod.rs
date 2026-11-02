@@ -52,9 +52,23 @@ pub struct YouTubePipelineRequest {
     pub youtube_config: Option<YouTubeUploadConfig>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct SvitloVideoV2Request {
+    pub title: String,
+    pub raw_markdown: String,
+    pub voice_name: Option<String>,
+    pub gemini_api_key: Option<String>,
+    pub background_music: Option<bool>,
+}
+
 // Re-exports
-pub use composer::compose_lesson_video;
-pub use narration::build_srt_subtitles;
+pub use composer::{
+    compose_lesson_video, compose_lesson_video_with_options, get_wav_bytes_duration,
+    get_wav_duration_seconds, SvitloVideoOptions,
+};
+pub use narration::{
+    build_srt_subtitles, format_clovis_rhetoric, synthesize_clovis_narration, synthesize_gemini_tts,
+};
 pub use script::generate_lesson_script;
 pub use youtube::build_youtube_metadata_payload;
 
@@ -84,4 +98,74 @@ pub async fn handle_youtube_pipeline(
             "script": script
         })),
     )
+}
+
+// POST /api/v1/video/svitlo-v2
+pub async fn handle_svitlo_video_v2(
+    Json(req): Json<SvitloVideoV2Request>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let script = generate_lesson_script(&req.title, &req.raw_markdown);
+    let srt = build_srt_subtitles(&script);
+    let full_text: String = script
+        .scenes
+        .iter()
+        .map(|s| s.narration_text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let voice = req.voice_name.as_deref().unwrap_or("Charon");
+    let key = req.gemini_api_key.as_deref();
+
+    let audio_bytes = match synthesize_clovis_narration(&full_text, Some(voice), key).await {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": format!("Falha na síntese vocal Modo Clóvis: {}", e)
+                })),
+            );
+        }
+    };
+
+    let dur = get_wav_bytes_duration(&audio_bytes).unwrap_or(script.scenes.len() as f32 * 4.0);
+
+    let ts = chrono::Utc::now().timestamp_millis();
+    let tmp_dir = std::env::temp_dir();
+    let audio_file = tmp_dir.join(format!("svitlo_v2_{ts}.wav"));
+    let srt_file = tmp_dir.join(format!("svitlo_v2_{ts}.srt"));
+    let out_video = tmp_dir.join(format!("svitlo_v2_{ts}.mp4"));
+
+    let _ = std::fs::write(&audio_file, &audio_bytes);
+    let _ = std::fs::write(&srt_file, &srt);
+
+    let opts = SvitloVideoOptions::default();
+    let comp_res =
+        compose_lesson_video_with_options(&script, &audio_file, &srt_file, &out_video, &opts);
+
+    let _ = std::fs::remove_file(&audio_file);
+    let _ = std::fs::remove_file(&srt_file);
+
+    match comp_res {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ok",
+                "title": script.title,
+                "engine": "Svitlo Video Engine v2 (3D Avatar + Modo Clóvis + PiP NVENC)",
+                "duration_seconds": dur,
+                "output_video_path": out_video.to_string_lossy(),
+                "subtitles_srt": srt,
+                "voice_profile": voice,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": format!("Falha na composição FFmpeg: {}", e)
+            })),
+        ),
+    }
 }

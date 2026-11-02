@@ -47,6 +47,7 @@ pub fn render_svitlo_dashboard_html(
     let ram_total = telem.ram_total_mb.max(16384);
     let ram_used = telem.ram_used_mb;
     let ram_pct = ((ram_used as f64 / ram_total as f64) * 100.0).clamp(0.0, 100.0) as u32;
+    let git_sha = env!("ZORYA_GIT_SHA");
 
     // Renderiza os 11 cards dos módulos ArtCraft
     let craft_defs = [
@@ -137,6 +138,10 @@ pub fn render_svitlo_dashboard_html(
 <html lang="pt-BR" data-theme="light">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<meta name="zorya-git-sha" content="{git_sha}">
 <title>⚡ USINA ZORYA v1.0 — PAINEL DE CONTROLE SOBERANO</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
@@ -1295,6 +1300,21 @@ document.addEventListener('DOMContentLoaded', () => {{
   updateKeyCounters();
   renderQuotasTable();
 }});
+
+// Auto-Cache Busting Watcher: verifica nova versao do daemon a cada 20s
+let currentGitSha = "{git_sha}";
+setInterval(async () => {{
+  try {{
+    const res = await fetch('/api/v1/health?t=' + Date.now(), {{ cache: 'no-store' }});
+    if (res.ok) {{
+      const data = await res.json();
+      if (data.git_sha && currentGitSha && data.git_sha !== currentGitSha) {{
+        console.log('[Zorya Auto-Reload] Nova versao detectada:', data.git_sha, 'vs', currentGitSha);
+        location.reload();
+      }}
+    }}
+  }} catch (_) {{}}
+}}, 20000);
 </script>
 
 </body>
@@ -1392,5 +1412,6 @@ document.addEventListener('DOMContentLoaded', () => {{
         csrf_token = csrf_token,
         quotas_json = quotas_json,
         openrouter_status_json = openrouter_status_json,
+        git_sha = git_sha,
     )
 }

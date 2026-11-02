@@ -273,6 +273,10 @@ pub fn create_router(state: AppState) -> Router {
             get(crate::craft::voice::handle_list_embeddings),
         )
         .route(
+            "/api/v1/voice/mine-corpus",
+            post(crate::craft::voice::handle_mine_voice_corpus),
+        )
+        .route(
             "/api/v1/vector/render",
             post(crate::craft::vector::handle_vector_diagram),
         )
@@ -291,10 +295,14 @@ pub fn create_router(state: AppState) -> Router {
             "/api/v1/social/instagram-ghost",
             get(handle_instagram_ghost),
         )
-        // Svitlo Video Pipeline (ZORYA-016)
+        // Svitlo Video Pipeline v1 & v2 (ZORYA-016)
         .route(
             "/api/v1/video/youtube-pipeline",
             post(crate::video::handle_youtube_pipeline),
+        )
+        .route(
+            "/api/v1/video/svitlo-v2",
+            post(crate::video::handle_svitlo_video_v2),
         )
         // Endpoints Legados ArtCraft
         .route("/api/v1/raw/decode", post(raw_decode_handler))
@@ -317,7 +325,10 @@ pub fn create_router(state: AppState) -> Router {
 // EN: Responds instantly in O(1) reading background snapshot without write lock contention against sysinfo
 // AI: @llm-route GET /health @llm-perf zero-lock-contention
 async fn health_handler(State(state): State<AppState>) -> Response {
-    let payload = state.system_snapshot.read().await.health.clone();
+    let mut payload = state.system_snapshot.read().await.health.clone();
+    if payload.git_sha.is_empty() {
+        payload.git_sha = env!("ZORYA_GIT_SHA").to_string();
+    }
     Json(payload).into_response()
 }
 
@@ -567,7 +578,15 @@ pub async fn handle_settings_dashboard(State(state): State<AppState>) -> impl In
 
     (
         axum::http::StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        [
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "no-store, no-cache, must-revalidate, proxy-revalidate",
+            ),
+            (axum::http::header::PRAGMA, "no-cache"),
+            (axum::http::header::EXPIRES, "0"),
+        ],
         html,
     )
 }
