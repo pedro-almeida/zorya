@@ -277,6 +277,38 @@ pub fn create_router(state: AppState) -> Router {
             post(crate::craft::voice::handle_mine_voice_corpus),
         )
         .route(
+            "/api/v1/voice/profiles",
+            get(crate::craft::voice::handle_list_profiles),
+        )
+        .route(
+            "/api/v1/voice/youtube-ingest",
+            post(crate::craft::voice::handle_youtube_ingest),
+        )
+        .route(
+            "/api/v1/voice/youtube-ingest/:job_id",
+            get(crate::craft::voice::handle_youtube_ingest_status),
+        )
+        .route(
+            "/api/v1/voice/rvc-train",
+            post(crate::craft::voice::handle_rvc_train_start),
+        )
+        .route(
+            "/api/v1/voice/rvc-train/:job_id",
+            get(crate::craft::voice::handle_rvc_train_status),
+        )
+        .route(
+            "/api/v1/voice/audiobook",
+            post(crate::craft::voice::handle_audiobook_start),
+        )
+        .route(
+            "/api/v1/voice/audiobook/:job_id",
+            get(crate::craft::voice::handle_audiobook_status),
+        )
+        .route(
+            "/api/v1/voice/audiobook/:job_id/download",
+            get(crate::craft::voice::handle_audiobook_download),
+        )
+        .route(
             "/api/v1/vector/render",
             post(crate::craft::vector::handle_vector_diagram),
         )
@@ -312,8 +344,21 @@ pub fn create_router(state: AppState) -> Router {
         .route("/mcp/sse", get(mcp_sse_handler))
         .route("/mcp/message", post(mcp_jsonrpc_handler))
         .route("/mcp", post(mcp_jsonrpc_handler))
-        // Limite de até 128 MB para uploads multipart de mídia
+        // Limite de até 128 MB para uploads multipart padrão
         .layer(DefaultBodyLimit::max(128 * 1024 * 1024))
+        // Limite de até 1 GB exclusivo para upload de corpus vocal e importação de modelos RVC
+        .merge(
+            Router::new()
+                .route(
+                    "/api/v1/voice/corpus-upload",
+                    post(crate::craft::voice::handle_corpus_upload),
+                )
+                .route(
+                    "/api/v1/voice/rvc-import",
+                    post(crate::craft::voice::handle_rvc_import),
+                )
+                .layer(DefaultBodyLimit::max(1024 * 1024 * 1024)),
+        )
         .layer(cors)
         .layer(axum::middleware::from_fn(private_network_access_middleware))
         .layer(axum::middleware::from_fn(security_headers_middleware))

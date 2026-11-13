@@ -1043,6 +1043,150 @@ pub fn render_svitlo_dashboard_html(
     <pre id="testResultPre" style="font-family:var(--font-mono); font-size:12px; color:var(--text-dark); white-space:pre-wrap; max-height:360px; overflow-y:auto; margin:0;"></pre>
   </div>
 
+  <!-- Painel Integrado SoundCraft: Long Corpus RVC (GTX 1650) + Estúdio de Audiobook GPU -->
+  <section id="soundcraftStudio" class="panel-svitlo" style="margin-top:var(--fib-5);">
+    <div class="panel-header" style="flex-wrap:wrap; gap:10px;">
+      <div>
+        <div class="panel-title">🎙️ SoundCraft Studio — Mineração YouTube + Treino RVC (GTX 1650) + Audiobook GPU</div>
+        <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">Pipeline CUDA dedicada (4 GB VRAM) + cache FAISS em 32 GB RAM • Masterização EBU R128 (-14 LUFS)</div>
+      </div>
+      <button type="button" class="btn btn-secondary" style="color:var(--text-dark); border-color:var(--border-color); padding:5px 12px; font-size:12px;" onclick="refreshVoiceProfiles()">↻ Atualizar Perfis</button>
+    </div>
+
+    <div id="scProfilesSummary" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:var(--fib-4); font-size:12px; color:var(--text-muted);">
+      Carregando perfis de voz...
+    </div>
+
+    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:var(--fib-4);">
+
+      <!-- BLOCO 1: MINERAÇÃO YOUTUBE & UPLOAD LOCAL -->
+      <div class="gov-card" style="display:flex; flex-direction:column; gap:10px; align-items:stretch; cursor:default;">
+        <div class="gov-title" style="font-size:14px;">1️⃣ Minerar Horas de Áudio (Corpus)</div>
+
+        <div class="input-grid-2">
+          <div class="field-group" style="margin-bottom:0;">
+            <label>ID da Voz (slug)</label>
+            <input id="scIngestVoiceId" placeholder="clovis-barros" value="clovis-barros">
+          </div>
+          <div class="field-group" style="margin-bottom:0;">
+            <label>Nome de Exibição</label>
+            <input id="scIngestDisplayName" placeholder="Prof. Clóvis de Barros">
+          </div>
+        </div>
+
+        <div class="field-group" style="margin-bottom:0;">
+          <label>Links do YouTube (1 URL por linha)</label>
+          <textarea id="scYoutubeUrls" rows="3" placeholder="https://www.youtube.com/watch?v=..."></textarea>
+        </div>
+
+        <label style="display:flex; align-items:center; gap:8px; font-size:12px; cursor:pointer;">
+          <input type="checkbox" id="scIsolateVocals" checked>
+          <span>Isolar voz com Demucs (<code>htdemucs</code> — remove música e aplausos)</span>
+        </label>
+
+        <button type="button" class="btn btn-gold" onclick="startYoutubeIngest()" style="width:100%;">⛏️ Minerar YouTube & Fatiar VAD (40kHz)</button>
+
+        <div style="border-top:1px solid var(--border-color); padding-top:8px; margin-top:2px;">
+          <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px;">Ou enviar arquivos locais longos (até 1 GB — MP3, WAV, M4A, MP4):</div>
+          <input type="file" id="scLocalFiles" multiple accept="audio/*,video/*" style="width:100%; font-size:12px; margin-bottom:6px;">
+          <button type="button" class="btn btn-secondary" onclick="uploadLocalCorpus()" style="width:100%; color:var(--text-dark); border-color:var(--border-color);">📤 Upload Corpus Local & Fatiar</button>
+        </div>
+
+        <div id="scIngestStatus" style="font-family:var(--font-mono); font-size:11px; background:rgba(0,0,0,0.04); padding:8px; border-radius:6px; min-height:48px; white-space:pre-wrap;">Aguardando ingestão...</div>
+      </div>
+
+      <!-- BLOCO 2: TREINAMENTO RVC LOCAL NA GTX 1650 -->
+      <div class="gov-card" style="display:flex; flex-direction:column; gap:10px; align-items:stretch; cursor:default;">
+        <div class="gov-title" style="font-size:14px;">2️⃣ Treinar Modelo Vocal RVC (GTX 1650)</div>
+
+        <div class="field-group" style="margin-bottom:0;">
+          <label>Perfil Vocal Alvo</label>
+          <select id="scTrainVoiceSelect"></select>
+        </div>
+
+        <div class="input-grid-2">
+          <div class="field-group" style="margin-bottom:0;">
+            <label>Épocas (Default: 120)</label>
+            <input type="number" id="scTrainEpochs" value="120" min="10" max="1000">
+          </div>
+          <div class="field-group" style="margin-bottom:0;">
+            <label>Sample Rate</label>
+            <select id="scTrainSampleRate">
+              <option value="40k" selected>40k (Recomendado)</option>
+              <option value="48k">48k</option>
+            </select>
+          </div>
+        </div>
+
+        <button type="button" class="btn btn-gold" onclick="startRvcTraining()" style="width:100%;">🔥 Treinar RVC (batch_size=1 • fp16 • rmvpe)</button>
+
+        <div style="background:rgba(0,0,0,0.08); border-radius:6px; height:8px; overflow:hidden;">
+          <div id="scRvcBar" style="height:100%; width:0%; background:var(--gold); transition:width 0.3s;"></div>
+        </div>
+        <div id="scRvcStatus" style="font-family:var(--font-mono); font-size:11px; background:rgba(0,0,0,0.04); padding:8px; border-radius:6px; min-height:48px; white-space:pre-wrap;">Nenhum treino ativo.</div>
+
+        <div style="border-top:1px solid var(--border-color); padding-top:8px; margin-top:2px;">
+          <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px;">Importar RVC pré-treinado (<code>.pth</code> + <code>.index</code>):</div>
+          <input type="file" id="scImportRvcFiles" multiple accept=".pth,.index" style="width:100%; font-size:12px; margin-bottom:6px;">
+          <button type="button" class="btn btn-secondary" onclick="importRvcArtifacts()" style="width:100%; color:var(--text-dark); border-color:var(--border-color);">📥 Importar .pth / .index no Perfil</button>
+        </div>
+      </div>
+
+      <!-- BLOCO 3: ESTÚDIO DE AUDIOBOOK GPU -->
+      <div class="gov-card" style="display:flex; flex-direction:column; gap:10px; align-items:stretch; cursor:default;">
+        <div class="gov-title" style="font-size:14px;">3️⃣ Estúdio de Audiobook GPU</div>
+
+        <div class="field-group" style="margin-bottom:0;">
+          <label>Perfil Vocal (para kokoro_rvc / xtts_multi)</label>
+          <select id="scAbVoiceSelect"></select>
+        </div>
+
+        <div class="field-group" style="margin-bottom:0;">
+          <label>Motor Neural</label>
+          <select id="scAbEngine">
+            <option value="kokoro_rvc" selected>kokoro_rvc (Kokoro 82M PT-BR + RVC Treinado)</option>
+            <option value="xtts_multi">xtts_multi (Imediato — 15 melhores clipes wavs/)</option>
+            <option value="kokoro">kokoro (Vozes nativas PT-BR sem RVC)</option>
+          </select>
+        </div>
+
+        <div class="input-grid-2">
+          <div class="field-group" style="margin-bottom:0;">
+            <label>Voz Base Kokoro</label>
+            <select id="scAbBaseVoice">
+              <option value="pm_alex" selected>pm_alex (Masculina PT-BR)</option>
+              <option value="pf_dora">pf_dora (Feminina PT-BR)</option>
+              <option value="pm_santa">pm_santa (Grave PT-BR)</option>
+            </select>
+          </div>
+          <div class="field-group" style="margin-bottom:0;">
+            <label>Velocidade</label>
+            <input type="number" id="scAbSpeed" step="0.05" min="0.5" max="1.8" value="1.0">
+          </div>
+        </div>
+
+        <div class="field-group" style="margin-bottom:0;">
+          <label style="display:flex; justify-content:space-between; align-items:center;">
+            <span>Texto / Roteiro do Audiobook</span>
+            <input type="file" id="scAbTextFile" accept=".txt,.md" onchange="loadAudiobookTextFile(this)" style="font-size:11px; max-width:170px;">
+          </label>
+          <textarea id="scAbText" rows="4" placeholder="Cole aqui o capítulo ou texto completo em Português..."></textarea>
+        </div>
+
+        <button type="button" class="btn btn-gold" onclick="startAudiobookGeneration()" style="width:100%;">🎧 Gerar Audiobook MP3 (-14 LUFS)</button>
+
+        <div style="background:rgba(0,0,0,0.08); border-radius:6px; height:8px; overflow:hidden;">
+          <div id="scAbBar" style="height:100%; width:0%; background:var(--gold); transition:width 0.3s;"></div>
+        </div>
+        <div id="scAbStatus" style="font-family:var(--font-mono); font-size:11px; background:rgba(0,0,0,0.04); padding:8px; border-radius:6px; min-height:42px; white-space:pre-wrap;">Pronto para sintetizar.</div>
+
+        <audio id="scAbPlayer" controls style="width:100%; display:none;"></audio>
+        <a id="scAbDownloadLink" href="javascript:void(0)" class="btn btn-secondary" style="display:none; text-align:center; text-decoration:none; color:var(--text-dark); border-color:var(--border-color);">⬇ Baixar Audiobook MP3</a>
+      </div>
+
+    </div>
+  </section>
+
 </main>
 
 <div id="toast">
@@ -1299,7 +1443,289 @@ document.addEventListener('DOMContentLoaded', () => {{
   initTheme();
   updateKeyCounters();
   renderQuotasTable();
+  refreshVoiceProfiles();
 }});
+
+let scIngestTimer = null;
+let scRvcTimer = null;
+let scAbTimer = null;
+
+async function refreshVoiceProfiles() {{
+  try {{
+    const res = await fetch('/api/v1/voice/profiles');
+    if (!res.ok) return;
+    const profiles = await res.json();
+    const summaryEl = document.getElementById('scProfilesSummary');
+    const trainSel = document.getElementById('scTrainVoiceSelect');
+    const abSel = document.getElementById('scAbVoiceSelect');
+    const typedId = (document.getElementById('scIngestVoiceId').value || '').trim();
+
+    if (!profiles.length) {{
+      summaryEl.innerHTML = 'Nenhum perfil persistido ainda em <code>datasets/voices/profiles.json</code>. Minere ou envie um áudio para começar.';
+    }} else {{
+      summaryEl.innerHTML = profiles.map(p => {{
+        const mins = ((p.total_duration_seconds || 0) / 60).toFixed(1);
+        const rvcBadge = p.has_rvc_model ? ' | RVC pronto' : ' | sem RVC (usa XTTS-v2)';
+        return '<span class="key-counter" style="padding:4px 8px;">🎙️ ' + p.voice_id + ' (' + (p.clip_count || 0) + ' clipes, ' + mins + ' min' + rvcBadge + ')</span>';
+      }}).join(' ');
+    }}
+
+    const ids = profiles.map(p => p.voice_id);
+    if (typedId && !ids.includes(typedId)) ids.unshift(typedId);
+    if (!ids.length) ids.push('clovis-barros');
+
+    const prevTrain = trainSel.value;
+    const prevAb = abSel.value;
+    trainSel.innerHTML = '';
+    abSel.innerHTML = '';
+    for (const id of ids) {{
+      const p = profiles.find(x => x.voice_id === id);
+      const label = p ? (p.display_name + ' [' + p.voice_id + ' - ' + (p.clip_count || 0) + ' wavs]') : id;
+      const o1 = document.createElement('option');
+      o1.value = id;
+      o1.textContent = label;
+      trainSel.appendChild(o1);
+      const o2 = document.createElement('option');
+      o2.value = id;
+      o2.textContent = label;
+      abSel.appendChild(o2);
+    }}
+    if (prevTrain && ids.includes(prevTrain)) trainSel.value = prevTrain;
+    if (prevAb && ids.includes(prevAb)) abSel.value = prevAb;
+  }} catch (err) {{
+    console.warn('Falha ao carregar perfis SoundCraft:', err);
+  }}
+}}
+
+function pollJob(url, onUpdate, onDone, intervalMs) {{
+  return setInterval(async () => {{
+    try {{
+      const r = await fetch(url);
+      if (!r.ok) return;
+      const data = await r.json();
+      onUpdate(data);
+      if (data.status === 'completed' || data.status === 'failed') {{
+        onDone(data);
+      }}
+    }} catch (_) {{}}
+  }}, intervalMs);
+}}
+
+async function startYoutubeIngest() {{
+  const voiceId = (document.getElementById('scIngestVoiceId').value || '').trim() || 'custom-voice';
+  const displayName = (document.getElementById('scIngestDisplayName').value || '').trim();
+  const urlsRaw = (document.getElementById('scYoutubeUrls').value || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const isolateVocals = document.getElementById('scIsolateVocals').checked;
+  const statusEl = document.getElementById('scIngestStatus');
+
+  if (!urlsRaw.length) {{
+    statusEl.textContent = 'Informe ao menos uma URL do YouTube.';
+    return;
+  }}
+
+  statusEl.textContent = 'Enviando job de mineração...';
+  const res = await fetch('/api/v1/voice/youtube-ingest', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{
+      voice_id: voiceId,
+      display_name: displayName || null,
+      youtube_urls: urlsRaw,
+      isolate_vocals: isolateVocals
+    }})
+  }});
+  const job = await res.json();
+  if (!res.ok) {{
+    statusEl.textContent = 'Erro: ' + (job.error || res.status);
+    return;
+  }}
+  if (scIngestTimer) clearInterval(scIngestTimer);
+  scIngestTimer = pollJob(
+    '/api/v1/voice/youtube-ingest/' + encodeURIComponent(job.job_id),
+    d => {{
+      const tail = (d.logs || []).slice(-3).join('\n');
+      statusEl.textContent = '[' + d.status + '] ' + d.stage + '\nClipes: ' + d.clips_generated + ' | Duração: ' + (d.total_duration_seconds || 0).toFixed(1) + 's' + (tail ? '\n' + tail : '');
+    }},
+    d => {{
+      clearInterval(scIngestTimer);
+      scIngestTimer = null;
+      if (d.error) statusEl.textContent += '\nERRO: ' + d.error;
+      refreshVoiceProfiles();
+    }},
+    2000
+  );
+}}
+
+async function uploadLocalCorpus() {{
+  const voiceId = (document.getElementById('scIngestVoiceId').value || '').trim() || 'custom-voice';
+  const displayName = (document.getElementById('scIngestDisplayName').value || '').trim();
+  const isolateVocals = document.getElementById('scIsolateVocals').checked;
+  const filesInput = document.getElementById('scLocalFiles');
+  const statusEl = document.getElementById('scIngestStatus');
+
+  if (!filesInput.files || !filesInput.files.length) {{
+    statusEl.textContent = 'Selecione ao menos um arquivo de áudio/vídeo.';
+    return;
+  }}
+
+  const fd = new FormData();
+  fd.append('voice_id', voiceId);
+  if (displayName) fd.append('display_name', displayName);
+  fd.append('isolate_vocals', isolateVocals ? 'true' : 'false');
+  for (const f of filesInput.files) {{
+    fd.append('file', f, f.name);
+  }}
+
+  statusEl.textContent = 'Enviando arquivos (até 1 GB)...';
+  const res = await fetch('/api/v1/voice/corpus-upload', {{ method: 'POST', body: fd }});
+  if (!res.ok) {{
+    statusEl.textContent = 'Erro upload: ' + await res.text();
+    return;
+  }}
+  const job = await res.json();
+  if (scIngestTimer) clearInterval(scIngestTimer);
+  scIngestTimer = pollJob(
+    '/api/v1/voice/youtube-ingest/' + encodeURIComponent(job.job_id),
+    d => {{
+      const tail = (d.logs || []).slice(-3).join('\n');
+      statusEl.textContent = '[' + d.status + '] ' + d.stage + '\nClipes: ' + d.clips_generated + ' | Duração: ' + (d.total_duration_seconds || 0).toFixed(1) + 's' + (tail ? '\n' + tail : '');
+    }},
+    d => {{
+      clearInterval(scIngestTimer);
+      scIngestTimer = null;
+      if (d.error) statusEl.textContent += '\nERRO: ' + d.error;
+      refreshVoiceProfiles();
+    }},
+    2000
+  );
+}}
+
+async function startRvcTraining() {{
+  const voiceId = document.getElementById('scTrainVoiceSelect').value || 'custom-voice';
+  const epochs = parseInt(document.getElementById('scTrainEpochs').value || '120', 10);
+  const sampleRate = document.getElementById('scTrainSampleRate').value || '40k';
+  const statusEl = document.getElementById('scRvcStatus');
+  const barEl = document.getElementById('scRvcBar');
+
+  barEl.style.width = '0%';
+  statusEl.textContent = 'Iniciando treino RVC para ' + voiceId + '...';
+  const res = await fetch('/api/v1/voice/rvc-train', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{ voice_id: voiceId, epochs: epochs, sample_rate: sampleRate }})
+  }});
+  const job = await res.json();
+  if (scRvcTimer) clearInterval(scRvcTimer);
+  scRvcTimer = pollJob(
+    '/api/v1/voice/rvc-train/' + encodeURIComponent(job.job_id),
+    d => {{
+      barEl.style.width = (d.percent || 0) + '%';
+      statusEl.textContent = '[' + d.status + '] ' + d.stage + ' (' + d.current_epoch + '/' + d.total_epochs + ' • ' + (d.percent || 0) + '%)';
+    }},
+    d => {{
+      clearInterval(scRvcTimer);
+      scRvcTimer = null;
+      if (d.error) statusEl.textContent += '\nERRO: ' + d.error;
+      refreshVoiceProfiles();
+    }},
+    2500
+  );
+}}
+
+async function importRvcArtifacts() {{
+  const voiceId = document.getElementById('scTrainVoiceSelect').value || 'custom-voice';
+  const filesInput = document.getElementById('scImportRvcFiles');
+  const statusEl = document.getElementById('scRvcStatus');
+  if (!filesInput.files || !filesInput.files.length) {{
+    statusEl.textContent = 'Selecione os arquivos .pth e/ou .index.';
+    return;
+  }}
+  const fd = new FormData();
+  fd.append('voice_id', voiceId);
+  for (const f of filesInput.files) {{
+    fd.append('file', f, f.name);
+  }}
+  const res = await fetch('/api/v1/voice/rvc-import', {{ method: 'POST', body: fd }});
+  if (!res.ok) {{
+    statusEl.textContent = 'Erro ao importar: ' + await res.text();
+    return;
+  }}
+  const rec = await res.json();
+  statusEl.textContent = 'Artefatos RVC importados para ' + rec.voice_id + ' (has_rvc=' + rec.has_rvc_model + ')';
+  refreshVoiceProfiles();
+}}
+
+function loadAudiobookTextFile(input) {{
+  const f = input.files && input.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {{
+    document.getElementById('scAbText').value = reader.result || '';
+  }};
+  reader.readAsText(f, 'utf-8');
+}}
+
+async function startAudiobookGeneration() {{
+  const voiceId = document.getElementById('scAbVoiceSelect').value || 'custom-voice';
+  const engine = document.getElementById('scAbEngine').value || 'kokoro_rvc';
+  const baseVoice = document.getElementById('scAbBaseVoice').value || 'pm_alex';
+  const speed = parseFloat(document.getElementById('scAbSpeed').value || '1.0');
+  const text = (document.getElementById('scAbText').value || '').trim();
+  const statusEl = document.getElementById('scAbStatus');
+  const barEl = document.getElementById('scAbBar');
+  const player = document.getElementById('scAbPlayer');
+  const dlLink = document.getElementById('scAbDownloadLink');
+
+  if (!text) {{
+    statusEl.textContent = 'Digite ou carregue o texto do audiobook primeiro.';
+    return;
+  }}
+
+  barEl.style.width = '0%';
+  player.style.display = 'none';
+  dlLink.style.display = 'none';
+  statusEl.textContent = 'Enfileirando geração GPU (' + engine + ')...';
+
+  const res = await fetch('/api/v1/voice/audiobook', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{
+      voice_id: voiceId,
+      engine: engine,
+      base_voice: baseVoice,
+      speed: speed,
+      text: text
+    }})
+  }});
+  const job = await res.json();
+  if (!res.ok) {{
+    statusEl.textContent = 'Erro: ' + (job.error || res.status);
+    return;
+  }}
+  if (scAbTimer) clearInterval(scAbTimer);
+  scAbTimer = pollJob(
+    '/api/v1/voice/audiobook/' + encodeURIComponent(job.job_id),
+    d => {{
+      barEl.style.width = (d.percent || 0) + '%';
+      statusEl.textContent = '[' + d.status + '] ' + d.stage + ' (' + (d.percent || 0) + '%)';
+    }},
+    d => {{
+      clearInterval(scAbTimer);
+      scAbTimer = null;
+      if (d.status === 'completed' && d.download_url) {{
+        barEl.style.width = '100%';
+        statusEl.textContent = 'Concluído! Duração: ' + (d.duration_seconds || 0).toFixed(1) + 's (-14 LUFS)';
+        player.src = d.download_url + '?t=' + Date.now();
+        player.style.display = 'block';
+        dlLink.href = d.download_url;
+        dlLink.style.display = 'block';
+      }} else if (d.error) {{
+        statusEl.textContent += '\nERRO: ' + d.error;
+      }}
+    }},
+    2000
+  );
+}}
 
 // Auto-Cache Busting Watcher: verifica nova versao do daemon a cada 20s
 let currentGitSha = "{git_sha}";
