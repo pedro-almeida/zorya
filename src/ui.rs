@@ -1066,11 +1066,11 @@ pub fn render_svitlo_dashboard_html(
         <div class="input-grid-2">
           <div class="field-group" style="margin-bottom:0;">
             <label>ID da Voz (slug)</label>
-            <input id="scIngestVoiceId" placeholder="clovis-barros" value="clovis-barros">
+            <input id="scIngestVoiceId" placeholder="voz-personalizada" value="voz-personalizada">
           </div>
           <div class="field-group" style="margin-bottom:0;">
             <label>Nome de Exibição</label>
-            <input id="scIngestDisplayName" placeholder="Prof. Clóvis de Barros">
+            <input id="scIngestDisplayName" placeholder="Voz Personalizada">
           </div>
         </div>
 
@@ -1472,7 +1472,7 @@ async function refreshVoiceProfiles() {{
 
     const ids = profiles.map(p => p.voice_id);
     if (typedId && !ids.includes(typedId)) ids.unshift(typedId);
-    if (!ids.length) ids.push('clovis-barros');
+    if (!ids.length) ids.push('voz-personalizada');
 
     const prevTrain = trainSel.value;
     const prevAb = abSel.value;

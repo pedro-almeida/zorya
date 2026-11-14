@@ -304,15 +304,58 @@ pub fn sanitize_voice_id(raw: &str) -> String {
 }
 
 fn resolve_gpu_python() -> String {
-    let preferred = StdPath::new(r"C:\mriya\mriya\audiobook_tts\.venv\Scripts\python.exe");
-    if preferred.exists() {
-        return preferred.to_string_lossy().to_string();
-    }
-    if cfg!(target_os = "windows") {
-        "python".to_string()
-    } else {
-        "python3".to_string()
-    }
+    static RESOLVED_PYTHON: OnceLock<String> = OnceLock::new();
+    RESOLVED_PYTHON
+        .get_or_init(|| {
+            // 1. Variável de ambiente ZORYA_PYTHON (se definida e existente)
+            if let Ok(env_py) = std::env::var("ZORYA_PYTHON") {
+                let p = StdPath::new(&env_py);
+                if p.is_file() {
+                    tracing::info!("Zorya Python GPU resolvido via ZORYA_PYTHON: {}", env_py);
+                    return env_py;
+                }
+            }
+
+            // 2. C:\dev\zorya\.venv\Scripts\python.exe e C:\dev\zorya\venv\Scripts\python.exe
+            let local_candidates = [
+                r"C:\dev\zorya\.venv\Scripts\python.exe",
+                r"C:\dev\zorya\venv\Scripts\python.exe",
+                r".venv\Scripts\python.exe",
+                r"venv\Scripts\python.exe",
+            ];
+            for cand in &local_candidates {
+                let p = StdPath::new(cand);
+                if p.is_file() {
+                    let s = p.to_string_lossy().to_string();
+                    tracing::info!("Zorya Python GPU resolvido via local venv: {}", s);
+                    return s;
+                }
+            }
+
+            // 3. C:\mriya\mriya\audiobook_tts\.venv\Scripts\python.exe
+            let mriya_cand = StdPath::new(r"C:\mriya\mriya\audiobook_tts\.venv\Scripts\python.exe");
+            if mriya_cand.is_file() {
+                let s = mriya_cand.to_string_lossy().to_string();
+                tracing::info!("Zorya Python GPU resolvido via Mriya venv: {}", s);
+                return s;
+            }
+
+            // 4. Fallback para python / py -3.11 no PATH
+            if cfg!(target_os = "windows") {
+                let check_py311 = new_silent_command("py")
+                    .args(["-3.11", "-c", "import sys; sys.exit(0)"])
+                    .status();
+                if let Ok(st) = check_py311 {
+                    if st.success() {
+                        return "py".to_string();
+                    }
+                }
+                "python".to_string()
+            } else {
+                "python3".to_string()
+            }
+        })
+        .clone()
 }
 
 fn voice_profiles_manifest_path() -> PathBuf {

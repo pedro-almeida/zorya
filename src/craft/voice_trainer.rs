@@ -32,7 +32,7 @@ pub struct VoiceCorpusMinerRequest {
 }
 
 fn default_speaker() -> String {
-    "clovis-barros-filho".to_string()
+    "voz-personalizada".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,7 +82,12 @@ where
 /// PT: Inicia tarefa de mineração de áudio em background para ingestão e construção de corpus vocal.
 /// EN: Starts background audio mining job for vocal corpus ingestion and construction.
 // AI: @llm-func start_voice_corpus_mining
-pub async fn start_voice_corpus_mining(req: VoiceCorpusMinerRequest) -> VoiceCorpusMinerJob {
+pub async fn start_voice_corpus_mining(mut req: VoiceCorpusMinerRequest) -> VoiceCorpusMinerJob {
+    req.speaker_profile = crate::security::sanitize_profile_id(&req.speaker_profile)
+        .unwrap_or_else(|_| "voz-personalizada".to_string());
+    req.youtube_urls
+        .retain(|u| crate::security::sanitize_youtube_url(u).is_ok());
+
     let job_id = format!(
         "mine_{}_{}",
         req.speaker_profile,

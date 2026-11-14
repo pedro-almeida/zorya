@@ -38,13 +38,13 @@ datasets/voices/
 {
   "profiles": [
     {
-      "voice_id": "clovis-barros",
-      "display_name": "Prof. Clóvis de Barros Filho",
+      "voice_id": "voz-personalizada",
+      "display_name": "Voz Personalizada",
       "clip_count": 320,
       "total_duration_seconds": 2560.0,
       "has_rvc_model": true,
-      "rvc_model_path": "datasets/voices/profiles/clovis-barros/rvc/model.pth",
-      "rvc_index_path": "datasets/voices/profiles/clovis-barros/rvc/added.index",
+      "rvc_model_path": "datasets/voices/profiles/voz-personalizada/rvc/model.pth",
+      "rvc_index_path": "datasets/voices/profiles/voz-personalizada/rvc/added.index",
       "updated_at_epoch": 1794440000
     }
   ]
@@ -63,8 +63,8 @@ Dispara em background o download via `yt-dlp`, isolamento vocal opcional via `de
 - **Request JSON:**
   ```json
   {
-    "voice_id": "clovis-barros",
-    "display_name": "Prof. Clóvis de Barros",
+    "voice_id": "voz-personalizada",
+    "display_name": "Voz Personalizada",
     "youtube_urls": ["https://www.youtube.com/watch?v=..."],
     "isolate_vocals": true
   }
@@ -72,8 +72,8 @@ Dispara em background o download via `yt-dlp`, isolamento vocal opcional via `de
 - **Response (`202 Accepted`):**
   ```json
   {
-    "job_id": "ingest_clovis-barros_1794440000",
-    "voice_id": "clovis-barros",
+    "job_id": "ingest_voz-personalizada_1794440000",
+    "voice_id": "voz-personalizada",
     "status": "queued",
     "stage": "initializing",
     "clips_generated": 0,
@@ -93,7 +93,7 @@ Inicia o treino local de RVC na GTX 1650 (`batch_size=1`, `fp16=True`, pitch `rm
 - **Request JSON:**
   ```json
   {
-    "voice_id": "clovis-barros",
+    "voice_id": "voz-personalizada",
     "epochs": 120,
     "sample_rate": "40k"
   }
@@ -114,7 +114,7 @@ Gera um audiobook completo em MP3 utilizando `scripts/zorya_voice_worker.py` em 
 - **Request JSON:**
   ```json
   {
-    "voice_id": "clovis-barros",
+    "voice_id": "voz-personalizada",
     "engine": "kokoro_rvc",
     "base_voice": "pm_alex",
     "speed": 1.0,

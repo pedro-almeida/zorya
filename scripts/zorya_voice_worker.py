@@ -1,4 +1,5 @@
 import argparse
+import gc
 import io
 import os
 import re
@@ -10,6 +11,22 @@ from typing import List, Optional
 
 import numpy as np
 from pydub import AudioSegment
+
+
+def log_device_check() -> str:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            dev_name = torch.cuda.get_device_name(0)
+            print(f"STAGE:device_check:cuda:{dev_name}", flush=True)
+            return "cuda"
+        else:
+            print("STAGE:device_check:cpu", flush=True)
+            return "cpu"
+    except Exception:
+        print("STAGE:device_check:cpu", flush=True)
+        return "cpu"
 
 
 def clean_text_for_narration(raw_text: str) -> str:
@@ -93,7 +110,8 @@ def select_best_reference_clips(wavs_dir: Path, limit: int = 15) -> List[Path]:
 
 
 VOICESTUDIO_PRESETS = {
-    "clovis_brio": ("pm_alex", 1.08),
+    "narrador_energetico": ("pm_alex", 1.08),
+    "estudio_academico": ("pm_alex", 0.96),
     "academico_calmo": ("pm_alex", 0.96),
     "podcast_grave": ("pm_santa", 1.0),
 }
@@ -176,6 +194,13 @@ def synthesize_kokoro(
                 combined = np.concatenate(parts)
                 final_audio += float32_to_audio_segment(combined, 24000) + pause
 
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
+            except Exception:
+                pass
+
         return final_audio
     except Exception as e:
         print(
@@ -188,45 +213,75 @@ def synthesize_kokoro(
 def synthesize_xtts_multi(
     chunks: List[str], wavs_dir: Path, speed: float
 ) -> AudioSegment:
-    import torch
-    from TTS.api import TTS  # type: ignore
+    try:
+        import torch
+        from TTS.api import TTS  # type: ignore
+    except ImportError:
+        print(
+            "[AVISO] Pacote Coqui TTS ausente neste venv; acionando fallback neural local...",
+            flush=True,
+        )
+        try:
+            return synthesize_kokoro(chunks, base_voice="pm_alex", speed=speed)
+        except Exception as e:
+            print(
+                f"[AVISO] Kokoro fallback falhou ({e}); acionando fallback edge-tts...",
+                flush=True,
+            )
+            return synthesize_edge_tts_fallback(chunks, base_voice="pm_alex", speed=speed)
 
     ref_clips = select_best_reference_clips(wavs_dir, limit=15)
     if not ref_clips:
-        raise RuntimeError(
-            f"Nenhum clipe de referencia encontrado em {wavs_dir}. Execute a mineracao ou envie audio primeiro."
+        print(
+            f"[AVISO] Nenhum clipe de referencia encontrado em {wavs_dir}. Acionando fallback neural local...",
+            flush=True,
         )
+        return synthesize_kokoro(chunks, base_voice="pm_alex", speed=speed)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"STAGE:xtts_multi_init:{device}:{len(ref_clips)}_clips", flush=True)
 
-    # Coqui XTTS-v2 aceita lista de multiplos arquivos em speaker_wav
-    os.environ.setdefault("COQUI_TOS_AGREED", "1")
-    tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
+    try:
+        # Coqui XTTS-v2 aceita lista de multiplos arquivos em speaker_wav
+        os.environ.setdefault("COQUI_TOS_AGREED", "1")
+        tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
 
-    final_audio = AudioSegment.empty()
-    pause = AudioSegment.silent(duration=320)
-    ref_paths = [str(p) for p in ref_clips]
-    tmp_dir = wavs_dir.parent / "_tmp_xtts"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+        final_audio = AudioSegment.empty()
+        pause = AudioSegment.silent(duration=320)
+        ref_paths = [str(p) for p in ref_clips]
+        tmp_dir = wavs_dir.parent / "_tmp_xtts"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    total = len(chunks)
-    for idx, chunk in enumerate(chunks, start=1):
-        pct = int((idx / max(total, 1)) * 90)
-        print(f"PROGRESS:{idx}/{total} ({pct}%)", flush=True)
-        out_chunk_wav = tmp_dir / f"chunk_{idx:04d}.wav"
-        tts.tts_to_file(
-            text=chunk,
-            speaker_wav=ref_paths,
-            language="pt",
-            file_path=str(out_chunk_wav),
-            speed=speed,
+        total = len(chunks)
+        for idx, chunk in enumerate(chunks, start=1):
+            pct = int((idx / max(total, 1)) * 90)
+            print(f"PROGRESS:{idx}/{total} ({pct}%)", flush=True)
+            out_chunk_wav = tmp_dir / f"chunk_{idx:04d}.wav"
+            tts.tts_to_file(
+                text=chunk,
+                speaker_wav=ref_paths,
+                language="pt",
+                file_path=str(out_chunk_wav),
+                speed=speed,
+            )
+            if out_chunk_wav.exists():
+                final_audio += AudioSegment.from_wav(str(out_chunk_wav)) + pause
+                out_chunk_wav.unlink(missing_ok=True)
+
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
+            except Exception:
+                pass
+
+        return final_audio
+    except Exception as e:
+        print(
+            f"[AVISO] XTTS falhou durante execucao ({e}); acionando fallback neural local...",
+            flush=True,
         )
-        if out_chunk_wav.exists():
-            final_audio += AudioSegment.from_wav(str(out_chunk_wav)) + pause
-            out_chunk_wav.unlink(missing_ok=True)
-
-    return final_audio
+        return synthesize_kokoro(chunks, base_voice="pm_alex", speed=speed)
 
 
 def apply_rvc_conversion(
@@ -276,6 +331,14 @@ def apply_rvc_conversion(
     converted = AudioSegment.from_wav(str(out_wav))
     in_wav.unlink(missing_ok=True)
     out_wav.unlink(missing_ok=True)
+
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+    except Exception:
+        pass
+
     return converted
 
 
@@ -322,9 +385,11 @@ def main() -> None:
         choices=["kokoro", "xtts_multi", "kokoro_rvc"],
     )
     parser.add_argument("--profile-dir", type=Path, required=False)
-    parser.add_argument("--base-voice", type=str, default="pm_alex")
+    parser.add_argument("--base-voice", type=str, default="narrador_energetico")
     parser.add_argument("--speed", type=float, default=1.0)
     args = parser.parse_args()
+
+    log_device_check()
 
     raw_text = args.text_file.read_text(encoding="utf-8")
     cleaned = clean_text_for_narration(raw_text)

@@ -1,5 +1,5 @@
-// PT: [narration.rs] Geração de legendas SRT sincronizadas e síntese vocal Modo Clóvis via Gemini TTS Oficial
-// EN: [narration.rs] Synchronized SRT subtitle generation and Clovis-Mode vocal synthesis via Official Gemini TTS
+// PT: [narration.rs] Geração de legendas SRT sincronizadas e síntese vocal Modo Enérgico via Gemini TTS Oficial
+// EN: [narration.rs] Synchronized SRT subtitle generation and Energetic-Mode vocal synthesis via Official Gemini TTS
 // AI: @llm-module video::narration
 // AI: @llm-model gemini-2.5-flash-preview-tts
 
@@ -35,10 +35,10 @@ fn format_srt_time(total_secs: f32) -> String {
     format!("{:02}:{:02}:{:02},{:03}", h, m, s, millis)
 }
 
-/// PT: Formatador retórico 'Modo Clóvis' que insere pausas dramáticas (...), provocações diretas e ênfases viscerais.
-/// EN: 'Clovis Mode' rhetorical formatter inserting dramatic pauses (...), direct provocations, and visceral emphasis.
-// AI: @llm-func format_clovis_rhetoric
-pub fn format_clovis_rhetoric(text: &str) -> String {
+/// PT: Formatador retórico 'Modo Enérgico' que insere pausas dramáticas (...), provocações diretas e ênfases viscerais.
+/// EN: 'Energetic Mode' rhetorical formatter inserting dramatic pauses (...), direct provocations, and visceral emphasis.
+// AI: @llm-func format_energetic_rhetoric
+pub fn format_energetic_rhetoric(text: &str) -> String {
     let clean = text.trim();
     if clean.is_empty() {
         return String::new();
@@ -219,7 +219,7 @@ pub async fn synthesize_gemini_tts(
     // Fallback determinístico offline caso Gemini TTS não esteja acessível
     let fallback_req = crate::craft::VoiceSynthesizeRequest {
         text: text.to_string(),
-        profile_id: Some("clovis-barros-filho".to_string()),
+        profile_id: Some("voz-personalizada".to_string()),
         language: Some("pt-BR".to_string()),
     };
     let synthesized = crate::craft::clone_and_synthesize_voice(&fallback_req)?;
@@ -227,14 +227,14 @@ pub async fn synthesize_gemini_tts(
     Ok(decoded)
 }
 
-/// PT: Pipeline completo de narração 'Modo Clóvis' com retórica personalizada e Gemini TTS.
-/// EN: Complete 'Clovis Mode' narration pipeline with custom rhetoric and Gemini TTS.
-// AI: @llm-func synthesize_clovis_narration
-pub async fn synthesize_clovis_narration(
+/// PT: Pipeline completo de narração 'Modo Enérgico' com retórica personalizada e Gemini TTS.
+/// EN: Complete 'Energetic Mode' narration pipeline with custom rhetoric and Gemini TTS.
+// AI: @llm-func synthesize_energetic_narration
+pub async fn synthesize_energetic_narration(
     raw_text: &str,
     voice_name: Option<&str>,
     api_key: Option<&str>,
 ) -> anyhow::Result<Vec<u8>> {
-    let clovis_text = format_clovis_rhetoric(raw_text);
-    synthesize_gemini_tts(&clovis_text, voice_name, api_key).await
+    let energetic_text = format_energetic_rhetoric(raw_text);
+    synthesize_gemini_tts(&energetic_text, voice_name, api_key).await
 }

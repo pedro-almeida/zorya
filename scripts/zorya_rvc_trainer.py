@@ -1,4 +1,5 @@
 import argparse
+import gc
 import json
 import os
 import shutil
@@ -42,11 +43,22 @@ def isolate_vocals_demucs(input_audio: Path, output_vocals_wav: Path) -> Path:
 
     stem_name = input_audio.stem
     vocals_cand = tmp_out / "htdemucs" / stem_name / "vocals.wav"
+    result_path = input_audio
     if vocals_cand.exists():
         shutil.move(str(vocals_cand), str(output_vocals_wav))
         shutil.rmtree(tmp_out, ignore_errors=True)
-        return output_vocals_wav
-    return input_audio
+        result_path = output_vocals_wav
+
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+    except Exception:
+        pass
+
+    return result_path
 
 
 def download_youtube_urls(
@@ -296,6 +308,14 @@ def train_rvc_4gb_vram(
                 res = subprocess.run(step_cmd, cwd=str(rvc_root), capture_output=True, text=True)
                 if res.returncode != 0:
                     raise RuntimeError(f"Erro no passo RVC {idx_step}: {res.stderr[:400]}")
+                try:
+                    import torch
+
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    gc.collect()
+                except Exception:
+                    pass
 
             # Copia artefatos gerados para profile_dir/rvc/
             logs_dir = rvc_root / "logs" / voice_id

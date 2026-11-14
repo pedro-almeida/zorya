@@ -67,7 +67,8 @@ pub use composer::{
     get_wav_duration_seconds, SvitloVideoOptions,
 };
 pub use narration::{
-    build_srt_subtitles, format_clovis_rhetoric, synthesize_clovis_narration, synthesize_gemini_tts,
+    build_srt_subtitles, format_energetic_rhetoric, synthesize_energetic_narration,
+    synthesize_gemini_tts,
 };
 pub use script::generate_lesson_script;
 pub use youtube::build_youtube_metadata_payload;
@@ -116,7 +117,7 @@ pub async fn handle_svitlo_video_v2(
     let voice = req.voice_name.as_deref().unwrap_or("Charon");
     let key = req.gemini_api_key.as_deref();
 
-    let audio_bytes = match synthesize_clovis_narration(&full_text, Some(voice), key).await {
+    let audio_bytes = match synthesize_energetic_narration(&full_text, Some(voice), key).await {
         Ok(b) => b,
         Err(e) => {
             return (

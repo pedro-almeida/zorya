@@ -177,9 +177,18 @@ impl Default for OpenShellPolicy {
             ],
             allowed_binaries: vec![
                 "ffmpeg".to_string(),
+                "ffmpeg.exe".to_string(),
+                "ffprobe".to_string(),
+                "ffprobe.exe".to_string(),
                 "yt-dlp".to_string(),
+                "yt-dlp.exe".to_string(),
                 "python".to_string(),
                 "python.exe".to_string(),
+                "python3".to_string(),
+                "edge-tts".to_string(),
+                "edge-tts.exe".to_string(),
+                "git".to_string(),
+                "git.exe".to_string(),
             ],
             allow_outbound_network: true,
         }
@@ -196,4 +205,47 @@ pub fn verify_openshell_command(binary: &str, policy: &OpenShellPolicy) -> bool 
         .allowed_binaries
         .iter()
         .any(|b| b.to_ascii_lowercase() == bin_name)
+}
+
+/// PT: Valida e sanitiza nomes de perfil vocal conforme regex declarativo ^[a-z0-9_-]+$
+/// EN: Validates and sanitizes voice profile names according to declarative regex ^[a-z0-9_-]+$
+pub fn sanitize_profile_id(raw: &str) -> anyhow::Result<String> {
+    let trimmed = raw.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        anyhow::bail!("Identificador de perfil vocal vazio");
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
+        anyhow::bail!(
+            "Identificador de perfil vocal inválido (deve conter apenas [a-z0-9_-]): {}",
+            raw
+        );
+    }
+    Ok(trimmed)
+}
+
+/// PT: Valida e sanitiza URLs do YouTube bloqueando qualquer injeção de shell
+/// EN: Validates and sanitizes YouTube URLs blocking any shell injection attempt
+pub fn sanitize_youtube_url(url: &str) -> anyhow::Result<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("URL do YouTube vazia");
+    }
+    let forbidden_chars = ['\0', ';', '&', '|', '`', '$', '\n', '\r', '"', '\''];
+    if trimmed.chars().any(|c| forbidden_chars.contains(&c)) {
+        anyhow::bail!("Injeção de caracteres detectada na URL: {}", url);
+    }
+    let lower = trimmed.to_lowercase();
+    let is_valid_yt = lower.starts_with("https://www.youtube.com/")
+        || lower.starts_with("https://youtube.com/")
+        || lower.starts_with("https://m.youtube.com/")
+        || lower.starts_with("https://youtu.be/")
+        || lower.starts_with("http://www.youtube.com/")
+        || lower.starts_with("http://youtu.be/");
+    if !is_valid_yt {
+        anyhow::bail!("URL não pertence ao domínio YouTube permitido: {}", url);
+    }
+    Ok(trimmed.to_string())
 }

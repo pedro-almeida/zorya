@@ -13,6 +13,7 @@ config.yaml
 temp/
 uploads/
 thumbnails/
+datasets/
 .jedi_credentials_cache.json
 .jedi_models_cache.json
 credentials.json
@@ -22,3 +23,5 @@ __pycache__/
 scripts/tmp/
 scripts/patch_*.py
 scripts/fix_*.sh
+.venv/
+venv/
