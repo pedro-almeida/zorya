@@ -945,4 +945,9 @@ impl QuotaRouter {
             t.cooldown_until = 0;
         }
     }
+
+    /// PT: Retorna a cascata de provedores gratuitos OpenAI-compatíveis (Awesome Free LLM APIs)
+    pub fn free_llm_fallback_cascade() -> &'static [&'static str] {
+        &["openrouter-free", "nvidia-nim-free", "cerebras-free"]
+    }
 }

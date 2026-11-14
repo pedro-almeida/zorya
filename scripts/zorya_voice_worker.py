@@ -92,6 +92,13 @@ def select_best_reference_clips(wavs_dir: Path, limit: int = 15) -> List[Path]:
     return [c[1] for c in candidates[:limit]]
 
 
+VOICESTUDIO_PRESETS = {
+    "clovis_brio": ("pm_alex", 1.08),
+    "academico_calmo": ("pm_alex", 0.96),
+    "podcast_grave": ("pm_santa", 1.0),
+}
+
+
 def synthesize_edge_tts_fallback(
     chunks: List[str], base_voice: str, speed: float
 ) -> AudioSegment:
@@ -138,6 +145,11 @@ def synthesize_edge_tts_fallback(
 def synthesize_kokoro(
     chunks: List[str], base_voice: str, speed: float
 ) -> AudioSegment:
+    if base_voice in VOICESTUDIO_PRESETS:
+        base_voice, preset_speed = VOICESTUDIO_PRESETS[base_voice]
+        if abs(speed - 1.0) < 1e-4:
+            speed = preset_speed
+
     try:
         import torch
         from kokoro import KPipeline
@@ -280,7 +292,7 @@ def export_mastered_mp3(audio: AudioSegment, output_mp3: Path) -> float:
         "-i",
         str(tmp_wav),
         "-af",
-        "loudnorm=I=-14:TP=-1.0:LRA=11",
+        "acompressor=threshold=-18dB:ratio=2.5,loudnorm=I=-14:TP=-1.0:LRA=11",
         "-codec:a",
         "libmp3lame",
         "-b:a",

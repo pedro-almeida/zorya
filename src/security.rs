@@ -157,3 +157,43 @@ pub fn check_prompt_injection_heuristic(text: &str) -> (bool, &'static str) {
     }
     (false, "clean")
 }
+
+/// PT: Política declarativa de confinamento de agente inspirada no NVIDIA OpenShell
+/// EN: Declarative agent confinement policy inspired by NVIDIA OpenShell
+#[derive(Debug, Clone)]
+pub struct OpenShellPolicy {
+    pub allowed_roots: Vec<PathBuf>,
+    pub allowed_binaries: Vec<String>,
+    pub allow_outbound_network: bool,
+}
+
+impl Default for OpenShellPolicy {
+    fn default() -> Self {
+        Self {
+            allowed_roots: vec![
+                PathBuf::from("datasets"),
+                PathBuf::from("outputs"),
+                PathBuf::from("scripts"),
+            ],
+            allowed_binaries: vec![
+                "ffmpeg".to_string(),
+                "yt-dlp".to_string(),
+                "python".to_string(),
+                "python.exe".to_string(),
+            ],
+            allow_outbound_network: true,
+        }
+    }
+}
+
+pub fn verify_openshell_command(binary: &str, policy: &OpenShellPolicy) -> bool {
+    let bin_name = Path::new(binary)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(binary)
+        .to_ascii_lowercase();
+    policy
+        .allowed_binaries
+        .iter()
+        .any(|b| b.to_ascii_lowercase() == bin_name)
+}

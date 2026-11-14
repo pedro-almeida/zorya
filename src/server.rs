@@ -316,6 +316,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/v1/video/teaser",
             post(crate::craft::video_teaser::handle_video_teaser),
         )
+        .route(
+            "/api/v1/video/hyperframes",
+            post(crate::craft::video_teaser::handle_hyperframes_render),
+        )
         .route("/api/v1/craft/docx", post(handle_craft_docx))
         .route("/api/v1/craft/deck", post(handle_craft_deck))
         .route("/api/v1/craft/film", post(handle_craft_film))
