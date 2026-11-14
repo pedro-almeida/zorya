@@ -58,6 +58,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use crate::agent::ZoryaAgent;
 use crate::cluster::ClusterCoordinator;
 use crate::config::ZoryaConfig;
+pub use crate::craft::voice::delete_voice_profile;
 use crate::hardware::HardwareProfile;
 use crate::inference::NativeInferenceEngine;
 use crate::network::NetworkManager;

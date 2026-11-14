@@ -521,6 +521,73 @@ pub async fn handle_list_profiles() -> Json<Vec<VoiceProfileRecord>> {
     Json(manifest.profiles)
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeleteVoiceProfileResponse {
+    pub deleted: bool,
+    pub profile_id: String,
+}
+
+pub async fn handle_delete_voice_profile(
+    AxumPath(profile_id): AxumPath<String>,
+) -> Result<Json<DeleteVoiceProfileResponse>, (StatusCode, Json<serde_json::Value>)> {
+    delete_voice_profile(&profile_id).await
+}
+
+pub async fn delete_voice_profile(
+    profile_id: &str,
+) -> Result<Json<DeleteVoiceProfileResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let pid = profile_id.trim();
+
+    // Validação estrita NVIDIA OpenShell: ^[a-z0-9_-]{1,64}$
+    if pid.is_empty()
+        || pid.len() > 64
+        || pid.contains("..")
+        || pid.contains('/')
+        || pid.contains('\\')
+        || !pid
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Identificador de perfil vocal inválido. Deve obedecer estritamente a ^[a-z0-9_-]{1,64}$ sem caracteres especiais ou caminhos relativos.",
+                "deleted": false,
+                "profile_id": pid
+            })),
+        ));
+    }
+
+    // 1. Remove diretório físico do perfil (inclui wavs/, reference_clean.wav, rvc/*.pth)
+    let pdir = voice_profile_dir(pid);
+    if pdir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&pdir) {
+            tracing::warn!("Falha ao remover diretório do perfil {}: {}", pid, e);
+        }
+    }
+
+    // 2. Remove do manifesto persistido datasets/voices/profiles.json
+    let mut manifest = load_profiles_manifest();
+    manifest.profiles.retain(|p| p.voice_id != pid);
+    save_profiles_manifest(&manifest);
+
+    // 3. Remove jobs e áudios temporários associados em datasets/voices/audiobooks
+    let ab_base = StdPath::new("datasets/voices/audiobooks");
+    if let Ok(entries) = std::fs::read_dir(ab_base) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&format!("ab_{}_", pid)) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+
+    Ok(Json(DeleteVoiceProfileResponse {
+        deleted: true,
+        profile_id: pid.to_string(),
+    }))
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct YoutubeIngestRequest {
     pub voice_id: String,
@@ -1257,6 +1324,7 @@ pub struct AudiobookJob {
     pub job_id: String,
     pub voice_id: String,
     pub engine: String,
+    pub engine_used: Option<String>,
     pub status: String,
     pub stage: String,
     pub percent: u8,
@@ -1302,6 +1370,7 @@ pub async fn handle_audiobook_start(
             job_id,
             voice_id,
             engine,
+            engine_used: None,
             status: "failed".to_string(),
             stage: "validacao".to_string(),
             percent: 0,
@@ -1323,6 +1392,7 @@ pub async fn handle_audiobook_start(
         job_id: job_id.clone(),
         voice_id: voice_id.clone(),
         engine: engine.clone(),
+        engine_used: None,
         status: "queued".to_string(),
         stage: "na fila".to_string(),
         percent: 0,
@@ -1413,6 +1483,9 @@ pub async fn handle_audiobook_start(
                 if let Some(rest) = trimmed.strip_prefix("STAGE:") {
                     let st = rest.to_string();
                     update_audiobook_job(&jid, |j| j.stage = st.clone()).await;
+                } else if let Some(rest) = trimmed.strip_prefix("ENGINE_USED:") {
+                    let eu = rest.trim().to_string();
+                    update_audiobook_job(&jid, |j| j.engine_used = Some(eu.clone())).await;
                 } else if let Some(rest) = trimmed.strip_prefix("PROGRESS:") {
                     if let Some((_, pct_part)) = rest.split_once('(') {
                         let p = pct_part

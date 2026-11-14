@@ -7,7 +7,7 @@ use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Multipart, State},
     http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde::Deserialize;
@@ -279,6 +279,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/v1/voice/profiles",
             get(crate::craft::voice::handle_list_profiles),
+        )
+        .route(
+            "/api/v1/voice/profiles/:profile_id",
+            delete(crate::craft::voice::handle_delete_voice_profile),
         )
         .route(
             "/api/v1/voice/youtube-ingest",

@@ -128,6 +128,7 @@ def synthesize_edge_tts_fallback(
     )
     rate_pct = int(round((speed - 1.0) * 100))
     rate_str = f"{rate_pct:+d}%"
+    print("ENGINE_USED:fallback_edge_tts", flush=True)
     print(f"STAGE:edge_tts_init:{edge_voice}:{rate_str}", flush=True)
 
     final_audio = AudioSegment.empty()
@@ -215,12 +216,25 @@ def synthesize_xtts_multi(
 ) -> AudioSegment:
     try:
         import torch
+
+        # Compatibilidade determinística com PyTorch 2.6+ onde weights_only defaultou para True
+        if hasattr(torch, "load"):
+            _orig_torch_load = torch.load
+
+            def _torch_load_compat(*args, **kwargs):
+                if "weights_only" not in kwargs:
+                    kwargs["weights_only"] = False
+                return _orig_torch_load(*args, **kwargs)
+
+            torch.load = _torch_load_compat
+
         from TTS.api import TTS  # type: ignore
     except ImportError:
         print(
             "[AVISO] Pacote Coqui TTS ausente neste venv; acionando fallback neural local...",
             flush=True,
         )
+        print("ENGINE_USED:fallback_kokoro", flush=True)
         try:
             return synthesize_kokoro(chunks, base_voice="pm_alex", speed=speed)
         except Exception as e:
@@ -228,6 +242,7 @@ def synthesize_xtts_multi(
                 f"[AVISO] Kokoro fallback falhou ({e}); acionando fallback edge-tts...",
                 flush=True,
             )
+            print("ENGINE_USED:fallback_edge_tts", flush=True)
             return synthesize_edge_tts_fallback(chunks, base_voice="pm_alex", speed=speed)
 
     ref_clips = select_best_reference_clips(wavs_dir, limit=15)
@@ -236,10 +251,15 @@ def synthesize_xtts_multi(
             f"[AVISO] Nenhum clipe de referencia encontrado em {wavs_dir}. Acionando fallback neural local...",
             flush=True,
         )
+        print("ENGINE_USED:fallback_kokoro", flush=True)
         return synthesize_kokoro(chunks, base_voice="pm_alex", speed=speed)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"STAGE:xtts_multi_init:{device}:{len(ref_clips)}_clips", flush=True)
+    if device == "cuda":
+        print("ENGINE_USED:xtts_v2_cloned_cuda", flush=True)
+    else:
+        print("ENGINE_USED:xtts_v2_cloned_cpu", flush=True)
 
     try:
         # Coqui XTTS-v2 aceita lista de multiplos arquivos em speaker_wav
@@ -281,6 +301,7 @@ def synthesize_xtts_multi(
             f"[AVISO] XTTS falhou durante execucao ({e}); acionando fallback neural local...",
             flush=True,
         )
+        print("ENGINE_USED:fallback_kokoro", flush=True)
         return synthesize_kokoro(chunks, base_voice="pm_alex", speed=speed)
 
 
@@ -312,6 +333,10 @@ def apply_rvc_conversion(
     import torch
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    if "cuda" in device:
+        print("ENGINE_USED:rvc_cloned_cuda", flush=True)
+    else:
+        print("ENGINE_USED:rvc_cloned_cpu", flush=True)
 
     try:
         from rvc_python.infer import RVCInference  # type: ignore
@@ -400,6 +425,7 @@ def main() -> None:
     chunks = split_into_natural_chunks(cleaned, max_chars=max_chars)
 
     if args.engine == "kokoro":
+        print("ENGINE_USED:kokoro_native", flush=True)
         audio = synthesize_kokoro(chunks, args.base_voice, args.speed)
     elif args.engine == "xtts_multi":
         if not args.profile_dir:

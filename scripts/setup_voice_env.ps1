@@ -69,12 +69,13 @@ if (-not $SkipTorchInstall) {
 Write-Host "-> Instalando pacotes do pipeline de voz (kokoro, demucs, yt-dlp, edge-tts, pydub, etc)..." -ForegroundColor Yellow
 & $venvPy -m pip install kokoro kokoro-onnx demucs yt-dlp edge-tts pydub soundfile scipy numpy
 
-# 6. Tenta instalar Coqui TTS (opcional, com fallback gracioso se faltar compilador C++)
-Write-Host "-> Tentando instalar coqui-tts..." -ForegroundColor Yellow
+# 6. Instala Coqui TTS (TTS)
+Write-Host "-> Instalando Coqui TTS (TTS)..." -ForegroundColor Yellow
 try {
-    & $venvPy -m pip install coqui-tts
+    & $venvPy -m pip install TTS
 } catch {
-    Write-Warning "Coqui TTS falhou na instalacao direta. O worker zorya_voice_worker.py acionara o fallback Kokoro / edge-tts automaticamente."
+    Write-Warning "Instalacao direta de TTS falhou. Tentando coqui-tts..."
+    try { & $venvPy -m pip install coqui-tts } catch { Write-Warning "Fallback Kokoro / edge-tts sera acionado automaticamente." }
 }
 
 # 7. Verificacao de CUDA e GPU
