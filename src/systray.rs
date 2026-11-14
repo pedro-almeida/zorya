@@ -115,9 +115,14 @@ impl SystrayController {
             return;
         }
         LAST_BROWSER_OPEN_MS.store(now, Ordering::Relaxed);
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", url])
-            .spawn();
+        #[allow(unused_mut)]
+        let mut cmd = std::process::Command::new("cmd");
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+        }
+        let _ = cmd.args(["/C", "start", url]).spawn();
     }
 
     #[cfg(all(target_os = "windows", feature = "systray"))]

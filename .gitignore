@@ -18,3 +18,7 @@ thumbnails/
 credentials.json
 *credentials*.json
 __pycache__/
+**/__pycache__/
+scripts/tmp/
+scripts/patch_*.py
+scripts/fix_*.sh

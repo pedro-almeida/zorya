@@ -68,6 +68,10 @@ pub struct VectorEdgeSpec {
     pub from: String,
     pub to: String,
     pub label: Option<String>,
+    #[serde(default)]
+    pub arrow_width: Option<f32>,
+    #[serde(default)]
+    pub arrow_length: Option<f32>,
 }
 
 // Result metadata for EBU R128 audio mastering / Metadados de resultado da masterização de áudio EBU R128
@@ -188,6 +192,43 @@ pub fn photocraft_apply_lut(rgb_f32: &mut [f32], lut_name: &str) -> anyhow::Resu
         chunk[2] = (chunk[2] * gain_b).clamp(0.0, 1.0);
     }
     Ok(())
+}
+
+/// PT: Redimensiona proporcionalmente a imagem se ela exceder os limites (Don't Enlarge / PhotoCraft v0.20.2).
+/// Imagens com largura e altura menores ou iguais aos limites não sofrem upscaling destrutivo em lotes.
+/// EN: Proportionally fits the image if it exceeds limits (Don't Enlarge / PhotoCraft v0.20.2).
+/// Images with dimensions within or smaller than limits are never destructively upscaled in batches.
+// AI: @llm-func fit_image_dont_enlarge @llm-context PhotoCraft atn-fit-image
+pub fn fit_image_dont_enlarge(img: &DynamicImage, max_width: u32, max_height: u32) -> DynamicImage {
+    let (w, h) = (img.width(), img.height());
+    if max_width == 0 || max_height == 0 || (w <= max_width && h <= max_height) {
+        return img.clone();
+    }
+    let ratio_w = max_width as f64 / w as f64;
+    let ratio_h = max_height as f64 / h as f64;
+    let ratio = ratio_w.min(ratio_h);
+    let target_w = ((w as f64 * ratio).round() as u32).max(1);
+    let target_h = ((h as f64 * ratio).round() as u32).max(1);
+    img.resize(target_w, target_h, image::imageops::FilterType::Lanczos3)
+}
+
+/// PT: Balanceamento tonal automático Preto & Branco (PhotoCraft feat/9269-black-white-auto).
+/// Otimizado para retratos do Svitanok: 40% Vermelho + 50% Verde/Amarelo + 10% Azul com preservação de contraste.
+/// EN: Automatic Black & White tonal mix (PhotoCraft feat/9269-black-white-auto).
+/// Optimized for Svitanok portraits: 40% Red + 50% Green/Yellow + 10% Blue with contrast preservation.
+// AI: @llm-func auto_black_white_mix @llm-context PhotoCraft portrait B&W conversion
+pub fn auto_black_white_mix(img: &DynamicImage) -> DynamicImage {
+    let rgb = img.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    let mut out = ImageBuffer::new(w, h);
+    for (x, y, pixel) in rgb.enumerate_pixels() {
+        let r = pixel[0] as f32;
+        let g = pixel[1] as f32;
+        let b = pixel[2] as f32;
+        let luma = (0.40 * r + 0.50 * g + 0.10 * b).clamp(0.0, 255.0) as u8;
+        out.put_pixel(x, y, Rgb([luma, luma, luma]));
+    }
+    DynamicImage::ImageRgb8(out)
 }
 
 #[cfg(feature = "artcraft-linked")]
@@ -1016,7 +1057,14 @@ pub fn upscale_image_bytes(input_bytes: &[u8], scale: u32) -> Result<Vec<u8>, St
             let out_path = tmp_dir.join(format!("zorya_up_out_{ts}.png"));
 
             if std::fs::write(&in_path, input_bytes).is_ok() {
-                let status = std::process::Command::new(bin)
+                #[allow(unused_mut)]
+                let mut cmd = std::process::Command::new(bin);
+                #[cfg(target_os = "windows")]
+                {
+                    use std::os::windows::process::CommandExt;
+                    cmd.creation_flags(0x08000000);
+                }
+                let status = cmd
                     .arg("-i")
                     .arg(&in_path)
                     .arg("-o")
@@ -1057,4 +1105,58 @@ pub fn upscale_image_bytes(input_bytes: &[u8], scale: u32) -> Result<Vec<u8>, St
         .map_err(|e| format!("Falha ao codificar PNG 4K: {e}"))?;
 
     Ok(out_buf.into_inner())
+}
+
+// ============================================================================
+// 10. ARTCRAFT UPSTREAM STATUS & CAPABILITIES RADAR (v0.20.2 COMPLIANCE)
+// ============================================================================
+
+/// PT: Resposta estruturada do status de paridade dos submódulos ArtCraft.
+/// EN: Structured response of ArtCraft submodules upstream parity status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CraftUpstreamStatusResponse {
+    pub status: &'static str,
+    pub photocraft_compat: &'static str,
+    pub lightcraft_compat: &'static str,
+    pub filmcraft_compat: &'static str,
+    pub soundcraft_compat: &'static str,
+    pub wordcraft_compat: &'static str,
+    pub active_capabilities: Vec<&'static str>,
+    pub timestamp_epoch: u64,
+}
+
+/// GET /api/v1/craft/upstream-status
+/// PT: Retorna o status de compatibilidade e capacidades ativas da suíte ArtCraft v0.20.2.
+/// EN: Returns ArtCraft v0.20.2 compatibility status and active capabilities list.
+// AI: @llm-func handle_craft_upstream_status @llm-route GET /api/v1/craft/upstream-status
+pub async fn handle_craft_upstream_status() -> axum::Json<CraftUpstreamStatusResponse> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    axum::Json(CraftUpstreamStatusResponse {
+        status: "synchronized",
+        photocraft_compat: "0.20.2",
+        lightcraft_compat: "0.20.1",
+        filmcraft_compat: "0.20.1",
+        soundcraft_compat: "0.5.0",
+        wordcraft_compat: "0.5.0",
+        active_capabilities: vec![
+            "fit_image_dont_enlarge",
+            "jpeg_size_readout",
+            "auto_black_white_mix",
+            "dynamic_arrow_heads",
+            "laplacian_variance_roi_guard",
+            "rayon_parallel_culling",
+            "rvc_training_gtx1650",
+            "kokoro_rvc_audiobook_studio",
+            "xtts_multi_synthesis",
+            "ebu_r128_mastering",
+            "realesrgan_4k_upscale",
+            "windows_console_suppression",
+            "sovereign_mcp_sse",
+        ],
+        timestamp_epoch: now,
+    })
 }

@@ -30,6 +30,7 @@ pub struct ColorspaceResponse {
     pub target_profile: ColorProfile,
     pub gamut_clipped_pixels: usize,
     pub sample_converted_channels: Vec<f64>,
+    pub estimated_output_bytes: usize,
 }
 
 // PT: Remove a curva gamma para obter RGB linear [0.0, 1.0].
@@ -167,10 +168,13 @@ pub async fn handle_colorspace(
         (usize::from(is_clipped), out)
     };
 
-    if let Ok(raw) = std::fs::read(&req.input_path) {
+    let estimated_bytes = if let Ok(raw) = std::fs::read(&req.input_path) {
         let _ = std::fs::write(&req.output_path, &raw);
         clipped += raw.len() / 1024;
-    }
+        raw.len()
+    } else {
+        sample.len() * std::mem::size_of::<f64>()
+    };
 
     Ok(Json(ColorspaceResponse {
         output_path: req.output_path,
@@ -178,5 +182,6 @@ pub async fn handle_colorspace(
         target_profile: req.target_profile,
         gamut_clipped_pixels: clipped,
         sample_converted_channels: sample,
+        estimated_output_bytes: estimated_bytes,
     }))
 }

@@ -185,7 +185,10 @@ pub async fn bind_resilient_listener(addr: SocketAddr) -> anyhow::Result<TcpList
                 );
                 #[cfg(target_os = "windows")]
                 {
-                    let _ = std::process::Command::new("powershell")
+                    use std::os::windows::process::CommandExt;
+                    let mut cmd = std::process::Command::new("powershell");
+                    cmd.creation_flags(0x08000000);
+                    let _ = cmd
                         .args([
                             "-NoProfile",
                             "-Command",

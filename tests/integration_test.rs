@@ -125,3 +125,111 @@ fn test_openrouter_standby_and_auto_activate() {
     cfg.credentials.auto_activate_openrouter();
     assert!(cfg.credentials.openrouter_enabled);
 }
+
+#[test]
+fn test_photocraft_fit_image_dont_enlarge() {
+    use image::{DynamicImage, ImageBuffer, Rgb};
+    use zorya::craft::fit_image_dont_enlarge;
+
+    let small_img =
+        DynamicImage::ImageRgb8(ImageBuffer::from_pixel(100, 100, Rgb([200, 150, 100])));
+    let fitted_small = fit_image_dont_enlarge(&small_img, 400, 400);
+    // Don't Enlarge: imagem menor deve preservar as dimensões originais exatas
+    assert_eq!(fitted_small.width(), 100);
+    assert_eq!(fitted_small.height(), 100);
+
+    let large_img =
+        DynamicImage::ImageRgb8(ImageBuffer::from_pixel(1000, 500, Rgb([50, 100, 150])));
+    let fitted_large = fit_image_dont_enlarge(&large_img, 400, 400);
+    // Imagem maior deve ser reduzida proporcionalmente
+    assert_eq!(fitted_large.width(), 400);
+    assert_eq!(fitted_large.height(), 200);
+}
+
+#[test]
+fn test_photocraft_auto_black_white_mix() {
+    use image::{DynamicImage, ImageBuffer, Rgb};
+    use zorya::craft::auto_black_white_mix;
+
+    let test_img = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(64, 64, Rgb([200, 100, 50])));
+    let bw = auto_black_white_mix(&test_img);
+    assert_eq!(bw.width(), 64);
+    assert_eq!(bw.height(), 64);
+    let px = bw.to_rgb8().get_pixel(0, 0).0;
+    // R, G, B devem ser iguais (monocromático)
+    assert_eq!(px[0], px[1]);
+    assert_eq!(px[1], px[2]);
+}
+
+#[test]
+fn test_lightcraft_laplacian_variance_roi_guard() {
+    use zorya::craft::culling::laplacian_variance;
+
+    let gray = vec![128_u8; 100 * 100];
+    // ROI com borda recortada ultrapassando limites da imagem deve retornar 0.0 sem panic
+    let out_of_bounds_var = laplacian_variance(&gray, 100, 100, (80, 80, 50, 50));
+    assert_eq!(out_of_bounds_var, 0.0);
+
+    // ROI com overflow de usize
+    let overflow_var = laplacian_variance(&gray, 100, 100, (usize::MAX - 10, 0, 50, 50));
+    assert_eq!(overflow_var, 0.0);
+
+    // ROI válida dentro dos limites
+    let valid_var = laplacian_variance(&gray, 100, 100, (10, 10, 30, 30));
+    assert_eq!(valid_var, 0.0); // buffer constante -> variância zero
+}
+
+#[test]
+fn test_vectorcraft_arrow_heads_parametrization() {
+    use zorya::craft::vector::{render_rich_svg, DiagramEdge, DiagramNode, VectorDiagramRequest};
+
+    let req = VectorDiagramRequest {
+        title: "Fluxo ArtCraft".to_string(),
+        layout: None,
+        mode: Some("normal".to_string()),
+        dark_mode: Some(false),
+        nodes: vec![
+            DiagramNode {
+                id: "a".to_string(),
+                label: "Origem".to_string(),
+                subtitle: None,
+            },
+            DiagramNode {
+                id: "b".to_string(),
+                label: "Destino".to_string(),
+                subtitle: None,
+            },
+        ],
+        edges: vec![DiagramEdge {
+            from: "a".to_string(),
+            to: "b".to_string(),
+            relation: Some("conecta".to_string()),
+            arrow_width: Some(12.0),
+            arrow_length: Some(14.0),
+        }],
+    };
+
+    let (svg, w, h) = render_rich_svg(&req);
+    assert!(w > 0 && h > 0);
+    assert!(svg.contains("markerWidth=\"12\""));
+    assert!(svg.contains("markerHeight=\"14\""));
+}
+
+#[test]
+fn test_craft_upstream_status_response() {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let resp = rt.block_on(zorya::craft::handle_craft_upstream_status());
+    assert_eq!(resp.status, "synchronized");
+    assert_eq!(resp.photocraft_compat, "0.20.2");
+    assert_eq!(resp.lightcraft_compat, "0.20.1");
+    assert_eq!(resp.filmcraft_compat, "0.20.1");
+    assert_eq!(resp.soundcraft_compat, "0.5.0");
+    assert_eq!(resp.wordcraft_compat, "0.5.0");
+    assert!(resp.active_capabilities.contains(&"fit_image_dont_enlarge"));
+    assert!(resp.active_capabilities.contains(&"jpeg_size_readout"));
+    assert!(resp.active_capabilities.contains(&"auto_black_white_mix"));
+    assert!(resp.active_capabilities.contains(&"dynamic_arrow_heads"));
+    assert!(resp
+        .active_capabilities
+        .contains(&"laplacian_variance_roi_guard"));
+}

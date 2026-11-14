@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Assinatura Automática Authenticode Não-Bloqueante (Headless-Safe) para o Projeto Zorya.
 #>
@@ -76,6 +76,14 @@ $Targets = @(
     "C:\Zorya\zorya.exe",
     "C:\ProgramData\Zorya\zorya.exe"
 )
+
+# Assina também binários de teste em target\debug\deps para permitir execução sob o Smart App Control
+$TestBins = Get-ChildItem -Path (Join-Path $RepoRoot "target\debug\deps\*.exe") -ErrorAction SilentlyContinue
+if ($TestBins) {
+    foreach ($TB in $TestBins) {
+        $Targets += $TB.FullName
+    }
+}
 
 foreach ($Bin in $Targets) {
     if (Test-Path $Bin) {

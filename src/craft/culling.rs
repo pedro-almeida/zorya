@@ -4,6 +4,7 @@
 // AI: @llm-Selection deterministic-dsp-no-ai-hallucination
 
 use axum::{extract::Json, http::StatusCode};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -36,8 +37,8 @@ pub struct CullResponse {
     pub photos: Vec<PhotoScore>,
 }
 
-// PT: Calcula a variância do operador Laplaciano 3x3 sobre um buffer em escala de cinza.
-// EN: Computes the 3x3 Laplacian operator variance over a grayscale buffer.
+// PT: Calcula a variância do operador Laplaciano 3x3 sobre um buffer em escala de cinza com proteção de ROI.
+// EN: Computes the 3x3 Laplacian operator variance over a grayscale buffer with ROI bounds protection.
 // AI: @llm-func laplacian_variance
 pub fn laplacian_variance(
     gray: &[u8],
@@ -46,7 +47,17 @@ pub fn laplacian_variance(
     roi: (usize, usize, usize, usize),
 ) -> f64 {
     let (rx, ry, rw, rh) = roi;
-    if rw < 3 || rh < 3 || rx + rw > width || ry + rh > height {
+    if width < 3 || height < 3 || rw < 3 || rh < 3 {
+        return 0.0;
+    }
+    if rx >= width
+        || ry >= height
+        || rx.saturating_add(rw) > width
+        || ry.saturating_add(rh) > height
+    {
+        return 0.0;
+    }
+    if gray.len() < width.saturating_mul(height) {
         return 0.0;
     }
     let mut sum = 0.0_f64;
@@ -84,7 +95,17 @@ pub fn estimate_eye_open_ratio(
     roi: (usize, usize, usize, usize),
 ) -> f64 {
     let (rx, ry, rw, rh) = roi;
-    if rw < 4 || rh < 4 || rx + rw > width || ry + rh > height {
+    if width < 4 || height < 4 || rw < 4 || rh < 4 {
+        return 0.30;
+    }
+    if rx >= width
+        || ry >= height
+        || rx.saturating_add(rw) > width
+        || ry.saturating_add(rh) > height
+    {
+        return 0.30;
+    }
+    if gray.len() < width.saturating_mul(height) {
         return 0.30;
     }
     let mut vert_energy = 0.0_f64;
@@ -131,45 +152,59 @@ pub fn compute_phash64(gray: &[u8], width: usize, height: usize) -> u64 {
 pub async fn handle_cull(
     Json(req): Json<CullRequest>,
 ) -> Result<Json<CullResponse>, (StatusCode, String)> {
+    tokio::task::spawn_blocking(move || execute_cull_pipeline(req))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Culling worker failed: {e}"),
+            )
+        })?
+}
+
+pub fn execute_cull_pipeline(req: CullRequest) -> Result<Json<CullResponse>, (StatusCode, String)> {
     let hamming_thresh = req.similarity_threshold_hamming.unwrap_or(10);
     let min_pupil_var = req.min_pupil_laplacian_var.unwrap_or(120.0);
 
-    let mut raw_scores: Vec<(u64, PhotoScore)> = Vec::with_capacity(req.image_paths.len());
+    // Processamento paralelo via Rayon sem bloquear o runtime assíncrono do Axum
+    let mut raw_scores: Vec<(u64, PhotoScore)> = req
+        .image_paths
+        .par_iter()
+        .map(|path_str| {
+            let p = Path::new(path_str);
+            let bytes = std::fs::read(p).unwrap_or_else(|_| path_str.as_bytes().to_vec());
+            let side = ((bytes.len() as f64).sqrt() as usize).max(64);
+            let mut gray = vec![128_u8; side * side];
+            for (i, b) in bytes.iter().take(side * side).enumerate() {
+                gray[i] = *b;
+            }
 
-    for path_str in &req.image_paths {
-        let p = Path::new(path_str);
-        let bytes = std::fs::read(p).unwrap_or_else(|_| path_str.as_bytes().to_vec());
-        let side = ((bytes.len() as f64).sqrt() as usize).max(64);
-        let mut gray = vec![128_u8; side * side];
-        for (i, b) in bytes.iter().take(side * side).enumerate() {
-            gray[i] = *b;
-        }
+            // Região ocular canônica em retratos: terço superior central
+            let pupil_roi = (side / 4, side / 5, side / 2, side / 4);
+            let full_roi = (0, 0, side, side);
 
-        // Região ocular canônica em retratos: terço superior central
-        let pupil_roi = (side / 4, side / 5, side / 2, side / 4);
-        let full_roi = (0, 0, side, side);
+            let pupil_var = laplacian_variance(&gray, side, side, pupil_roi);
+            let global_var = laplacian_variance(&gray, side, side, full_roi);
+            let ear = estimate_eye_open_ratio(&gray, side, side, pupil_roi);
+            let eyes_closed = ear < 0.18;
+            let phash = compute_phash64(&gray, side, side);
 
-        let pupil_var = laplacian_variance(&gray, side, side, pupil_roi);
-        let global_var = laplacian_variance(&gray, side, side, full_roi);
-        let ear = estimate_eye_open_ratio(&gray, side, side, pupil_roi);
-        let eyes_closed = ear < 0.18;
-        let phash = compute_phash64(&gray, side, side);
-
-        raw_scores.push((
-            phash,
-            PhotoScore {
-                path: path_str.clone(),
-                pupil_sharpness: pupil_var,
-                global_sharpness: global_var,
-                eyes_open_ratio: ear,
-                eyes_closed_detected: eyes_closed,
-                phash_hex: format!("{:016x}", phash),
-                cluster_id: 0,
-                is_best_in_cluster: false,
-                recommendation: String::new(),
-            },
-        ));
-    }
+            (
+                phash,
+                PhotoScore {
+                    path: path_str.clone(),
+                    pupil_sharpness: pupil_var,
+                    global_sharpness: global_var,
+                    eyes_open_ratio: ear,
+                    eyes_closed_detected: eyes_closed,
+                    phash_hex: format!("{:016x}", phash),
+                    cluster_id: 0,
+                    is_best_in_cluster: false,
+                    recommendation: String::new(),
+                },
+            )
+        })
+        .collect();
 
     // Agrupamento por distância de Hamming no pHash
     let mut cluster_anchors: Vec<u64> = Vec::new();

@@ -13,12 +13,16 @@ pub struct DiagramNode {
     pub subtitle: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagramEdge {
     pub from: String,
     pub to: String,
     #[serde(default)]
     pub relation: Option<String>,
+    #[serde(default)]
+    pub arrow_width: Option<f32>,
+    #[serde(default)]
+    pub arrow_length: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -83,6 +87,8 @@ pub fn render_rich_svg(req: &VectorDiagramRequest) -> (String, u32, u32) {
                 from: w[0].id.clone(),
                 to: w[1].id.clone(),
                 relation: None,
+                arrow_width: None,
+                arrow_length: None,
             })
             .collect()
     };
@@ -94,6 +100,21 @@ pub fn render_rich_svg(req: &VectorDiagramRequest) -> (String, u32, u32) {
     } else {
         "#8B5E3C"
     };
+
+    let arrow_w = req
+        .edges
+        .iter()
+        .filter_map(|e| e.arrow_width)
+        .next()
+        .unwrap_or(6.0)
+        .clamp(2.0, 30.0);
+    let arrow_l = req
+        .edges
+        .iter()
+        .filter_map(|e| e.arrow_length)
+        .next()
+        .unwrap_or(6.0)
+        .clamp(2.0, 30.0);
 
     for edge in &effective_edges {
         if let (Some(&(x1, y1)), Some(&(x2, y2))) = (coords.get(&edge.from), coords.get(&edge.to)) {
@@ -187,7 +208,7 @@ pub fn render_rich_svg(req: &VectorDiagramRequest) -> (String, u32, u32) {
     let svg = format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}">
   <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="{arrow_w}" markerHeight="{arrow_l}" orient="auto-start-reverse">
       <path d="M 0 1 L 10 5 L 0 9 z" fill="{stroke_edge}"/>
     </marker>
   </defs>

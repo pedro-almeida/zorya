@@ -324,6 +324,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/craft/design", post(handle_craft_design))
         .route("/api/v1/craft/upscale", post(handle_craft_upscale))
         .route(
+            "/api/v1/craft/upstream-status",
+            get(crate::craft::handle_craft_upstream_status),
+        )
+        .route(
             "/api/v1/social/instagram-ghost",
             get(handle_instagram_ghost),
         )

@@ -257,14 +257,21 @@ pub fn apply_convolution_sharpen(pixels: &mut [f32], width: usize, height: usize
 pub async fn handle_image_denoise(
     axum::Json(req): axum::Json<ClassicalDenoiseRequest>,
 ) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
-    match denoise_image_classical(&req) {
-        Ok(res) => (
+    let res = tokio::task::spawn_blocking(move || denoise_image_classical(&req)).await;
+    match res {
+        Ok(Ok(data)) => (
             axum::http::StatusCode::OK,
-            axum::Json(serde_json::to_value(res).unwrap_or_default()),
+            axum::Json(serde_json::to_value(data).unwrap_or_default()),
         ),
-        Err(err) => (
+        Ok(Err(err)) => (
             axum::http::StatusCode::BAD_REQUEST,
             axum::Json(serde_json::json!({ "error": err.to_string(), "ai_neural_used": false })),
+        ),
+        Err(join_err) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(
+                serde_json::json!({ "error": format!("Denoise task panicked: {join_err}"), "ai_neural_used": false }),
+            ),
         ),
     }
 }
