@@ -69,6 +69,10 @@ def select_best_reference_clips(wavs_dir: Path, limit: int = 15) -> List[Path]:
     import soundfile as sf
 
     candidates = []
+    ref_clean = wavs_dir.parent / "reference_clean.wav"
+    if ref_clean.exists():
+        candidates.append((999.0, ref_clean))
+
     for clip in sorted(wavs_dir.glob("*.wav")):
         try:
             data, sr = sf.read(str(clip), dtype="float32")
@@ -88,35 +92,85 @@ def select_best_reference_clips(wavs_dir: Path, limit: int = 15) -> List[Path]:
     return [c[1] for c in candidates[:limit]]
 
 
-def synthesize_kokoro(
+def synthesize_edge_tts_fallback(
     chunks: List[str], base_voice: str, speed: float
 ) -> AudioSegment:
-    import torch
-    from kokoro import KPipeline
+    """Fallback de alta confiabilidade via edge-tts (Francisca / Antonio Neural) caso Kokoro nao esteja disponivel."""
+    edge_voice = (
+        "pt-BR-FranciscaNeural"
+        if base_voice == "pf_dora"
+        else "pt-BR-AntonioNeural"
+    )
+    rate_pct = int(round((speed - 1.0) * 100))
+    rate_str = f"{rate_pct:+d}%"
+    print(f"STAGE:edge_tts_init:{edge_voice}:{rate_str}", flush=True)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    voice = base_voice if base_voice in ("pf_dora", "pm_alex", "pm_santa") else "pm_alex"
-    print(f"STAGE:kokoro_init:{device}:{voice}", flush=True)
-
-    pipeline = KPipeline(lang_code="p", device=device)
     final_audio = AudioSegment.empty()
-    pause = AudioSegment.silent(duration=350)
+    pause = AudioSegment.silent(duration=320)
+    tmp_dir = Path("datasets/voices/_tmp_edge")
+    tmp_dir.mkdir(parents=True, exist_ok=True)
 
     total = len(chunks)
     for idx, chunk in enumerate(chunks, start=1):
-        pct = int((idx / max(total, 1)) * 75)
+        pct = int((idx / max(total, 1)) * 88)
         print(f"PROGRESS:{idx}/{total} ({pct}%)", flush=True)
-        parts: List[np.ndarray] = []
-        for _, _, audio in pipeline(chunk, voice=voice, speed=speed):
-            if audio is not None and len(audio) > 0:
-                if hasattr(audio, "detach"):
-                    audio = audio.detach().cpu().numpy()
-                parts.append(np.asarray(audio, dtype=np.float32))
-        if parts:
-            combined = np.concatenate(parts)
-            final_audio += float32_to_audio_segment(combined, 24000) + pause
+        out_mp3 = tmp_dir / f"edge_{os.getpid()}_{idx:04d}.mp3"
+        cmd = [
+            sys.executable,
+            "-m",
+            "edge_tts",
+            "--voice",
+            edge_voice,
+            f"--rate={rate_str}",
+            "--text",
+            chunk,
+            "--write-media",
+            str(out_mp3),
+        ]
+        subprocess.run(cmd, capture_output=True, text=True)
+        if out_mp3.exists():
+            final_audio += AudioSegment.from_file(str(out_mp3)) + pause
+            out_mp3.unlink(missing_ok=True)
 
     return final_audio
+
+
+def synthesize_kokoro(
+    chunks: List[str], base_voice: str, speed: float
+) -> AudioSegment:
+    try:
+        import torch
+        from kokoro import KPipeline
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        voice = base_voice if base_voice in ("pf_dora", "pm_alex", "pm_santa") else "pm_alex"
+        print(f"STAGE:kokoro_init:{device}:{voice}", flush=True)
+
+        pipeline = KPipeline(lang_code="p", device=device)
+        final_audio = AudioSegment.empty()
+        pause = AudioSegment.silent(duration=350)
+
+        total = len(chunks)
+        for idx, chunk in enumerate(chunks, start=1):
+            pct = int((idx / max(total, 1)) * 75)
+            print(f"PROGRESS:{idx}/{total} ({pct}%)", flush=True)
+            parts: List[np.ndarray] = []
+            for _, _, audio in pipeline(chunk, voice=voice, speed=speed):
+                if audio is not None and len(audio) > 0:
+                    if hasattr(audio, "detach"):
+                        audio = audio.detach().cpu().numpy()
+                    parts.append(np.asarray(audio, dtype=np.float32))
+            if parts:
+                combined = np.concatenate(parts)
+                final_audio += float32_to_audio_segment(combined, 24000) + pause
+
+        return final_audio
+    except Exception as e:
+        print(
+            f"[AVISO] Kokoro indisponivel ou falhou ({e}). Acionando fallback edge-tts...",
+            flush=True,
+        )
+        return synthesize_edge_tts_fallback(chunks, base_voice, speed)
 
 
 def synthesize_xtts_multi(

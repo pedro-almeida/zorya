@@ -119,9 +119,11 @@ def slice_corpus_vad(raw_files: List[Path], wavs_dir: Path) -> int:
                 "40000",
                 "-af",
                 (
-                    "highpass=f=80,lowpass=f=12000,"
-                    "silenceremove=start_periods=1:start_silence=0.3:start_threshold=-40dB:"
-                    "stop_periods=-1:stop_duration=0.4:stop_threshold=-40dB"
+                    "highpass=f=85,lowpass=f=11500,"
+                    "afftdn=nf=-25,"
+                    "dynaudnorm=f=150:g=15,"
+                    "silenceremove=start_periods=1:start_silence=0.25:start_threshold=-38dB:"
+                    "stop_periods=-1:stop_duration=0.35:stop_threshold=-38dB"
                 ),
                 str(norm_wav),
             ],
@@ -145,6 +147,34 @@ def slice_corpus_vad(raw_files: List[Path], wavs_dir: Path) -> int:
             count += 1
             out_clip = wavs_dir / f"seg_{count:05d}.wav"
             sf.write(str(out_clip), seg, sr, subtype="PCM_16")
+
+    all_clips = sorted(wavs_dir.glob("*.wav"))
+    if all_clips:
+        ref_out = wavs_dir.parent / "reference_clean.wav"
+        top_clips = all_clips[: min(3, len(all_clips))]
+        concat_list = wavs_dir.parent / "_concat_ref.txt"
+        concat_list.write_text(
+            "\n".join([f"file '{c.resolve().as_posix()}'" for c in top_clips]), encoding="utf-8"
+        )
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_list),
+                "-ar",
+                "24000",
+                "-ac",
+                "1",
+                str(ref_out),
+            ],
+            capture_output=True,
+        )
+        concat_list.unlink(missing_ok=True)
 
     return len(list(wavs_dir.glob("*.wav")))
 
